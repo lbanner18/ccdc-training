@@ -147,8 +147,16 @@ write_artifact() {
     return 0
   fi
   mkdir -p "$(dirname -- "$path")" 2>/dev/null || true
-  printf '%s\n' "$content" >"$path" || { ccdc_warn "cannot write $path"; return 1; }
-  chmod "$mode_bits" "$path" 2>/dev/null || true
+  # Write-then-rename, never truncate in place. tick.sh is being executed by a
+  # running bash process (layer 1's service); bash reads a script incrementally
+  # by file offset, so overwriting one in place makes the running shell resume
+  # mid-file and misparse whatever now sits at that byte. A rename swaps the
+  # directory entry and leaves the running process on its original inode, which
+  # it finishes cleanly before the next loop picks up the new file.
+  local staged="${path}.new.$$"
+  printf '%s\n' "$content" >"$staged" || { ccdc_warn "cannot write $path"; return 1; }
+  chmod "$mode_bits" "$staged" 2>/dev/null || true
+  mv -f "$staged" "$path" || { ccdc_warn "cannot install $path"; rm -f "$staged"; return 1; }
   created="$created $path"
   glog "wrote kind=$kind path=$path"
 }
@@ -219,7 +227,12 @@ expected_artifacts() {
 record_manifest() {
   ccdc_is_dry_run && return 0
   local kind path old new tmp
-  tmp="${manifest}.next"
+  # Per-process temp name. A fixed "${manifest}.next" is shared state: an
+  # --install racing a scheduled tick had both processes truncating and
+  # appending to the same file, and the manifest that survived was missing five
+  # entries. Found on the lab VM; a sandbox with no schedulers running cannot
+  # produce it.
+  tmp="${manifest}.next.$$"
   : >"$tmp" || { ccdc_warn "cannot write manifest"; return 0; }
   while IFS='|' read -r kind path; do
     [ -n "${path:-}" ] || continue
@@ -242,26 +255,34 @@ EOF
 
 # One tick at a time. Two schedulers firing in the same second would otherwise
 # both decide a layer is missing and both write it.
+# acquire_lock [seconds-to-wait]
+#
+# A tick takes it with no wait and simply skips if another tick holds it.
+# --install and --uninstall wait for it instead: they are operator-initiated
+# and authoritative, and must not quietly do half their work alongside a
+# reconcile that is writing the same files.
 acquire_lock() {
   ccdc_is_dry_run && return 0
-  if mkdir "$lock_dir" 2>/dev/null; then
-    trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
-    return 0
-  fi
-  # A tick that died holding the lock must not wedge the guardian permanently.
-  local stamp now age
-  stamp=$(stat -c '%Y' "$lock_dir" 2>/dev/null || stat -f '%m' "$lock_dir" 2>/dev/null || printf '0')
-  now=$(date +%s)
-  age=$((now - stamp))
-  if [ "$age" -gt $((interval * 5)) ]; then
-    glog "breaking stale tick lock age=${age}s"
-    rmdir "$lock_dir" 2>/dev/null || true
+  local wait_for=${1:-0} deadline stamp now age
+  deadline=$(( $(date +%s) + wait_for ))
+  while :; do
     if mkdir "$lock_dir" 2>/dev/null; then
       trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
       return 0
     fi
-  fi
-  glog "tick_skipped reason=another_tick_running"
+    # A tick that died holding the lock must not wedge the guardian permanently.
+    stamp=$(stat -c '%Y' "$lock_dir" 2>/dev/null || stat -f '%m' "$lock_dir" 2>/dev/null || printf '0')
+    now=$(date +%s)
+    age=$((now - stamp))
+    if [ "$age" -gt $((interval * 5)) ]; then
+      glog "breaking stale tick lock age=${age}s"
+      rmdir "$lock_dir" 2>/dev/null || true
+      continue
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || break
+    sleep 1
+  done
+  glog "lock_unavailable another_pass_is_running"
   return 1
 }
 
@@ -271,7 +292,12 @@ copy_payload_file() {
   local src=$1 dest=$2
   [ -f "$src" ] || { ccdc_warn "payload source missing: $src"; return 0; }
   [ "$src" = "$dest" ] && return 0
-  cp -f "$src" "$dest" 2>/dev/null || { ccdc_warn "cannot copy $src to $dest"; return 0; }
+  # Same write-then-rename rule as write_artifact: watchdog.sh is running under
+  # the watch service while we repair it, and cp truncates in place.
+  local staged="${dest}.new.$$"
+  cp -f "$src" "$staged" 2>/dev/null || { ccdc_warn "cannot copy $src to $dest"; return 0; }
+  chmod --reference="$src" "$staged" 2>/dev/null || chmod 0700 "$staged" 2>/dev/null || true
+  mv -f "$staged" "$dest" 2>/dev/null || { ccdc_warn "cannot install $dest"; rm -f "$staged"; return 0; }
   created="$created $dest"
 }
 
@@ -591,6 +617,8 @@ do_install() {
   [ "$apply" -eq 1 ] && ccdc_require_root
   [ -n "$config" ] || ccdc_die "--install needs --config FILE: the layers run unattended and cannot guess it"
   [ -f "$SCRIPT_DIR/watchdog.sh" ] || ccdc_die "watchdog.sh not found next to guardian.sh"
+  acquire_lock $((interval * 2)) \
+    || ccdc_warn "proceeding without the tick lock; a reconcile pass may be running"
 
   # A leftover sentinel from a previous uninstall would make every layer remove
   # itself on its first tick.
@@ -705,6 +733,8 @@ do_status() {
 
 do_uninstall() {
   [ "$apply" -eq 1 ] && ccdc_require_root
+  acquire_lock $((interval * 2)) \
+    || ccdc_warn "proceeding without the tick lock; the sentinel still stops any late rebuild"
 
   # Sentinel first, teardown second. A tick that fires in the middle of the
   # teardown must find the sentinel already there, or it will helpfully rebuild

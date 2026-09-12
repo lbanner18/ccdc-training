@@ -216,7 +216,8 @@ what keeps even a hidden guardian legible to its owner.
 | `guardian.sh` file reconciliation (install → delete layers → tick rebuilds → tamper → quarantine+repair → sentinel → uninstall leaves zero artifacts) | run against a sandbox with `/etc` redirected and `systemctl` stubbed; all passed |
 | Generated systemd units | validated by the real `systemd-analyze verify` (4/4 clean) |
 | `guardian.sh` degradation (no systemd → cron-only; no systemd *and* no cron.d → refuses) | run, warns correctly |
-| `guardian.sh` against real systemd units as root (start/enable/restart, survival under kill) | **not run here** — Phase 4 of the simulation runbook, on the lab VM |
+| `guardian.sh` against real systemd units as root | **run on the lab VM 2026-09-11** via `redteam/drill.sh` — 34/37 assertions passed; the 3 failures are analysed below and all three are now fixed |
+| Full automated drill (plant → detect → eradicate → 5 guardian attacks → uninstall) | run end to end on the lab VM as root; VM reverted to snapshot afterwards |
 | `hunt.sh` extended sweep | run read-only, new section emits correctly |
 | `hunt.sh` / `recon.sh` full runs | exercised previously against the lab VM |
 | `fw.sh` dead man's switch | two real lockout tests passed (prior session) |
@@ -227,6 +228,35 @@ The mutating-path tests belong on the lab VM — real root, real auditd, real
 systemd — which is also the Sunday practice plan. That is the
 right place to prove deploy/trip/recover end to end, not a Linux workstation
 without root.
+
+### What the first real VM run found (2026-09-11)
+
+`redteam/drill.sh` ran the whole loop as root against the lab VM. 34 of 37
+assertions passed on the first attempt, including all five guardian attacks.
+The three failures are the argument for running it:
+
+1. **A manifest race in `guardian.sh` (real bug, fixed).** `--install` did not
+   take the tick lock, and `record_manifest` staged through a fixed
+   `${manifest}.next`. A scheduled tick fired inside the install window, both
+   processes truncated and appended to the same temp file, and the surviving
+   manifest was missing its five payload entries — i.e. the file you rely on to
+   tell your own footholds from the red team's was silently wrong. It
+   self-healed on the next tick, which is worse, not better: a corruption that
+   repairs itself is one you never notice. Fixed with per-process temp names
+   and a lock on install/uninstall. **A sandbox cannot produce this** — nothing
+   else was running.
+2. **A keyword-only blind spot in `hunt.sh` (real bug, fixed).** The per-user
+   rc-file check reported only lines matching `curl|wget|nc |base64|eval|…`, so
+   the planted `.bashrc` hook — which contains none of those — was invisible,
+   and so would `PATH=/tmp/evil:$PATH` or `. ~/.cache/x` be. It now also
+   reports any rc file modified in the last 7 days with its tail, because an
+   attacker's edit has a fresh mtime whatever it says.
+3. **A bug in the drill harness itself (fixed).** `/dev/shm/.rt` was reported
+   MISSED; `hunt.sh` had in fact caught it. Phases 0–2 complete in about four
+   seconds, and the harness selected evidence directories with
+   `find -newermt`, which is strictly-newer, so same-second output fell out of
+   the blob being scored. A test that lies about the tool is worse than no
+   test: the harness now records each directory by name as it is produced.
 
 ---
 

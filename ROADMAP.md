@@ -67,10 +67,12 @@
   Recorded here because the pattern will recur: resilient defensive tooling and
   malware look identical to a classifier, and the operator's approval is the
   thing that separates them.
-- **Nothing about guardian.sh's mutating paths has run as root yet.** Every
-  test so far redirected `/etc` into a sandbox and stubbed `systemctl`. Until
-  Phase 4 of `playbooks/simulation-runbook.md` runs on the lab VM, "the layers
-  rebuild each other" is proven for the *files* and unproven for the *units*.
+- ~~**guardian.sh's mutating paths have never run as root**~~ — **done
+  2026-09-11.** `redteam/drill.sh` ran the full loop on the lab VM: 34/37
+  assertions passed, all five guardian attacks included. The three failures
+  were a manifest race in `guardian.sh`, a keyword-only blind spot in
+  `hunt.sh`'s rc-file check, and a bug in the harness itself; all three are
+  fixed. See the GUIDE for the analysis.
 
 ## Decisions with deadlines
 
