@@ -1,0 +1,12 @@
+# Local box configurations and evidence are never committed.
+config/*.env
+!config/example.env
+evidence/
+backups/
+*.log
+
+# Never commit anything box-specific, even in a private repo:
+# it becomes public on competition day.
+*.env
+!config/example.env
+evidence/
