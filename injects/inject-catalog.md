@@ -39,4 +39,18 @@ Two distinct styles show up, and they read differently:
   for you. Prefer length and rotation requirements over aggressive lockout, and
   say why in the memo.
 - **Cite the standard.** Password Policy explicitly asks what modern standard
-  you based the policy on. NIST SP 800-63B is the citable answer.
+  you based the policy on. The citable answer is NIST SP 800-63B-4
+  (https://csrc.nist.gov/pubs/sp/800/63/b/4/final) — note the -4 revision, and
+  note that it recommends rate limiting rather than hard lockout, which is what
+  makes the trap above defensible in the memo rather than just convenient.
+
+## Drafts exist for most of these
+
+Six of the injects above are pre-written in [`responses/`](responses/): login
+banner, SSH access, incident response procedure, password policy, endpoint
+protection, and the perimeter assessment. Each is about a page, in the memo
+format, with its source cited inline and its failure mode called out.
+
+Still unwritten, and both need a decision rather than a draft: the **VPN
+Options** video, and the **unnecessary software audit**, which is a table
+generator more than a memo.

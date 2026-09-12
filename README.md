@@ -37,6 +37,7 @@ linux/                    Bash tools for Linux boxes
 windows/                  PowerShell first-pass tools
 splunk/                   starter searches and field notes
 injects/                  memo and incident-report templates
+injects/responses/        pre-written drafts for the known injects
 playbooks/                printable competition checklists
 ```
 
@@ -46,6 +47,13 @@ The scripts are deliberately conservative and are not a substitute for the
 team packet. The packet decides which users, ports, IPs, and services are
 scored. A setting that is safe on the Ubuntu lab VM can still be wrong for the
 competition image.
+
+Injects are **half the score** — the tryout page says points are split evenly
+between the defense competition and the injects. Six drafts are pre-written in
+[`injects/responses/`](injects/responses/). Read
+[`playbooks/competition-rules.md`](playbooks/competition-rules.md) for the
+cited rules, including the one that governs when this repository has to be
+public.
 
 See [`ROADMAP.md`](ROADMAP.md) for the lab sequence and the remaining Windows
 and competition-day work. The PowerShell files are first-pass drafts and have

@@ -11,6 +11,11 @@
 - First-pass Windows recon/watchdog PowerShell scripts.
 - Splunk starter searches for the event IDs in the team notes.
 - Inject memo, incident report, timed drill, and first-15-minutes playbook.
+- Verified fw.sh dead man's switch with two real lockout tests.
+- Red-team persistence sim (`redteam/plant.sh`) and the hunt/recon fixes it
+  forced.
+- Six pre-written inject responses with cited sources (`injects/responses/`).
+- Cited rules research (`playbooks/competition-rules.md`).
 
 ## Next lab session
 
@@ -46,6 +51,18 @@
 - Add Windows event-forwarding validation and a small Splunk dashboard.
 - Reconcile these scripts against the team's current internal/public toolkit
   before submitting fixes upstream.
+
+## Decisions with deadlines
+
+- **Publish this repository publicly, and decide when.** National CCDC rule
+  5.6.1 requires team-written tools to have been public for **at least 3 months
+  prior to use** in any CCDC event, declared to officials, and frozen at
+  submission. "Private now, public on competition day" does not satisfy it. The
+  BYU tryout on 2026-09-26 is not obviously bound by this — the regional it
+  feeds is. Working backwards from a spring regional, this repo needs to be
+  public over the winter and frozen before the event. See
+  `playbooks/competition-rules.md` §2.
+- **Sign up for tryouts by 2026-09-24.** Competition is 2026-09-26, 10:00-16:00.
 
 ## Before competition day
 
