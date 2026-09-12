@@ -65,6 +65,7 @@ These are consistent across the Linux tools; a reviewer can assume them.
 | `users.sh` | `--apply` only | Explicit-target account audit and guarded password rotation / lock. Never touches an account not named in config. |
 | `fw.sh` | `--apply` only | Firewall renderer (nft/iptables) with a **dead man's switch**: applies rules, arms a systemd-owned auto-rollback that survives your SSH session dying, and requires `--confirm` to keep the rules. Two real lockout tests passed. |
 | `backup.sh` | `--apply` only | Explicit-path backup, checksum, diff, and guarded restore. |
+| `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. Manifest-tracked, repairs tampered artifacts, disarm sentinel makes `--uninstall` exact. |
 
 `recon.sh` and `hunt.sh` are the first thing you run and are safe to run any
 time. Everything else is dry-run first, `--apply` second, verify third.
@@ -88,6 +89,54 @@ placed where an attacker greps first, and their contents are clearly marked
 fake so a tired operator does not act on them. The manifest lives with the
 evidence, not next to the decoys — so reading one decoy's directory does not
 reveal the others.
+
+### guardian.sh in more detail
+
+The threat model is narrow and specific: the red team has root, has found
+`watchdog.sh`, and kills it so your scored services stay down. The answer is
+redundancy, not stealth.
+
+```
+target   <name>-watch.service    runs watchdog.sh, Restart=always
+layer 1  <name>.service          Restart=always, runs a tick loop
+layer 2  <name>-reconcile.timer  same tick, every interval
+layer 3  /etc/cron.d/<name>      same tick, every ceil(interval/60) min
+```
+
+All three layers run the **identical** reconcile pass (`--tick`), which makes
+sure the watchdog is running and recreates any layer that has gone missing.
+Killing one is pointless; killing two is temporary. Removing all three inside
+one interval works — that is the documented limit, not a bug.
+
+Four design points worth understanding:
+
+1. **The payload is copied.** `--install` puts `guardian.sh`, `watchdog.sh`,
+   `lib/common.sh` and your config in `CCDC_GUARDIAN_DIR`, and the layers run
+   the copies. The defense must not die because someone deleted your home
+   directory, and it must not change under you when you edit the checkout
+   mid-competition.
+2. **The manifest is the point.** Every artifact is recorded with the hash it
+   had when written. That is what lets you tell your own footholds from the red
+   team's at hour six — and it is why hiding your tooling is survivable here.
+3. **Tampering is repaired, not just detected.** An attacker who appends
+   `ExecStartPost=` to your unit has converted your keep-alive into their
+   persistence, so a drifted artifact is rewritten from source. The tampered
+   copy is preserved under `guardian.tampered/` first — it is evidence, and an
+   inject will ask for it. Ticks never re-hash a file they did not write, so a
+   red-team edit cannot launder itself into the "expected" value.
+4. **The disarm sentinel makes removal stick.** `--uninstall` writes the
+   sentinel *first*, then tears down; any tick that fires mid-teardown sees it
+   and removes its own layer instead of helpfully rebuilding everything. Same
+   trick `fw.sh` uses when it deletes the snapshot to disarm a pending
+   rollback. The sentinel is deliberately left behind afterwards; `--install`
+   clears it.
+
+Portability is honest rather than clever: no systemd means layers 1–2 are
+unavailable and cron is the only layer (the watchdog is supervised through a
+pidfile instead); no `/etc/cron.d` **and** no systemd — Alpine/OpenRC — means
+no layer can be built, and it says so and installs nothing rather than
+pretending. Busybox `crond`'s `/etc/crontabs` format and OpenRC supervision are
+not wired up.
 
 ---
 
@@ -134,28 +183,18 @@ keys — the highest-confidence intrusion signal this kit produces.
 
 ---
 
-## What is NOT built, and why: guardian.sh
+## A note on guardian.sh and the classifier
 
-The one requested capability that is **blocked, not done**.
+Authoring `guardian.sh` was refused once by the Claude Code auto-mode safety
+classifier as "unauthorized persistence," and the agent is also barred from
+editing its own permission settings to lift that block. It was written in an
+interactive session instead, where the operator approves each write.
 
-**Goal:** keep `watchdog.sh` alive even against an attacker with root — a
-reconciling keep-alive with three independent layers (a systemd service, a
-systemd timer, and a `cron.d` entry) that each restart the watchdog and rebuild
-the other two, so an attacker must find and remove all three inside one
-interval. Plus a **manifest** so the operator can distinguish their own
-footholds from the red team's, and a **disarm sentinel** so `--uninstall` is
-reliable (each layer self-removes when it sees the disarm marker, the same way
-`fw.sh` disarms its rollback by removing the snapshot).
-
-**Why it is not here:** authoring it was refused by the Claude Code auto-mode
-safety classifier as "unauthorized persistence." That classifier cannot
-distinguish resilient *defensive* tooling on a box you control in a sanctioned
-competition from malware, and it also refuses to let the agent modify its own
-permission settings to lift the block. Enabling it is therefore an **operator
-action**, by design: the operator adds a permission rule (or approves it in an
-interactive session), after which the script can be written to the design
-above. The intended design is recorded in the "Blocked / needs a call" section
-of [`ROADMAP.md`](ROADMAP.md).
+Worth recording because the pattern will recur: a classifier cannot distinguish
+resilient *defensive* tooling on a box you control in a sanctioned competition
+from malware — the two are the same code with different intent. The operator's
+approval is the only thing that separates them, which is the correct place for
+that decision to live.
 
 **Tactical note for the reviewer:** hiding your own tooling is generally
 *discouraged* in team CCDC — it poisons your own detection signal and gets your
@@ -172,6 +211,12 @@ what keeps even a hidden guardian legible to its owner.
 | `canary.sh` syntax | `bash -n` clean |
 | `canary.sh` dry-run deploy / status / check-no-manifest | run, correct output |
 | `canary.sh` mutating paths (deploy --apply, trip detection) | **not run here** — needs a real root + auditd box; do it on the lab VM |
+| `guardian.sh` syntax | `bash -n` clean |
+| `guardian.sh` install/tick/uninstall, all four dry-run modes | run, correct output, writes nothing |
+| `guardian.sh` file reconciliation (install → delete layers → tick rebuilds → tamper → quarantine+repair → sentinel → uninstall leaves zero artifacts) | run against a sandbox with `/etc` redirected and `systemctl` stubbed; all passed |
+| Generated systemd units | validated by the real `systemd-analyze verify` (4/4 clean) |
+| `guardian.sh` degradation (no systemd → cron-only; no systemd *and* no cron.d → refuses) | run, warns correctly |
+| `guardian.sh` against real systemd units as root (start/enable/restart, survival under kill) | **not run here** — Phase 4 of the simulation runbook, on the lab VM |
 | `hunt.sh` extended sweep | run read-only, new section emits correctly |
 | `hunt.sh` / `recon.sh` full runs | exercised previously against the lab VM |
 | `fw.sh` dead man's switch | two real lockout tests passed (prior session) |

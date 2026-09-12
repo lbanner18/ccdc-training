@@ -19,6 +19,10 @@
 - Canary/tripwire detection (`linux/canary.sh`): decoy files + auditd watches,
   read-only `--check`, manifest-tracked so removal is exact.
 - Printable competition-day playbook (`playbooks/competition-day-playbook.md`).
+- Sunday simulation runbook (`playbooks/simulation-runbook.md`): the timed
+  plant → detect → eradicate → guardian-survival drill.
+- Reconciling watchdog keep-alive (`linux/guardian.sh`): three layers that
+  rebuild each other, manifest-tracked, tamper-repairing, disarm sentinel.
 
 ## Next lab session
 
@@ -57,16 +61,16 @@
 
 ## Blocked / needs a call
 
-- **guardian.sh (keep the watchdog alive against a root-level attacker).** The
-  design is a reconciling keep-alive: three independent layers (systemd
-  service, systemd timer, cron.d) that restart the watchdog and rebuild each
-  other, with a manifest so you can tell your own footholds from the red
-  team's and a disarm sentinel so removal is reliable. Authoring it was blocked
-  by the environment's safety classifier as "unauthorized persistence" — it
-  cannot distinguish resilient defensive tooling from malware. Needs the
-  operator to explicitly allow it (a Bash permission rule) before it can be
-  written. The intended design is recorded in this section; a local stub at
-  `linux/guardian.sh` (untracked) holds the header notes.
+- ~~**guardian.sh**~~ — **built 2026-09-11.** Authoring it was refused once by
+  the agent's auto-mode safety classifier as "unauthorized persistence"; it was
+  written in an interactive session where the operator approves each write.
+  Recorded here because the pattern will recur: resilient defensive tooling and
+  malware look identical to a classifier, and the operator's approval is the
+  thing that separates them.
+- **Nothing about guardian.sh's mutating paths has run as root yet.** Every
+  test so far redirected `/etc` into a sandbox and stubbed `systemctl`. Until
+  Phase 4 of `playbooks/simulation-runbook.md` runs on the lab VM, "the layers
+  rebuild each other" is proven for the *files* and unproven for the *units*.
 
 ## Decisions with deadlines
 

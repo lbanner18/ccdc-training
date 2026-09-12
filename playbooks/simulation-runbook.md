@@ -118,10 +118,13 @@ incident-report inject, half-done).
 
 ---
 
-## Phase 4 — watchdog survival (once guardian.sh exists)
+## Phase 4 — watchdog survival
 
-Skip until `guardian.sh` is built (it is currently blocked — see ROADMAP). Then
-this is the drill that proves resilience against a root-level attacker.
+`guardian.sh` is built. This is the drill that proves resilience against a
+root-level attacker — and it is also the **first time its mutating paths run as
+root**: everything tested so far ran against a sandbox with `/etc` redirected
+and `systemctl` stubbed, so the file reconciliation is proven and the unit
+handling is not. Expect to find something here.
 
 ```
 [ ] sudo ./linux/guardian.sh --config /tmp/ccdc-linux.env --install --apply
@@ -132,16 +135,26 @@ this is the drill that proves resilience against a root-level attacker.
     -> a tick (timer or cron) restarts it within the interval.
 [ ] ATTACK 3 — delete one layer's unit file, then delete a second:
     -> the surviving layer rebuilds the deleted ones. Confirm all three back.
-[ ] ATTACK 4 — remove BOTH schedulers in the same interval:
+[ ] ATTACK 4 — BACKDOOR a layer instead of deleting it: append
+    ExecStartPost=/bin/sh -c 'id > /tmp/pwned' to <name>.service
+    -> next tick quarantines a copy under $CCDC_EVIDENCE_DIR/guardian.tampered/
+       and rewrites the unit from source. Confirm the line is gone, the copy
+       kept, and --status stopped reporting MODIFIED.
+[ ] ATTACK 5 — remove BOTH schedulers in the same interval:
     -> only now does it stay down. This is the documented limit, not a bug.
 [ ] CLEAN: sudo ./linux/guardian.sh --config ... --uninstall --apply
     -> the disarm sentinel stops the rebuild; --status shows nothing left.
     -> confirm removal is exact against the manifest (no stray footholds).
 ```
 
-**Pass:** attacks 1–3 self-heal within the interval; attack 4 stays down;
+**Pass:** attacks 1–4 self-heal within the interval; attack 5 stays down;
 `--uninstall` leaves zero artifacts (verify against the manifest — your own
 footholds must be as removable as the red team's should have been).
+
+One thing to watch while you do this: run `./linux/hunt.sh` with the guardian
+armed and confirm you can tell its four artifacts apart from a red-team plant
+using nothing but the manifest. If you cannot do that under time pressure, the
+guardian is a liability rather than a defense — that is the actual test.
 
 ---
 
