@@ -128,8 +128,9 @@ banner/SSH/AV injects is the half of the work that eats the clock.
 
 Starter searches for Linux auth/sudo/service events and the Windows Security
 log (new user 4720, added-to-admins 4732, new service 7045, scheduled task
-4698, log cleared 1102). Extending these with searches for the canary alert log
-and auditd trip keys is a pending addition (see below).
+4698, log cleared 1102), plus a "Canary and audit trips" section covering the
+`canary.alerts.log` forwarder and the `ccdc-canary` / `ccdc-sensitive` auditd
+keys — the highest-confidence intrusion signal this kit produces.
 
 ---
 
