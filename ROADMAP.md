@@ -24,6 +24,21 @@
    connection. Do not use the competition box for the first test.
 6. Confirm backups can be read and restored on a disposable copy.
 
+## Raised by the training material (2026-09-11)
+
+- **fw.sh's rollback does not work on Ubuntu 24.04.** `nft list ruleset` on a
+  clean box is empty, so the snapshot is a zero-byte file, `restore_snapshot`'s
+  `[ -s ]` test fails, and the dead man's switch never fires. Fix and then
+  deliberately lock yourself out of the lab VM to prove it.
+- **Run every script under `busybox sh`.** Alpine appears in the real
+  environment and has no bash.
+- **Add `firewalld` and SELinux handling.** Rocky, CentOS, and Fedora are all
+  in the environment.
+- **Build a table generator for enumeration injects** (IP, host, OS, service,
+  port, needed?). That table is the deliverable for at least two known injects.
+- **Decide who records the VPN video.** One inject requires a three-minute
+  recorded presentation posted to YouTube; it cannot be improvised late.
+
 ## After Windows/firewall training
 
 - Replace placeholder Windows service checks with scorer-style endpoint checks.
