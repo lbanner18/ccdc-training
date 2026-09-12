@@ -1,10 +1,16 @@
-# What the competition environment actually looks like
+# Environment: the tryout, and the regional it feeds
 
-Drawn from graded team responses in the training material. This is much larger
-and more heterogeneous than the four-VM tryout, and it changes what the kit
-has to survive.
+**The tryout is four devices: one Linux box, one Windows box, a Splunk
+indexer, and a firewall.** Uptime is scored on the Linux and Windows boxes.
+That is the target to prepare against, and everything in this kit should work
+there first.
 
-## Hosts seen in real competition responses
+The larger picture below comes from graded responses to *regional*
+competitions. It is not what you will see at tryouts. It is recorded because
+it shows where the skills go next, and because a few of its lessons are cheap
+to adopt now and expensive to retrofit later.
+
+## Hosts seen in regional competition responses (not the tryout)
 
 One team's audit covered **eleven hosts**; another's login-banner inject listed
 **seven**. Operating systems named across them:
@@ -16,7 +22,19 @@ One team's audit covered **eleven hosts**; another's login-banner inject listed
 - Windows 10, Windows 11 (x2)
 - A Splunk indexer
 
-## What that means for this kit
+## What to actually carry back to the tryout
+
+Only two of these matter for a four-device tryout, and both are cheap:
+
+1. **Portability discipline.** Even if the tryout box is Ubuntu, a script that
+   assumes GNU-only flags breaks on any image that is not. The busybox pass
+   costs an hour and removes a whole class of competition-day surprise.
+2. **The deliverable patterns at the bottom of this file.** Inject style does
+   not change between tryout and regional.
+
+The rest is context for later.
+
+## What the wider environment would mean for this kit
 
 **Alpine is the portability test that matters.** Alpine has no bash by default,
 no GNU coreutils, and busybox versions of `find`, `awk`, and `ps` that do not
