@@ -2,8 +2,12 @@
 
 Written for a reviewer (human or another agent) coming to this repo cold, and
 for the operator practicing with it before the BYU CCDC tryout. It explains
-every tool, the design rules they all follow, what has been tested, and the one
-capability that is deliberately not built yet.
+every tool, the design rules they all follow, what has actually been tested
+versus what is merely written, and where the known weak spots are.
+
+**If you are here to review:** skip to [What to review](#what-to-review) at the
+bottom. It says what would genuinely help, what is already known-broken so you
+need not report it, and which claims in this file are worth distrusting.
 
 If you only read one other file, read
 [`playbooks/competition-day-playbook.md`](playbooks/competition-day-playbook.md)
@@ -49,8 +53,14 @@ These are consistent across the Linux tools; a reviewer can assume them.
    because blocking your own service costs exactly what an outage costs.
 6. **Legible, not stealthy — with a manifest.** Defensive artifacts are
    tracked in a manifest so the operator can always tell their own footholds
-   from the red team's and remove them exactly. (See the guardian note below
-   for the one place stealth is wanted, and why it is gated.)
+   from the red team's and remove them exactly. `canary.sh` and `guardian.sh`
+   both work this way, and both have a removal path that is checked against the
+   manifest rather than against memory.
+7. **Prove it on a VM, not in an argument.** A claim that a mutating path works
+   means it ran as root on the lab VM. Anything proven only by dry-run, syntax
+   check, or reasoning says so explicitly in the test-status table below. The
+   first real VM run found two genuine bugs that every prior sandbox test had
+   passed, which is the whole reason this rule is written down.
 
 ---
 
@@ -137,6 +147,66 @@ pidfile instead); no `/etc/cron.d` **and** no systemd — Alpine/OpenRC — mean
 no layer can be built, and it says so and installs nothing rather than
 pretending. Busybox `crond`'s `/etc/crontabs` format and OpenRC supervision are
 not wired up.
+
+---
+
+## The red team and the drill ([`redteam/`](redteam/))
+
+You cannot tell whether a detection tool works by reading it. This directory is
+how the defensive tools get scored against ground truth.
+
+| Script | What it does |
+|---|---|
+| `plant.sh` | Plants 11 realistic footholds on a **lab VM you own**, every one tagged `RT_LAB_PLANT`, and prints the ground-truth list. `--clean` removes exactly what it planted. Standard CCDC red-team moves, nothing novel or weaponized. |
+| `score.sh` | Greps the newest evidence directory for each planted artifact's signature and prints CAUGHT/MISSED per technique. |
+| `drill.sh` | The full automated loop, as root: arm → plant → detect → eradicate → five guardian attacks → uninstall, with a PASS/FAIL assertion at every step. |
+
+### What plant.sh lands
+
+A rogue user (`rtsvc`), a sudoers `NOPASSWD` backdoor, an extra root SSH key, an
+`/etc/cron.d` implant, a root crontab entry, a systemd timer disguised as
+"System Logging Helper", the implant binary, a `/etc/profile.d` hook, a
+`/root/.bashrc` hook, a SUID root shell, and a `/dev/shm` payload.
+
+### What drill.sh asserts
+
+Read [`redteam/drill.sh`](redteam/drill.sh) — it is ~200 lines and the
+assertions are the interesting part, not the plumbing.
+
+| Phase | Assertions |
+|---|---|
+| 0 — arm | scored service answers before we start; recon baseline captured; canary decoys laid |
+| 1 — land | `plant.sh` reports ≥10 footholds |
+| 2 — detect | one assertion per planted technique, scored against the **union** of the recon and hunt evidence; then `score.sh`'s own output and a `canary.sh --check` for comparison |
+| 3 — eradicate | sudoers edit leaves a file `visudo -c` still accepts; rogue user gone; attacker key gone; all file footholds gone; a re-hunt is clean; **and the scored service survived the whole eradication** |
+| 4 — guardian | all three layers active + cron entry present + manifest count; then five attacks (below) |
+| 4b — removal | reinstall from scratch works; `--uninstall` leaves zero artifacts; no stray watchdog process; systemd knows of no leftover units |
+
+The five attacks, which are the part worth reviewing hardest:
+
+1. **`pkill -f watchdog.sh`** → comes back via `Restart=always`.
+2. **`systemctl stop scored-web`** → the watchdog restores it within an interval.
+3. **Delete layer 2 and layer 3** → a surviving layer rebuilds both.
+4. **Backdoor a unit** (append `ExecStartPost=`) → next tick quarantines a copy
+   as evidence and rewrites the unit from source.
+5. **Remove all three layers at once** → it stays down. A PASS here means
+   *nothing came back*; that is the documented limit of the design, and the
+   assertion exists so the limit stays honest rather than drifting into a
+   claim.
+
+Run it only on a disposable VM, as root, with a snapshot taken first:
+
+```
+sudo bash redteam/drill.sh          # expects a filled config at /root/ccdc-drill.env
+CCDC_KIT_DIR=/path/to/kit CCDC_DRILL_CONFIG=/path/to.env sudo -E bash redteam/drill.sh
+```
+
+It takes about six minutes, most of it sleeping through the survival intervals.
+
+**It does not replace running [`playbooks/simulation-runbook.md`](playbooks/simulation-runbook.md) by hand.** The hand-run is where
+the operator's muscle memory comes from — eradicating by hand under a timer is
+the graded skill. The drill is the regression check that proves the tooling
+still works after a change.
 
 ---
 
@@ -260,11 +330,98 @@ The three failures are the argument for running it:
 
 ---
 
-## Suggested order for a reviewer
+## What to review
 
-1. `playbooks/competition-day-playbook.md` — the operational flow.
-2. `playbooks/competition-rules.md` — the constraints and their citations.
-3. `linux/lib/common.sh` — the shared contract every script relies on.
-4. `linux/canary.sh` and the new block in `linux/hunt.sh` — the newest code.
-5. `injects/responses/` — the half-the-score deliverables.
-6. `ROADMAP.md` — what is done, blocked, and deadline-bearing.
+The deadline is **2026-09-26**, the operator is one person, and the kit is
+already past the point where more features help. Review effort is best spent on
+things that would cost points or cost access on the day.
+
+### Read in this order
+
+1. `playbooks/competition-day-playbook.md` — the run-of-show everything serves.
+2. `linux/lib/common.sh` — the contract every script relies on (~120 lines).
+3. `linux/guardian.sh` — the newest and most dangerous code.
+4. `redteam/drill.sh` — what is actually proven, and whether the assertions
+   would really fail if the tool broke.
+5. `linux/hunt.sh` + `linux/canary.sh` — the detection half.
+6. `injects/responses/` — half the score, and the least reviewed.
+7. `ROADMAP.md` — what is claimed done versus deadline-bearing.
+
+### The questions worth answering
+
+**Highest value — these cost access or uptime if wrong:**
+
+- `guardian.sh` installs root-run persistence. Is there a path where it breaks
+  the box, wedges itself, or fails to remove cleanly? The removal path is
+  manifest ∪ expected-list; can you construct a state where an artifact is in
+  neither?
+- The tick lock is a `mkdir` with a stale-break at `5 × interval`. Is there an
+  interleaving that loses an artifact or corrupts the manifest? One race here
+  was already found on the VM and fixed; assume there is another.
+- `fw.sh`'s dead man's switch is the single highest-consequence code in the
+  kit: if it fails to arm, the operator is locked out of a scored box with no
+  recovery. It has passed two real lockout tests. What input makes it *silently*
+  not arm?
+- Every mutating script must be safe to interrupt halfway. Which one is not?
+
+**High value — these cost detection:**
+
+- `hunt.sh` greps for known-bad tokens in several places. Bug #2 below was
+  exactly this pattern failing. Where else does a keyword list stand in for a
+  real check, and what would a competent attacker write to slip past it?
+- `plant.sh` covers 11 techniques. What would a real CCDC red team do that it
+  does not simulate, and would `hunt.sh` catch that?
+- `score.sh`'s checks are greps and can score a **false** CAUGHT (its
+  `/dev/shm` check matches the bare string `.rt`, which also appears in
+  `/root/.rt_manifest`). Which other checks are weaker than they look?
+
+**Worth a pass:**
+
+- Portability. Targets may be Alpine (busybox, no bash), Rocky/CentOS/Fedora
+  (firewalld, SELinux). The scripts are bash and say so; the honest question is
+  whether the *degradation* messages are accurate or wishful.
+- Inject drafts: is any cited source misrepresented, and does each draft
+  actually answer the numbered asks rather than describing them?
+
+### Known-broken — do not spend time reporting these
+
+- **Windows (`windows/*.ps1`) is unexercised.** First-pass drafts, never run on
+  a Windows box. Two thirds of a real CCDC environment is Windows, so this is
+  the biggest gap in the kit and it is already known.
+- **`canary.sh`'s mutating paths have not been exercised with auditd.** The lab
+  VM has no auditd (isolated network, no package installs), so read-detection
+  has never actually fired. Hash/atime paths are tested; the auditd path is not.
+- **No busybox/OpenRC support.** `guardian.sh` refuses to install rather than
+  pretending, but "run every script under `busybox sh`" is still an open
+  roadmap item.
+- **This repo is not public yet**, and NCCDC rule 5.6.1 requires team tools to
+  be public three months before use. That is a scheduling decision already
+  tracked in `ROADMAP.md`, not an oversight.
+
+### Distrust these claims specifically
+
+A reviewer is most useful when checking the things the author is most confident
+about. In rough order of how much a wrong answer would cost:
+
+1. **"`--uninstall` leaves zero artifacts."** Verified by the drill on one
+   Ubuntu VM, in one configuration, with one name. Try a different
+   `CCDC_GUARDIAN_NAME`, an interrupted uninstall, or a box where
+   `/usr/local/lib` is not writable.
+2. **"Tampering is repaired, not just detected."** True for artifacts in the
+   manifest. An attacker who adds a *new* file the guardian never wrote — a
+   drop-in at `/etc/systemd/system/<name>.service.d/override.conf`, for
+   instance — is not covered at all. Is that the right call, or a hole?
+3. **"The layers rebuild each other."** Proven on systemd. The cron-only path
+   (no systemd) has never run anywhere.
+4. **"Verify from the scorer's position."** The drill checks
+   `127.0.0.1:8080`, which is *not* the scorer's position. That is a real
+   weakness in the test, not just in the wording.
+
+### Ground rules
+
+- Assume the operator is solo and tired. A finding that makes the kit more
+  complex to run at hour six is a net loss even if it is technically correct.
+- Prefer "this breaks under X" over style. Cite the file and line.
+- Defensive tooling on an owned box in a sanctioned event is the whole point of
+  this repo; see the classifier note above before flagging `guardian.sh` as
+  malware-shaped. It is malware-shaped. That is the nature of the problem.
