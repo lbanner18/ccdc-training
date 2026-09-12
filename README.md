@@ -33,7 +33,8 @@ dry-run mode.
 
 ```text
 config/example.env       safe template; real config stays outside the repo
-linux/                    Bash tools for Linux boxes
+linux/                    Bash tools for Linux boxes (recon, hunt, watchdog,
+                          users, fw, backup, canary)
 windows/                  PowerShell first-pass tools
 splunk/                   starter searches and field notes
 injects/                  memo and incident-report templates
@@ -47,6 +48,11 @@ The scripts are deliberately conservative and are not a substitute for the
 team packet. The packet decides which users, ports, IPs, and services are
 scored. A setting that is safe on the Ubuntu lab VM can still be wrong for the
 competition image.
+
+Detection: `linux/canary.sh` lays decoy files and auditd tripwires and reports
+when they are touched — the endorsed active-defense shape. A full printable
+run-of-show is in
+[`playbooks/competition-day-playbook.md`](playbooks/competition-day-playbook.md).
 
 Injects are **half the score** — the tryout page says points are split evenly
 between the defense competition and the injects. Six drafts are pre-written in

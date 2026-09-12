@@ -16,6 +16,9 @@
   forced.
 - Six pre-written inject responses with cited sources (`injects/responses/`).
 - Cited rules research (`playbooks/competition-rules.md`).
+- Canary/tripwire detection (`linux/canary.sh`): decoy files + auditd watches,
+  read-only `--check`, manifest-tracked so removal is exact.
+- Printable competition-day playbook (`playbooks/competition-day-playbook.md`).
 
 ## Next lab session
 
@@ -51,6 +54,19 @@
 - Add Windows event-forwarding validation and a small Splunk dashboard.
 - Reconcile these scripts against the team's current internal/public toolkit
   before submitting fixes upstream.
+
+## Blocked / needs a call
+
+- **guardian.sh (keep the watchdog alive against a root-level attacker).** The
+  design is a reconciling keep-alive: three independent layers (systemd
+  service, systemd timer, cron.d) that restart the watchdog and rebuild each
+  other, with a manifest so you can tell your own footholds from the red
+  team's and a disarm sentinel so removal is reliable. Authoring it was blocked
+  by the environment's safety classifier as "unauthorized persistence" — it
+  cannot distinguish resilient defensive tooling from malware. Needs the
+  operator to explicitly allow it (a Bash permission rule) before it can be
+  written. The intended design is recorded in this section; a local stub at
+  `linux/guardian.sh` (untracked) holds the header notes.
 
 ## Decisions with deadlines
 
