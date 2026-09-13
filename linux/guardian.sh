@@ -12,18 +12,44 @@ set -u
 #   sudo ./guardian.sh --config FILE --tick        one reconcile pass (what the layers call)
 #   add --dry-run to print actions without making changes (this is the default)
 #
-# Naming: the installed unit name comes from CCDC_GUARDIAN_NAME (default
-# "node-health"). Pick something plausible for the box, NOT something that
-# screams "defense" - but always keep the manifest so you can tell your own
-# footholds from the red team's. Stealth buys minutes; the manifest is what
-# actually keeps you in control.
+# Naming: every layer derives from CCDC_GUARDIAN_NAME (default "node-health"),
+# but each can be named independently:
+#
+#   CCDC_GUARDIAN_WATCH_NAME       the watchdog unit
+#   CCDC_GUARDIAN_TICKER_NAME      layer 1
+#   CCDC_GUARDIAN_RECONCILE_NAME   layer 2 (service + timer)
+#   CCDC_GUARDIAN_CRON_NAME        layer 3
+#
+# Set them to unrelated names and the defence stops being enumerable in one
+# command. With a shared prefix, `systemctl list-units | grep node-health` finds
+# every layer and `rm /etc/systemd/system/node-health*` removes every layer, so
+# the "attacker must find all three" property is worth exactly one grep. With
+# unrelated names they have to discover four separate things.
+#
+# You lose nothing by doing this: the manifest at $CCDC_EVIDENCE_DIR is what
+# keeps your own footholds legible to you, not the shared prefix. Pick names
+# that are plausible for the box, NOT ones that scream "defense".
+#
+# Know the limit, because it is easy to oversell this. Every layer executes the
+# same payload, so every unit's ExecStart names CCDC_GUARDIAN_DIR:
+#
+#   grep -rl "$CCDC_GUARDIAN_DIR" /etc/systemd/system /etc/cron.d
+#
+# finds all of them again. Independent names defeat a COLD grep -- someone
+# sweeping for obviously-named defence tooling comes up empty -- but they do not
+# defeat an attacker who has already found one layer and read it. Set
+# CCDC_GUARDIAN_DIR to something unrelated too and the cold sweep gets harder
+# still, but the pivot from any single discovered layer remains. Removing that
+# would mean a separate payload copy per layer, which is a lot of machinery for
+# a modest gain; the redundancy, not the concealment, is what this design is
+# actually built on.
 #
 # --- what gets installed -----------------------------------------------------
 #
-#   target   <name>-watch.service    runs watchdog.sh, Restart=always
-#   layer 1  <name>.service          Restart=always, runs tick.sh (a sleep loop)
-#   layer 2  <name>-reconcile.timer  fires the same tick every interval
-#   layer 3  /etc/cron.d/<name>      fires the same tick every ceil(interval/60) min
+#   target   <watch>.service       runs watchdog.sh, Restart=always
+#   layer 1  <ticker>.service      Restart=always, runs tick.sh (a sleep loop)
+#   layer 2  <reconcile>.timer     fires the same tick every interval
+#   layer 3  /etc/cron.d/<cron>    fires the same tick every ceil(interval/60) min
 #
 # All three layers run the identical reconcile pass (--tick), which:
 #   1. self-removes if the disarm sentinel is present (see below),
@@ -128,6 +154,41 @@ case "$guardian_dir" in
   *[!A-Za-z0-9_./-]*) ccdc_die "CCDC_GUARDIAN_DIR contains unsupported whitespace/shell characters: $guardian_dir" ;;
 esac
 
+# Per-layer names. CCDC_GUARDIAN_NAME stays the base and every layer derives
+# from it by default, so nothing changes unless you ask for it. Override them
+# individually and the layers stop sharing a prefix.
+#
+# Why bother: with one shared name, `systemctl list-units | grep node-health`
+# and `rm /etc/systemd/system/node-health*` each find and remove the WHOLE
+# defence in one command. Independent names mean an attacker has to discover
+# four unrelated things instead of one pattern. The manifest is what keeps it
+# legible to you, so you lose nothing by making them unrelated to each other.
+watch_name=${CCDC_GUARDIAN_WATCH_NAME:-$name-watch}
+ticker_name=${CCDC_GUARDIAN_TICKER_NAME:-$name}
+reconcile_name=${CCDC_GUARDIAN_RECONCILE_NAME:-$name-reconcile}
+cron_name=${CCDC_GUARDIAN_CRON_NAME:-$name}
+
+for _n in "$watch_name" "$ticker_name" "$reconcile_name" "$cron_name"; do
+  case "$_n" in
+    ''|*[!A-Za-z0-9_-]*) ccdc_die "guardian layer names must be [A-Za-z0-9_-] only: $_n" ;;
+  esac
+done
+# Two layers sharing a name would mean two layers sharing one unit file: the
+# second write silently replaces the first and you are down a layer without
+# being told.
+if [ "$(printf '%s\n' "$watch_name" "$ticker_name" "$reconcile_name" | sort -u | wc -l)" -ne 3 ]; then
+  ccdc_die "watch/ticker/reconcile names must differ from each other"
+fi
+
+unit_watch="$watch_name.service"
+unit_ticker="$ticker_name.service"
+unit_reconcile="$reconcile_name.service"
+unit_timer="$reconcile_name.timer"
+
+# A description shared across layers is just the shared name again in another
+# field, greppable with `systemctl list-units`. Derive each from its own name.
+describe() { printf '%s' "$1" | tr '_-' '  '; }
+
 # State lives with the evidence, next to the watchdog and canary logs, so one
 # directory is the whole story when you write the incident report.
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
@@ -166,11 +227,11 @@ repair_common="$repair_dir/lib/common.sh"
 repair_env="$repair_dir/guardian.env"
 
 unit_dir=/etc/systemd/system
-svc_watch="$unit_dir/$name-watch.service"
-svc_ticker="$unit_dir/$name.service"
-svc_reconcile="$unit_dir/$name-reconcile.service"
-tmr_reconcile="$unit_dir/$name-reconcile.timer"
-cron_file="/etc/cron.d/$name"
+svc_watch="$unit_dir/$unit_watch"
+svc_ticker="$unit_dir/$unit_ticker"
+svc_reconcile="$unit_dir/$unit_reconcile"
+tmr_reconcile="$unit_dir/$unit_timer"
+cron_file="/etc/cron.d/$cron_name"
 
 created=''          # paths written during this run (their hashes get refreshed)
 need_daemon_reload=0
@@ -287,7 +348,7 @@ quarantine() {
 
 unit_override_paths() {
   local unit
-  for unit in "$name-watch.service" "$name.service" "$name-reconcile.service" "$name-reconcile.timer"; do
+  for unit in "$unit_watch" "$unit_ticker" "$unit_reconcile" "$unit_timer"; do
     printf '%s\n' \
       "/etc/systemd/system/$unit.d" \
       "/run/systemd/system/$unit.d" \
@@ -316,10 +377,10 @@ preserve_override() {
 
 override_unit_for_path() {
   case "$1" in
-    */"$name-watch.service"|*/"$name-watch.service.d") printf '%s\n' "$name-watch.service" ;;
-    */"$name.service"|*/"$name.service.d") printf '%s\n' "$name.service" ;;
-    */"$name-reconcile.service"|*/"$name-reconcile.service.d") printf '%s\n' "$name-reconcile.service" ;;
-    */"$name-reconcile.timer"|*/"$name-reconcile.timer.d") printf '%s\n' "$name-reconcile.timer" ;;
+    */"$unit_watch"|*/"$unit_watch.d") printf '%s\n' "$unit_watch" ;;
+    */"$unit_ticker"|*/"$unit_ticker.d") printf '%s\n' "$unit_ticker" ;;
+    */"$unit_reconcile"|*/"$unit_reconcile.d") printf '%s\n' "$unit_reconcile" ;;
+    */"$unit_timer"|*/"$unit_timer.d") printf '%s\n' "$unit_timer" ;;
   esac
 }
 
@@ -673,7 +734,7 @@ SCRIPT
 write_svc_watch() {
   write_artifact target "$svc_watch" 0644 <<UNIT
 [Unit]
-Description=Node health monitor
+Description=$(describe "$watch_name") monitor
 After=network.target
 
 [Service]
@@ -692,7 +753,7 @@ UNIT
 write_svc_ticker() {
   write_artifact layer1 "$svc_ticker" 0644 <<UNIT
 [Unit]
-Description=Node health supervisor
+Description=$(describe "$ticker_name") supervisor
 After=network.target
 
 [Service]
@@ -711,7 +772,7 @@ UNIT
 write_svc_reconcile() {
   write_artifact layer2 "$svc_reconcile" 0644 <<UNIT
 [Unit]
-Description=Node health reconcile
+Description=$(describe "$reconcile_name")
 
 [Service]
 Type=oneshot
@@ -726,13 +787,13 @@ write_tmr_reconcile() {
   # anywhere inside a two-minute window. Pin it so the interval means something.
   write_artifact layer2 "$tmr_reconcile" 0644 <<UNIT
 [Unit]
-Description=Node health reconcile timer
+Description=$(describe "$reconcile_name") timer
 
 [Timer]
 OnBootSec=${interval}s
 OnUnitActiveSec=${interval}s
 AccuracySec=1s
-Unit=$name-reconcile.service
+Unit=$unit_reconcile
 
 [Install]
 WantedBy=timers.target
@@ -783,27 +844,27 @@ ensure_watchdog() {
       ccdc_info "watchdog unit missing or edited; rebuilding"
       write_svc_watch || return 1
       # The old unit may still be loaded in memory with the attacker's edit.
-      ccdc_is_dry_run || run_systemctl stop "$name-watch.service" >>"$log" 2>&1 || true
+      ccdc_is_dry_run || run_systemctl stop "$unit_watch" >>"$log" 2>&1 || true
     fi
     reload_if_needed || return 1
     if ! ccdc_is_dry_run \
-      && ! unit_effective_matches "$name-watch.service" "$svc_watch" "$watchdog_copy"; then
+      && ! unit_effective_matches "$unit_watch" "$svc_watch" "$watchdog_copy"; then
       ccdc_warn "effective systemd watchdog unit differs from the installed unit"
       return 1
     fi
     if ccdc_is_dry_run; then
-      run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null \
+      run_systemctl is-active --quiet "$unit_watch" 2>/dev/null \
         || printf '[dry-run] would start %s-watch.service\n' "$name"
       return 0
     fi
-    if ! run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null; then
-      glog "watchdog_down restarting unit=$name-watch.service"
-      run_systemctl enable --now "$name-watch.service" >>"$log" 2>&1 \
-        || { ccdc_warn "could not start $name-watch.service"; return 1; }
-    elif ! run_systemctl is-enabled --quiet "$name-watch.service" 2>/dev/null; then
+    if ! run_systemctl is-active --quiet "$unit_watch" 2>/dev/null; then
+      glog "watchdog_down restarting unit=$unit_watch"
+      run_systemctl enable --now "$unit_watch" >>"$log" 2>&1 \
+        || { ccdc_warn "could not start $unit_watch"; return 1; }
+    elif ! run_systemctl is-enabled --quiet "$unit_watch" 2>/dev/null; then
       # Active but not enabled survives until the next reboot and no longer.
-      run_systemctl enable "$name-watch.service" >>"$log" 2>&1 \
-        || { ccdc_warn "could not enable $name-watch.service"; return 1; }
+      run_systemctl enable "$unit_watch" >>"$log" 2>&1 \
+        || { ccdc_warn "could not enable $unit_watch"; return 1; }
     fi
     return 0
   fi
@@ -866,15 +927,15 @@ ensure_layers() {
     if [ "$force" -eq 1 ] || needs_rebuild "$tmr_reconcile"; then write_tmr_reconcile || return 1; fi
     reload_if_needed || return 1
     if ! ccdc_is_dry_run; then
-      unit_effective_matches "$name.service" "$svc_ticker" "$tick_script" \
+      unit_effective_matches "$unit_ticker" "$svc_ticker" "$tick_script" \
         || { ccdc_warn "effective ticker unit differs from the installed unit"; return 1; }
-      unit_effective_matches "$name-reconcile.service" "$svc_reconcile" "$guardian_copy" \
+      unit_effective_matches "$unit_reconcile" "$svc_reconcile" "$guardian_copy" \
         || { ccdc_warn "effective reconcile unit differs from the installed unit"; return 1; }
-      unit_effective_matches "$name-reconcile.timer" "$tmr_reconcile" \
+      unit_effective_matches "$unit_timer" "$tmr_reconcile" \
         || { ccdc_warn "effective reconcile timer differs from the installed unit"; return 1; }
     fi
-    ensure_unit_enabled "$name.service" || return 1
-    ensure_unit_enabled "$name-reconcile.timer" || return 1
+    ensure_unit_enabled "$unit_ticker" || return 1
+    ensure_unit_enabled "$unit_timer" || return 1
     built=$((built + 2))
   else
     ccdc_warn "no systemd on this box: layers 1 and 2 are unavailable, cron is the only layer"
@@ -938,7 +999,7 @@ remove_staging_for() {
 stop_units() {
   have_systemd || return 0
   local unit
-  for unit in "$name.service" "$name-reconcile.timer" "$name-reconcile.service" "$name-watch.service"; do
+  for unit in "$unit_ticker" "$unit_timer" "$unit_reconcile" "$unit_watch"; do
     if ccdc_is_dry_run; then
       printf '[dry-run] would disable and stop %s\n' "$unit"
     else
@@ -956,7 +1017,7 @@ stop_units() {
 reset_failed_units() {
   have_systemd || return 0
   local unit
-  for unit in "$name.service" "$name-reconcile.timer" "$name-reconcile.service" "$name-watch.service"; do
+  for unit in "$unit_ticker" "$unit_timer" "$unit_reconcile" "$unit_watch"; do
     if ccdc_is_dry_run; then
       printf '[dry-run] would clear any failed state for %s\n' "$unit"
     else
@@ -1072,16 +1133,16 @@ verify_installation() {
   local schedulers=0
   manifest_matches_disk || { ccdc_warn "one or more installed artifacts do not match the manifest"; return 1; }
   if have_systemd; then
-    unit_effective_matches "$name-watch.service" "$svc_watch" "$watchdog_copy" || return 1
-    unit_effective_matches "$name.service" "$svc_ticker" "$tick_script" || return 1
-    unit_effective_matches "$name-reconcile.service" "$svc_reconcile" "$guardian_copy" || return 1
-    unit_effective_matches "$name-reconcile.timer" "$tmr_reconcile" || return 1
-    run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null || return 1
-    run_systemctl is-enabled --quiet "$name-watch.service" 2>/dev/null || return 1
-    run_systemctl is-active --quiet "$name.service" 2>/dev/null || return 1
-    run_systemctl is-enabled --quiet "$name.service" 2>/dev/null || return 1
-    run_systemctl is-active --quiet "$name-reconcile.timer" 2>/dev/null || return 1
-    run_systemctl is-enabled --quiet "$name-reconcile.timer" 2>/dev/null || return 1
+    unit_effective_matches "$unit_watch" "$svc_watch" "$watchdog_copy" || return 1
+    unit_effective_matches "$unit_ticker" "$svc_ticker" "$tick_script" || return 1
+    unit_effective_matches "$unit_reconcile" "$svc_reconcile" "$guardian_copy" || return 1
+    unit_effective_matches "$unit_timer" "$tmr_reconcile" || return 1
+    run_systemctl is-active --quiet "$unit_watch" 2>/dev/null || return 1
+    run_systemctl is-enabled --quiet "$unit_watch" 2>/dev/null || return 1
+    run_systemctl is-active --quiet "$unit_ticker" 2>/dev/null || return 1
+    run_systemctl is-enabled --quiet "$unit_ticker" 2>/dev/null || return 1
+    run_systemctl is-active --quiet "$unit_timer" 2>/dev/null || return 1
+    run_systemctl is-enabled --quiet "$unit_timer" 2>/dev/null || return 1
     schedulers=$((schedulers + 2))
   else
     watchdog_running_pidfile || return 1
@@ -1233,9 +1294,9 @@ do_status() {
   fi
   printf '\nlayers:\n'
   if have_systemd; then
-    layer_line target "$svc_watch" "$name-watch.service"
-    layer_line layer1 "$svc_ticker" "$name.service"
-    layer_line layer2 "$tmr_reconcile" "$name-reconcile.timer"
+    layer_line target "$svc_watch" "$unit_watch"
+    layer_line layer1 "$svc_ticker" "$unit_ticker"
+    layer_line layer2 "$tmr_reconcile" "$unit_timer"
   else
     printf '  target    n/a       no systemd: watchdog supervised by pidfile %s\n' "$pid_file"
     printf '  layer1    n/a       no systemd\n'
@@ -1269,7 +1330,7 @@ EOF
 
   printf '\nwatchdog: '
   if have_systemd; then
-    if run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null; then
+    if run_systemctl is-active --quiet "$unit_watch" 2>/dev/null; then
       printf 'running (%s-watch.service)\n' "$name"
     else
       printf 'NOT RUNNING\n'
