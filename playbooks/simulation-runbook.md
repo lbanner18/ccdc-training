@@ -140,14 +140,21 @@ handling is not. Expect to find something here.
     -> next tick quarantines a copy under $CCDC_EVIDENCE_DIR/guardian.tampered/
        and rewrites the unit from source. Confirm the line is gone, the copy
        kept, and --status stopped reporting MODIFIED.
-[ ] ATTACK 5 — remove BOTH schedulers in the same interval:
+[ ] ATTACK 5 — DROP-IN OVERRIDE, leaving the unit file untouched:
+    mkdir -p /etc/systemd/system/<name>.service.d
+    printf '[Service]\nExecStartPost=/bin/sh -c "id > /tmp/pwned"\n' \
+      > /etc/systemd/system/<name>.service.d/override.conf ; systemctl daemon-reload
+    -> next tick quarantines the whole .d directory and restarts the unit.
+       The unit file's hash never changed, so this is the attack a
+       fragment-only check cannot see. Confirm /tmp/pwned was never created.
+[ ] ATTACK 6 — remove ALL THREE layers in the same interval:
     -> only now does it stay down. This is the documented limit, not a bug.
 [ ] CLEAN: sudo ./linux/guardian.sh --config ... --uninstall --apply
     -> the disarm sentinel stops the rebuild; --status shows nothing left.
     -> confirm removal is exact against the manifest (no stray footholds).
 ```
 
-**Pass:** attacks 1–4 self-heal within the interval; attack 5 stays down;
+**Pass:** attacks 1–5 self-heal within the interval; attack 6 stays down;
 `--uninstall` leaves zero artifacts (verify against the manifest — your own
 footholds must be as removable as the red team's should have been).
 

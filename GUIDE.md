@@ -73,9 +73,9 @@ These are consistent across the Linux tools; a reviewer can assume them.
 | `canary.sh` | `--deploy`/`--remove` only | Detection/active-defense. Lays decoy files, records a hash+inode+atime baseline, and asks auditd to log access to decoys and real sensitive files. `--check` is read-only and loopable. Manifest-tracked. |
 | `watchdog.sh` | `--apply` only | Keeps scored services up: TCP/HTTP/systemd checks, restarts a dead service, and verifies recovery with the *same probe the scorer uses* (measured wall-clock deadline, crash-loop detection, one-restart-per-pass). |
 | `users.sh` | `--apply` only | Explicit-target account audit and guarded password rotation / lock. Never touches an account not named in config. |
-| `fw.sh` | `--apply` only | Firewall renderer (nft/iptables) with a **dead man's switch**: applies rules, arms a systemd-owned auto-rollback that survives your SSH session dying, and requires `--confirm` to keep the rules. Two real lockout tests passed. |
+| `fw.sh` | `--apply` only | Firewall renderer (nft/iptables) with a **dead man's switch**: snapshots, arms a systemd-owned auto-rollback that survives your SSH session dying, **verifies it is armed, and only then applies** — requiring `--confirm` to keep the rules. Refuses to start a second change while one is pending. Three real lockout tests passed, the most recent against the arm-before-apply rewrite. |
 | `backup.sh` | `--apply` only | Explicit-path backup, checksum, diff, and guarded restore. |
-| `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. Manifest-tracked, repairs tampered artifacts, disarm sentinel makes `--uninstall` exact. |
+| `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. Manifest-tracked; repairs tampered artifacts and systemd drop-in overrides from an independent `.repair` source tree; disarm sentinel makes `--uninstall` exact. |
 
 `recon.sh` and `hunt.sh` are the first thing you run and are safe to run any
 time. Everything else is dry-run first, `--apply` second, verify third.
@@ -120,20 +120,47 @@ one interval works — that is the documented limit, not a bug.
 
 Four design points worth understanding:
 
-1. **The payload is copied.** `--install` puts `guardian.sh`, `watchdog.sh`,
-   `lib/common.sh` and your config in `CCDC_GUARDIAN_DIR`, and the layers run
-   the copies. The defense must not die because someone deleted your home
-   directory, and it must not change under you when you edit the checkout
-   mid-competition.
+1. **The payload is copied twice, and that matters.** `--install` puts
+   `guardian.sh`, `watchdog.sh`, `lib/common.sh` and your config in
+   `CCDC_GUARDIAN_DIR` — the *live* copies the layers execute — and a second,
+   independent set under `CCDC_GUARDIAN_DIR/.repair`, which nothing ever
+   executes. Repair copies from `.repair` to live.
+
+   The two-tree split is not decoration. The first version copied the payload
+   over itself, so source and destination were the same file and "repair the
+   tampered watchdog" was a silent no-op: the guardian reported healthy while
+   running the attacker's code. Root can still destroy both trees at once —
+   that is the documented limit — but editing the live copy no longer defeats
+   repair.
+
+   **Operational rule that follows from this: never hand-edit the installed
+   `guardian.env`.** The layers pin its SHA-256 and refuse to source a config
+   that matches neither the pinned hash nor the live fallback. That is correct
+   — a tampered config can redirect `CCDC_GUARDIAN_DIR` and point the
+   guardian's own removal logic somewhere else — but the failure is *silent*,
+   because layer output goes to `/dev/null`. If you need to change config
+   mid-competition, edit your real config file and re-run
+   `--install --apply`. Editing the installed copy is how you turn the
+   guardian off without noticing.
 2. **The manifest is the point.** Every artifact is recorded with the hash it
    had when written. That is what lets you tell your own footholds from the red
    team's at hour six — and it is why hiding your tooling is survivable here.
-3. **Tampering is repaired, not just detected.** An attacker who appends
-   `ExecStartPost=` to your unit has converted your keep-alive into their
-   persistence, so a drifted artifact is rewritten from source. The tampered
-   copy is preserved under `guardian.tampered/` first — it is evidence, and an
-   inject will ask for it. Ticks never re-hash a file they did not write, so a
-   red-team edit cannot launder itself into the "expected" value.
+3. **Tampering is repaired, not just detected — including the kind that never
+   touches the file.** An attacker who appends `ExecStartPost=` to your unit
+   has converted your keep-alive into their persistence, so a drifted artifact
+   is rewritten from `.repair`. The tampered copy is preserved under
+   `guardian.tampered/` first — it is evidence, and an inject will ask for it.
+   Ticks never re-hash a file they did not write, so a red-team edit cannot
+   launder itself into the "expected" value.
+
+   The nastier variant is a **systemd drop-in**: `<unit>.d/override.conf`
+   leaves the unit file byte-identical, so any hash check of the fragment sees
+   nothing wrong while systemd merges the override and runs the attacker's
+   command as root on the next start. The guardian checks the *effective* unit
+   (`systemctl show -p DropInPaths`), quarantines any override under
+   `/etc/systemd/system`, `/run/systemd/system`, the `.control` variants and
+   `/run/systemd/transient`, and restarts the affected unit afterwards. Drill
+   ATTACK 5 exercises exactly this and asserts the injected command never ran.
 4. **The disarm sentinel makes removal stick.** `--uninstall` writes the
    sentinel *first*, then tears down; any tick that fires mid-teardown sees it
    and removes its own layer instead of helpfully rebuilding everything. Same
@@ -179,17 +206,20 @@ assertions are the interesting part, not the plumbing.
 | 1 — land | `plant.sh` reports ≥10 footholds |
 | 2 — detect | one assertion per planted technique, scored against the **union** of the recon and hunt evidence; then `score.sh`'s own output and a `canary.sh --check` for comparison |
 | 3 — eradicate | sudoers edit leaves a file `visudo -c` still accepts; rogue user gone; attacker key gone; all file footholds gone; a re-hunt is clean; **and the scored service survived the whole eradication** |
-| 4 — guardian | all three layers active + cron entry present + manifest count; then five attacks (below) |
+| 4 — guardian | all three layers active + cron entry present + manifest count; then six attacks (below) |
 | 4b — removal | reinstall from scratch works; `--uninstall` leaves zero artifacts; no stray watchdog process; systemd knows of no leftover units |
 
-The five attacks, which are the part worth reviewing hardest:
+The six attacks, which are the part worth reviewing hardest:
 
 1. **`pkill -f watchdog.sh`** → comes back via `Restart=always`.
 2. **`systemctl stop scored-web`** → the watchdog restores it within an interval.
 3. **Delete layer 2 and layer 3** → a surviving layer rebuilds both.
 4. **Backdoor a unit** (append `ExecStartPost=`) → next tick quarantines a copy
    as evidence and rewrites the unit from source.
-5. **Remove all three layers at once** → it stays down. A PASS here means
+5. **Plant a systemd drop-in** (`<unit>.d/override.conf`) → quarantined and
+   stripped with the unit file never modified; the injected command must never
+   have executed.
+6. **Remove all three layers at once** → it stays down. A PASS here means
    *nothing came back*; that is the documented limit of the design, and the
    assertion exists so the limit stays honest rather than drifting into a
    claim.
@@ -286,8 +316,10 @@ what keeps even a hidden guardian legible to its owner.
 | `guardian.sh` file reconciliation (install → delete layers → tick rebuilds → tamper → quarantine+repair → sentinel → uninstall leaves zero artifacts) | run against a sandbox with `/etc` redirected and `systemctl` stubbed; all passed |
 | Generated systemd units | validated by the real `systemd-analyze verify` (4/4 clean) |
 | `guardian.sh` degradation (no systemd → cron-only; no systemd *and* no cron.d → refuses) | run, warns correctly |
-| `guardian.sh` against real systemd units as root | **run on the lab VM 2026-09-11** via `redteam/drill.sh` — 34/37 assertions passed; the 3 failures are analysed below and all three are now fixed |
-| Full automated drill (plant → detect → eradicate → 5 guardian attacks → uninstall) | run end to end on the lab VM as root; VM reverted to snapshot afterwards |
+| `guardian.sh` against real systemd units as root | **run on the lab VM** via `redteam/drill.sh` — currently **57/57**, including the drop-in attack |
+| Full automated drill (plant → detect → eradicate → 6 guardian attacks → uninstall) | run end to end on the lab VM as root; VM reverted to snapshot afterwards |
+| `fw.sh` dead man's switch, **rewritten** arm-before-apply path | **retested on the lab VM 2026-09-13**, five cases: dry-run changes nothing; safe apply arms a real systemd timer; `--status` distinguishes armed from broken; a second apply while one is pending is refused; `--confirm` keeps rules and disarms |
+| `fw.sh` **real lockout** (port 22 removed from the allow list) | **passed** — a new SSH connection was refused, the switch fired unattended, and access was restored ~60s later with the baseline ruleset intact and the scored service still up |
 | `hunt.sh` extended sweep | run read-only, new section emits correctly |
 | `hunt.sh` / `recon.sh` full runs | exercised previously against the lab VM |
 | `fw.sh` dead man's switch | two real lockout tests passed (prior session) |
@@ -327,6 +359,39 @@ The three failures are the argument for running it:
    `find -newermt`, which is strictly-newer, so same-second output fell out of
    the blob being scored. A test that lies about the tool is worse than no
    test: the harness now records each directory by name as it is produced.
+
+### What the external review and its second VM run found (2026-09-13)
+
+An independent agent review produced four structural findings, all since fixed
+and re-tested. Three were things no amount of re-reading my own code would have
+surfaced, because they were failures of *design*, not of syntax:
+
+1. **`fw.sh` applied rules before the rollback was safely armed.** Any
+   interruption between the apply and the arm left the box unreachable with no
+   recovery. It now takes the snapshot, writes and schedules the rollback,
+   *verifies it is armed*, and only then touches the firewall — and restores
+   immediately if the apply fails or the switch died during it. Proven by a
+   real lockout on the lab VM.
+2. **`guardian.sh` could not actually repair its own payload**, because the
+   copy's source and destination were the same file. Fixed with the `.repair`
+   tree described above. This is the most serious of the four: the guardian
+   reported healthy while a tampered watchdog kept running.
+3. **Systemd drop-ins bypassed the guardian entirely and survived uninstall.**
+   Fixed; see point 3 of the guardian section.
+4. **Several drill assertions could pass while the tool was broken.** The
+   detection checks grepped one concatenated blob, so one artifact could
+   satisfy several checks, and `score.sh` scored `/dev/shm` with the
+   alternative `\.rt`, which also matches `/root/.rt_manifest` — it printed
+   CAUGHT when the sweep had found nothing. Every check is now a fixed string
+   against a named file, and `score.sh` exits non-zero on a miss so a caller
+   can assert on it.
+
+A fifth was found by the drill itself once those were in: **`--uninstall` left
+a phantom unit in systemd.** Once a unit has entered a failed state, systemd
+keeps it in `systemctl list-units --all` and `systemctl --failed` even after
+the unit file is gone and the daemon is reloaded. Disk was clean; systemd was
+not — a ghost of your own tooling in the first place you look during an
+incident. Fixed with an explicit `reset-failed` pass after removal.
 
 ---
 

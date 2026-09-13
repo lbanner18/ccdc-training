@@ -23,6 +23,13 @@
   plant → detect → eradicate → guardian-survival drill.
 - Reconciling watchdog keep-alive (`linux/guardian.sh`): three layers that
   rebuild each other, manifest-tracked, tamper-repairing, disarm sentinel.
+- Automated regression drill (`redteam/drill.sh`, 57 assertions) and a scorer
+  that fails honestly (`redteam/score.sh`).
+- External agent review of the whole kit, plus the hardening pass it produced:
+  arm-before-apply in `fw.sh`, an independent `.repair` source tree and drop-in
+  defence in `guardian.sh`, collision/interruption handling in `canary.sh`,
+  process-start-token locking in `guardian.sh`/`watchdog.sh`, and real
+  home-directory enumeration in `recon.sh`.
 
 ## Next lab session
 
@@ -67,12 +74,19 @@
   Recorded here because the pattern will recur: resilient defensive tooling and
   malware look identical to a classifier, and the operator's approval is the
   thing that separates them.
-- ~~**guardian.sh's mutating paths have never run as root**~~ — **done
-  2026-09-11.** `redteam/drill.sh` ran the full loop on the lab VM: 34/37
-  assertions passed, all five guardian attacks included. The three failures
-  were a manifest race in `guardian.sh`, a keyword-only blind spot in
-  `hunt.sh`'s rc-file check, and a bug in the harness itself; all three are
-  fixed. See the GUIDE for the analysis.
+- ~~**guardian.sh's mutating paths have never run as root**~~ — **done.**
+  `redteam/drill.sh` runs the full loop on the lab VM and is at **57/57**,
+  including a systemd drop-in attack. See the GUIDE for what the two VM rounds
+  and the external review found.
+- ~~**fw.sh's rewritten dead man's switch is untested**~~ — **done 2026-09-13.**
+  Retested on the lab VM including a real lockout: port 22 removed from the
+  allow list, a new SSH connection refused, the switch fired unattended, access
+  restored with the baseline ruleset intact and the scored service still up.
+- **The inject drafts have not been re-checked since the external review.**
+  Everything in `linux/` and `redteam/` has been reviewed and re-tested; the
+  review's third priority — whether each draft in `injects/responses/` actually
+  answers its inject's numbered asks and cites its source honestly — was never
+  reached. That is half the score and it is the least-examined part of the kit.
 
 ## Decisions with deadlines
 
