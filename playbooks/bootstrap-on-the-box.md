@@ -38,11 +38,32 @@ command -v git curl wget tar; timeout 5 curl -sI https://github.com >/dev/null 2
 | `EGRESS-NO` | **1C — push it from your workstation** |
 | nothing works | **1D — the fallback that needs no kit** |
 
-**Do not `apt install git`.** If apt works you already have egress, so 1A or 1B
-is faster and changes nothing on the box. Installing packages at minute one is a
-change you cannot tell apart from the red team's later.
+**Prefer 1B over installing git.** If a package manager works you already have
+egress, so the `curl | tar` path gets the same files in one command, installs
+nothing, and leaves no change on the box you would later have to tell apart from
+the red team's.
 
-### 1A — clone (preferred; CONFIRMED as the expected path for the BYU tryout)
+But if you do want git — it is genuinely useful for pulling an update mid-event,
+and `curl`/`wget` may both be missing — this is the exact line for each family:
+
+```bash
+# Debian / Ubuntu
+sudo apt-get update && sudo apt-get install -y git
+# RHEL / Rocky / CentOS / Fedora
+sudo dnf install -y git   ||  sudo yum install -y git
+# Alpine
+sudo apk add --no-cache git
+# SUSE
+sudo zypper --non-interactive install git
+```
+
+Check first — it is usually already there:
+
+```bash
+command -v git || echo "no git"
+```
+
+### 1A — clone   `RUN ON: the box`   (CONFIRMED as the expected path for the BYU tryout)
 
 ```bash
 cd ~ && git clone https://github.com/lbanner18/ccdc-training.git
@@ -56,7 +77,7 @@ run exactly what was declared:
 git clone --branch <FROZEN_TAG> --depth 1 https://github.com/lbanner18/ccdc-training.git
 ```
 
-### 1B — tarball, no git needed
+### 1B — tarball, no git needed   `RUN ON: the box`
 
 ```bash
 cd ~ && curl -L https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.tar.gz | tar xz
@@ -65,7 +86,7 @@ mv ccdc-training-main ccdc-training && cd ccdc-training && chmod +x linux/*.sh r
 
 `wget -qO- <url> | tar xz` if there is no curl.
 
-### 1C — no egress: push it from the machine you are sitting at
+### 1C — no egress: push from your workstation   `RUN ON: your workstation, NOT the box`
 
 **On your workstation** (the repo is already cloned there — do this before you
 arrive):
@@ -75,10 +96,20 @@ cd ~/ccdc-training
 tar czf - --exclude=.git . | ssh <USER>@<BOX> 'mkdir -p ~/ccdc-training && tar xzf - -C ~/ccdc-training && chmod +x ~/ccdc-training/linux/*.sh ~/ccdc-training/redteam/*.sh'
 ```
 
+**The mistake everyone makes once:** running this inside your SSH session, on
+the box. The box usually has an `authorized_keys` (that is how you got in) but
+no private key, so it cannot SSH out to anything — including itself — and you
+get `Permission denied (publickey)`. If you see that error, you are on the wrong
+machine. Open a SECOND terminal on your workstation and run it there; leave the
+SSH session alone.
+
+Substitute the placeholders before you run it. `<USER>@<BOX>` typed literally
+fails differently and more confusingly.
+
 This is the path practised in the lab, and it needs nothing on the box but SSH.
 No removable media — NCCDC rule 8.1 bans USB drives in the room.
 
-### 1D — nothing works: the five commands that matter most
+### 1D — nothing works: the five commands that matter most   `RUN ON: the box`
 
 If you cannot get the kit on at all, you are not helpless — you are just slower.
 These are the highest-value actions the kit automates, by hand:
@@ -146,6 +177,34 @@ incident-report inject is built from.
 
 Now hand over to
 [`competition-day-playbook.md`](competition-day-playbook.md) §1.
+
+
+---
+
+## How you reach the box changes which branches exist
+
+Two very different things get called "web access to the instance":
+
+**(a) A portal that hands you an address and credentials**, and you SSH to the
+box yourself from your own machine. Everything on this card works. 1C is
+available as a fallback because there is a real network path from your machine
+to the box.
+
+**(b) A browser console** (noVNC, Guacamole, a web terminal) where the browser
+is the *only* way in. Then there is **no network path from your laptop to the
+box at all**, so 1C is impossible no matter what you type — `scp`, `tar | ssh`
+and `rsync` all need that path. On a browser console:
+
+- Box egress + `git clone` (1A) is not the convenient option, it is the only
+  practical one.
+- With no egress you are down to 1D and the clipboard. Browser consoles usually
+  paste, often badly; a whole repo is not realistically pasteable, one script
+  is.
+- So find out whether the box has egress **before** the clock starts, because
+  under (b) the answer determines whether you have tooling at all.
+
+Confirm which one you have. It is a thirty-second question with a large blast
+radius.
 
 ---
 
