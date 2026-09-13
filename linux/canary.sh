@@ -14,10 +14,13 @@ set -u
 #   canary.sh --config FILE --status                         show what is laid
 #   canary.sh --config FILE --remove   [--apply|--dry-run]   pick them back up
 #
-# --check is read-only and never mutates, so it is safe to run every interval.
+# --check never changes a canary or system configuration. It only appends local
+# alert evidence, so it is safe to run every interval.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
+
+umask 077
 
 config=''
 mode=''
@@ -44,11 +47,25 @@ ccdc_load_config "$config"
 # decoy, an attacker reading the decoy's directory would find the list of every
 # other decoy - which defeats the point.
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
-mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence"
-mkdir -p "$state_dir"
+if [ "$apply" -eq 1 ]; then
+  mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence"
+  mkdir -p "$state_dir" || ccdc_die "cannot create canary state directory: $state_dir"
+  chmod 0700 "$state_dir" 2>/dev/null || ccdc_die "cannot secure canary state directory: $state_dir"
+elif [ ! -d "$state_dir" ] && [ -d "${TMPDIR:-/tmp}/ccdc-evidence" ]; then
+  state_dir="${TMPDIR:-/tmp}/ccdc-evidence"
+fi
 manifest="$state_dir/canary.manifest"     # path|sha256|inode  - one decoy per line
 baseline="$state_dir/canary.baseline"     # path|atime         - for the touch check
 alertlog="$state_dir/canary.alerts.log"
+pending="$state_dir/canary.pending"       # path|expected-hash - interruption journal
+audit_marker="$state_dir/canary.audit-active"
+canary_staged=''
+
+cleanup_canary_staged() {
+  local staged
+  for staged in $canary_staged; do rm -f -- "$staged" 2>/dev/null || true; done
+}
+trap cleanup_canary_staged EXIT
 
 # Decoy paths. Override in the config with CCDC_CANARY_FILES (one path per
 # line). These defaults are the files an attacker greps for first; each is a
@@ -97,6 +114,20 @@ path_atime() { stat -c '%X' "$1" 2>/dev/null || stat -f '%a' "$1" 2>/dev/null ||
 path_inode() { stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1" 2>/dev/null || printf '0'; }
 path_hash()  { ccdc_hash_file "$1" 2>/dev/null | awk '{print $1}'; }
 
+manifest_hash() {
+  [ -f "$manifest" ] || return 0
+  awk -F'|' -v p="$1" '$1 == p {print $2; exit}' "$manifest" 2>/dev/null
+}
+
+managed_decoy_is_intact() {
+  local path=$1 expected actual
+  [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  expected=$(manifest_hash "$path")
+  [ -n "$expected" ] || return 1
+  actual=$(path_hash "$path")
+  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+
 # --- auditd wiring -------------------------------------------------------
 # auditd is the only mechanism here that catches a READ. A hash check catches a
 # modified or deleted decoy, but an attacker who merely opens and copies it
@@ -107,57 +138,156 @@ audit_available() { ccdc_have auditctl; }
 
 install_audit_rule() {
   local path=$1 key=$2
-  audit_available || return 0
+  audit_available || return 1
   # -p rwa: read, write, attribute change. -k tags the events so ausearch -k
   # pulls exactly our hits out of a noisy log.
   ccdc_action auditctl -w "$path" -p rwa -k "$key"
 }
 
+audit_canary_active() {
+  [ -f "$audit_marker" ] || return 1
+  rules=$(auditctl -l 2>/dev/null)
+  status=$?
+  # If an unprivileged manual check cannot list rules, trust the root-written
+  # marker and avoid creating a false read event. Root checks verify the rule.
+  [ "$status" -eq 0 ] || return 0
+  printf '%s\n' "$rules" | grep -q 'ccdc-canary'
+}
+
 deploy() {
   [ "$apply" -eq 1 ] && ccdc_require_root
-  : >"${manifest}.next"
-  : >"${baseline}.next"
-  canary_list | while IFS= read -r path; do
+  if [ "$apply" -ne 1 ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      printf '[dry-run] would create new decoy %s (0600 root) and audit-watch it\n' "$path"
+    done <<EOF
+$(canary_list)
+EOF
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      [ -e "$path" ] && printf '[dry-run] would audit-watch sensitive path %s\n' "$path"
+    done <<EOF
+$(sensitive_list)
+EOF
+    ccdc_info "dry run only; no decoys or state files written"
+    return 0
+  fi
+
+  [ ! -f "$manifest" ] && [ ! -f "$pending" ] \
+    || ccdc_die "canaries are already deployed or a deployment was interrupted; run --status/--remove first"
+
+  collision=0
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      ccdc_warn "refusing to overwrite existing path with a decoy: $path"
+      collision=1
+    fi
+  done <<EOF
+$(canary_list)
+EOF
+  [ "$collision" -eq 0 ] || ccdc_die "one or more canary paths already exist; no files were changed"
+
+  if ccdc_have sha256sum; then
+    fake_hash=$(fake_contents | sha256sum | awk '{print $1}')
+  elif ccdc_have shasum; then
+    fake_hash=$(fake_contents | shasum -a 256 | awk '{print $1}')
+  else
+    ccdc_die "no SHA-256 utility available; no files were changed"
+  fi
+  [ -n "$fake_hash" ] || ccdc_die "could not hash canary contents; no files were changed"
+
+  pending_staged="${pending}.new.$$"
+  manifest_staged="${manifest}.next.$$"
+  baseline_staged="${baseline}.next.$$"
+  canary_staged="$canary_staged $pending_staged $manifest_staged $baseline_staged"
+  : >"$pending_staged" && : >"$manifest_staged" && : >"$baseline_staged" \
+    || ccdc_die "cannot prepare canary state; no decoys were written"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    printf '%s|%s\n' "$path" "$fake_hash" >>"$pending_staged" \
+      || ccdc_die "cannot journal planned decoy $path; no decoys were written"
+  done <<EOF
+$(canary_list)
+EOF
+  chmod 0600 "$pending_staged" "$manifest_staged" "$baseline_staged" \
+    && mv -f "$pending_staged" "$pending" \
+    || ccdc_die "cannot install canary interruption journal; no decoys were written"
+
+  deploy_failed=0
+  decoy_audit_ok=0
+  if audit_available; then
+    auditctl -D -k ccdc-canary >/dev/null 2>&1 || true
+    auditctl -D -k ccdc-sensitive >/dev/null 2>&1 || true
+    decoy_audit_ok=1
+  fi
+
+  while IFS= read -r path; do
     [ -n "$path" ] || continue
     dir=$(dirname -- "$path")
-    if [ "$apply" -eq 1 ]; then
-      mkdir -p "$dir" 2>/dev/null || ccdc_warn "cannot create $dir for decoy"
-      fake_contents >"$path" 2>/dev/null || { ccdc_warn "cannot write decoy $path"; continue; }
-      # 0600 and root-owned: a decoy that is world-readable looks like a decoy.
-      # Real secrets are locked down, so ours must be too.
-      chmod 0600 "$path" 2>/dev/null || true
-      printf '%s|%s|%s\n' "$path" "$(path_hash "$path")" "$(path_inode "$path")" >>"${manifest}.next"
-      printf '%s|%s\n' "$path" "$(path_atime "$path")" >>"${baseline}.next"
-      install_audit_rule "$path" ccdc-canary
-      ccdc_append_log "$alertlog" "deployed decoy path=$path"
-    else
-      printf '[dry-run] would write decoy %s (0600 root) and audit-watch it\n' "$path"
+    staged="${path}.ccdc-canary.new.$$"
+    canary_staged="$canary_staged $staged"
+    if ! mkdir -p "$dir" 2>/dev/null \
+      || [ -e "$path" ] || [ -L "$path" ] \
+      || ! fake_contents >"$staged" 2>/dev/null \
+      || ! chmod 0600 "$staged" \
+      || ! ln -- "$staged" "$path" 2>/dev/null \
+      || ! rm -f "$staged"; then
+      ccdc_warn "cannot safely create decoy $path"
+      deploy_failed=1
+      continue
     fi
-  done
-  # Watch the real sensitive files too.
-  sensitive_list | while IFS= read -r path; do
-    [ -n "$path" ] || continue
-    if [ -e "$path" ]; then
-      if [ "$apply" -eq 1 ]; then
-        install_audit_rule "$path" ccdc-sensitive
-      else
-        printf '[dry-run] would audit-watch sensitive path %s\n' "$path"
-      fi
+    actual_hash=$(path_hash "$path")
+    [ "$actual_hash" = "$fake_hash" ] \
+      || { ccdc_warn "decoy verification failed: $path"; deploy_failed=1; continue; }
+    printf '%s|%s|%s\n' "$path" "$actual_hash" "$(path_inode "$path")" >>"$manifest_staged" \
+      || { ccdc_warn "cannot record decoy $path"; deploy_failed=1; continue; }
+    printf '%s|%s\n' "$path" "$(path_atime "$path")" >>"$baseline_staged" \
+      || { ccdc_warn "cannot baseline decoy $path"; deploy_failed=1; continue; }
+    if audit_available && ! install_audit_rule "$path" ccdc-canary; then
+      ccdc_warn "could not install read watch for $path"
+      decoy_audit_ok=0
     fi
-  done
-  if [ "$apply" -eq 1 ]; then
-    mv "${manifest}.next" "$manifest"
-    mv "${baseline}.next" "$baseline"
-    audit_available || ccdc_warn "auditd not present: only modify/delete is detectable, not reads. Install audit for read detection."
-    ccdc_info "canaries deployed; manifest at $manifest"
-  else
-    rm -f "${manifest}.next" "${baseline}.next"
-    ccdc_info "dry run only; no decoys written"
+    ccdc_append_log "$alertlog" "deployed decoy path=$path"
+  done <<EOF
+$(canary_list)
+EOF
+
+  if [ "$deploy_failed" -eq 1 ]; then
+    ccdc_die "canary deployment was incomplete; journal retained for safe --remove"
   fi
+
+  # Watch the real sensitive files too. Failure here degrades that extra signal
+  # but does not invalidate decoy deployment or its fallback hash checks.
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ -e "$path" ] && audit_available; then
+      install_audit_rule "$path" ccdc-sensitive \
+        || ccdc_warn "could not audit-watch sensitive path $path"
+    fi
+  done <<EOF
+$(sensitive_list)
+EOF
+
+  mv -f "$manifest_staged" "$manifest" \
+    && mv -f "$baseline_staged" "$baseline" \
+    || ccdc_die "could not finalize canary manifests; journal retained for safe --remove"
+  rm -f "$pending"
+  if [ "$decoy_audit_ok" -eq 1 ]; then
+    printf 'audit read watches active\n' >"$audit_marker" \
+      || ccdc_warn "could not record audit state; checks will use hash fallback"
+    chmod 0600 "$audit_marker" 2>/dev/null || true
+  else
+    audit_available && auditctl -D -k ccdc-canary >/dev/null 2>&1 || true
+    rm -f "$audit_marker"
+    ccdc_warn "audit read watches are not fully active: using hash/inode/atime fallback"
+  fi
+  ccdc_info "canaries deployed; manifest at $manifest"
 }
 
 check() {
-  local tripped=0
+  local tripped=0 audit_mode=0
+  audit_canary_active && ccdc_have ausearch && audit_mode=1
   # 1. Decoys modified or removed (hash/inode drift).
   if [ -f "$manifest" ]; then
     while IFS='|' read -r path old_hash old_inode; do
@@ -168,9 +298,13 @@ check() {
         tripped=1
         continue
       fi
-      new_hash=$(path_hash "$path")
       new_inode=$(path_inode "$path")
-      if [ "$new_hash" != "$old_hash" ]; then
+      if [ "$audit_mode" -eq 0 ]; then
+        new_hash=$(path_hash "$path")
+      else
+        new_hash=$old_hash
+      fi
+      if [ "$audit_mode" -eq 0 ] && [ "$new_hash" != "$old_hash" ]; then
         printf 'TRIPPED (modified): %s\n' "$path"
         ccdc_append_log "$alertlog" "TRIP kind=modified path=$path old=$old_hash new=$new_hash"
         tripped=1
@@ -187,7 +321,7 @@ check() {
   # 2. Decoys read but not changed (atime moved). Weaker than auditd: atime can
   # be off (relatime/noatime) and a careful attacker resets it. Reported as a
   # hint, not proof.
-  if [ -f "$baseline" ]; then
+  if [ "$audit_mode" -eq 0 ] && [ -f "$baseline" ]; then
     while IFS='|' read -r path old_atime; do
       [ -n "${path:-}" ] || continue
       [ -e "$path" ] || continue
@@ -203,12 +337,12 @@ check() {
   if ccdc_have ausearch; then
     hits=$(ausearch -k ccdc-canary -ts recent 2>/dev/null | grep -c 'type=SYSCALL' || true)
     shits=$(ausearch -k ccdc-sensitive -ts recent 2>/dev/null | grep -c 'type=SYSCALL' || true)
-    [ "${hits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on decoy files\n' "$hits"; tripped=1; }
-    [ "${shits:-0}" -gt 0 ] && printf 'AUDIT: %s recent access event(s) on sensitive files\n' "$shits"
+    [ "${hits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on decoy files\n' "$hits"; ccdc_append_log "$alertlog" "TRIP kind=audit_decoy events=$hits"; tripped=1; }
+    [ "${shits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on sensitive files\n' "$shits"; ccdc_append_log "$alertlog" "TRIP kind=audit_sensitive events=$shits"; tripped=1; }
     if [ "${hits:-0}" -gt 0 ] || [ "${shits:-0}" -gt 0 ]; then
       printf 'run: ausearch -k ccdc-canary -i   (and -k ccdc-sensitive) for the who/what/when\n'
     fi
-  else
+  elif [ "$audit_mode" -eq 0 ]; then
     ccdc_warn "ausearch not present: cannot report read events; relying on hash/atime only"
   fi
 
@@ -222,6 +356,7 @@ check() {
 
 status() {
   printf 'manifest: %s\n' "$manifest"
+  [ -f "$pending" ] && printf 'WARNING: interrupted deployment journal present: %s\n' "$pending"
   if [ -f "$manifest" ]; then
     printf 'decoys laid: %s\n' "$(wc -l <"$manifest")"
     sed 's/|.*//' "$manifest" | sed 's/^/  /'
@@ -239,21 +374,60 @@ status() {
 
 remove() {
   [ "$apply" -eq 1 ] && ccdc_require_root
-  if [ -f "$manifest" ]; then
-    while IFS='|' read -r path _rest; do
-      [ -n "${path:-}" ] || continue
-      ccdc_action rm -f "$path"
-    done <"$manifest"
-  fi
   if audit_available && [ "$apply" -eq 1 ]; then
-    auditctl -D -k ccdc-canary >/dev/null 2>&1 || true
-    # -D clears all rules; re-listing and deleting by key is version-specific,
-    # so warn rather than silently wiping every audit rule on the box.
-    ccdc_warn "auditd rules by key cannot be removed individually on all versions; review 'auditctl -l'"
+    auditctl -D -k ccdc-canary >/dev/null 2>&1 \
+      || ccdc_warn "could not remove ccdc-canary audit rules; review 'auditctl -l'"
+    auditctl -D -k ccdc-sensitive >/dev/null 2>&1 \
+      || ccdc_warn "could not remove ccdc-sensitive audit rules; review 'auditctl -l'"
   fi
+
+  remove_failed=0
+  for state_file in "$manifest" "$pending"; do
+    [ -f "$state_file" ] || continue
+    while IFS='|' read -r path expected _rest; do
+      [ -n "${path:-}" ] || continue
+      if [ "$apply" -ne 1 ]; then
+        printf '[dry-run] would remove managed decoy %s if its hash still matches\n' "$path"
+        continue
+      fi
+      [ -e "$path" ] || [ -L "$path" ] || continue
+      if [ -f "$path" ] && [ ! -L "$path" ] && [ "$(path_hash "$path")" = "$expected" ]; then
+        rm -f -- "$path" || { ccdc_warn "could not remove decoy $path"; remove_failed=1; }
+      else
+        ccdc_warn "leaving changed/replaced canary for investigation: $path"
+        remove_failed=1
+      fi
+    done <"$state_file"
+  done
+
+  # A signal between writing and linking can leave only the same-directory
+  # staging inode. Remove it only when it still has the known fake-content hash.
+  if [ -f "$pending" ] && [ "$apply" -eq 1 ]; then
+    while IFS='|' read -r path expected; do
+      [ -n "${path:-}" ] || continue
+      parent=$(dirname -- "$path")
+      base=$(basename -- "$path")
+      [ -d "$parent" ] || continue
+      find "$parent" -maxdepth 1 -type f -name "${base}.ccdc-canary.new.[0-9]*" -print 2>/dev/null \
+        | while IFS= read -r staged; do
+            [ "$(path_hash "$staged")" = "$expected" ] && rm -f -- "$staged"
+          done
+    done <"$pending"
+  fi
+
   if [ "$apply" -eq 1 ]; then
-    rm -f "$manifest" "$baseline"
-    ccdc_info "canaries removed"
+    if [ "$remove_failed" -eq 0 ]; then
+      rm -f "$manifest" "$baseline" "$pending"
+      if audit_available \
+        && auditctl -l 2>/dev/null | grep -qE 'ccdc-(canary|sensitive)'; then
+        ccdc_warn "one or more CCDC audit rules remain loaded; retaining $audit_marker"
+      else
+        rm -f "$audit_marker"
+      fi
+      ccdc_info "managed canaries removed"
+    else
+      ccdc_die "one or more changed canaries were retained; manifests remain for investigation"
+    fi
   else
     ccdc_info "dry run only; decoys left in place"
   fi

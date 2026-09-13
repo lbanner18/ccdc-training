@@ -4,6 +4,8 @@ set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
 
+umask 077
+
 config=''
 apply=0
 once=0
@@ -20,12 +22,73 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 ccdc_load_config "$config"
+case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of seconds" ;; esac
+[ "$interval" -ge 5 ] || ccdc_die "--interval below 5s risks a restart storm: $interval"
 
 log_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
-mkdir -p "$log_dir" 2>/dev/null || log_dir="${TMPDIR:-/tmp}/ccdc-evidence"
-mkdir -p "$log_dir"
+if ! mkdir -p "$log_dir" 2>/dev/null || [ ! -w "$log_dir" ]; then
+  log_dir="${TMPDIR:-/tmp}/ccdc-evidence"
+fi
+mkdir -p "$log_dir" || ccdc_die "cannot create watchdog state directory: $log_dir"
+if [ "$apply" -eq 1 ]; then
+  chmod 0700 "$log_dir" 2>/dev/null || ccdc_die "cannot secure watchdog state directory: $log_dir"
+else
+  chmod 0700 "$log_dir" 2>/dev/null || true
+fi
 log="$log_dir/watchdog.log"
 hash_state="$log_dir/watchdog.sha256"
+watchdog_lock="$log_dir/watchdog.lock"
+watchdog_lock_owner="$watchdog_lock/owner"
+watchdog_lock_token=''
+watchdog_staged=''
+
+watchdog_process_start() {
+  awk '{print $22}' "/proc/$1/stat" 2>/dev/null || printf 'unknown'
+}
+
+release_watchdog_lock() {
+  local current
+  [ -n "$watchdog_staged" ] && rm -f -- "$watchdog_staged" 2>/dev/null || true
+  [ -n "$watchdog_lock_token" ] || return 0
+  current=$(cat "$watchdog_lock_owner" 2>/dev/null || printf '')
+  if [ "$current" = "$watchdog_lock_token" ]; then
+    rm -f "$watchdog_lock_owner" 2>/dev/null || true
+    rmdir "$watchdog_lock" 2>/dev/null || true
+  fi
+}
+
+acquire_watchdog_lock() {
+  local owner pid expected_start live_start
+  if mkdir "$watchdog_lock" 2>/dev/null; then
+    watchdog_lock_token="$$:$(watchdog_process_start $$)"
+    printf '%s\n' "$watchdog_lock_token" >"$watchdog_lock_owner" \
+      || { rmdir "$watchdog_lock" 2>/dev/null || true; return 1; }
+    return 0
+  fi
+  owner=$(cat "$watchdog_lock_owner" 2>/dev/null || printf '')
+  pid=${owner%%:*}
+  expected_start=${owner#*:}
+  live_start=''
+  case "$pid" in
+    ''|*[!0-9]*) ;;
+    *) kill -0 "$pid" 2>/dev/null && live_start=$(watchdog_process_start "$pid") ;;
+  esac
+  if [ -n "$live_start" ] && [ "$live_start" = "$expected_start" ]; then
+    ccdc_warn "another watchdog already owns $watchdog_lock (pid $pid)"
+    return 1
+  fi
+  rm -f "$watchdog_lock_owner" 2>/dev/null || return 1
+  rmdir "$watchdog_lock" 2>/dev/null || return 1
+  mkdir "$watchdog_lock" 2>/dev/null || return 1
+  watchdog_lock_token="$$:$(watchdog_process_start $$)"
+  printf '%s\n' "$watchdog_lock_token" >"$watchdog_lock_owner" \
+    || { rmdir "$watchdog_lock" 2>/dev/null || true; return 1; }
+}
+
+trap release_watchdog_lock EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 check_tcp() {
   local name=$1 host=$2 port=$3
@@ -73,6 +136,8 @@ restarted_this_pass=''
 verify_recovery() {
   local service=$1 kind=$2 arg=$3
   local limit=${CCDC_RESTART_SETTLE_SECONDS:-15}
+  case "$limit" in ''|*[!0-9]*) ccdc_append_log "$log" "invalid_restart_settle_seconds value=$limit"; return 1 ;; esac
+  [ "$limit" -ge 2 ] || { ccdc_append_log "$log" "invalid_restart_settle_seconds value=$limit"; return 1; }
   # Measure the real deadline. Counting loop iterations undercounts badly: each
   # curl probe can burn its full --max-time before the loop even sleeps, so 15
   # "iterations" measured 95 seconds of wall clock on the lab box. A watchdog
@@ -138,8 +203,9 @@ restart_service() {
 
 check_hashes() {
   local path current previous
-  local next_state="${hash_state}.next"
-  : >"$next_state"
+  local next_state="${hash_state}.next.$$"
+  watchdog_staged=$next_state
+  : >"$next_state" || { ccdc_append_log "$log" "hash_state_write_failed path=$next_state"; return 1; }
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if [ ! -f "$path" ]; then
@@ -164,7 +230,9 @@ check_hashes() {
   done <<EOF
 ${CCDC_HASH_FILES:-}
 EOF
-  mv "$next_state" "$hash_state"
+  mv "$next_state" "$hash_state" \
+    || { ccdc_append_log "$log" "hash_state_install_failed path=$hash_state"; return 1; }
+  watchdog_staged=''
 }
 
 run_once() {
@@ -213,6 +281,7 @@ EOF
 }
 
 [ "$apply" -eq 1 ] && ccdc_require_root
+acquire_watchdog_lock || ccdc_die "watchdog singleton lock is unavailable; refusing a duplicate recovery loop"
 if [ "$once" -eq 1 ]; then
   run_once
 else

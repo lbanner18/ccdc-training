@@ -62,12 +62,18 @@ set -u
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
 
+umask 077
+
 config=''
+fallback_config=''
+config_sha256=''
 mode=''
 apply=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
+    --fallback-config) fallback_config=${2:?missing fallback config path}; shift 2 ;;
+    --config-sha256) config_sha256=${2:?missing config SHA-256}; shift 2 ;;
     --install) mode=install; shift ;;
     --status) mode=status; shift ;;
     --uninstall) mode=uninstall; shift ;;
@@ -81,6 +87,23 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$mode" ] || ccdc_die "choose one of --install --status --uninstall --tick"
+
+# Installed layers pin the repair configuration's digest and provide the live
+# copy as a fallback. Validate before sourcing shell syntax: otherwise a single
+# edit to guardian.env could redirect the manifest/name/paths and then be
+# accepted before reconciliation ever had a chance to inspect it.
+if [ -n "$config_sha256" ]; then
+  actual_config_sha256=$(ccdc_hash_file "$config" 2>/dev/null | awk '{print $1}')
+  if [ "$actual_config_sha256" != "$config_sha256" ]; then
+    fallback_sha256=$(ccdc_hash_file "$fallback_config" 2>/dev/null | awk '{print $1}')
+    if [ -n "$fallback_config" ] && [ "$fallback_sha256" = "$config_sha256" ]; then
+      ccdc_warn "repair configuration failed its pinned hash; using the matching live fallback"
+      config=$fallback_config
+    else
+      ccdc_die "neither installed configuration matches the pinned SHA-256; refusing to source either"
+    fi
+  fi
+fi
 ccdc_load_config "$config"
 
 name=${CCDC_GUARDIAN_NAME:-node-health}
@@ -97,17 +120,32 @@ case "$interval" in
   ''|*[!0-9]*) ccdc_die "CCDC_GUARDIAN_INTERVAL must be a whole number of seconds: $interval" ;;
 esac
 [ "$interval" -ge 10 ] || ccdc_die "CCDC_GUARDIAN_INTERVAL below 10s just burns CPU: $interval"
+case "$guardian_dir" in
+  /*) ;;
+  *) ccdc_die "CCDC_GUARDIAN_DIR must be an absolute path: $guardian_dir" ;;
+esac
+case "$guardian_dir" in
+  *[!A-Za-z0-9_./-]*) ccdc_die "CCDC_GUARDIAN_DIR contains unsupported whitespace/shell characters: $guardian_dir" ;;
+esac
 
 # State lives with the evidence, next to the watchdog and canary logs, so one
 # directory is the whole story when you write the incident report.
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence"
 mkdir -p "$state_dir" 2>/dev/null || ccdc_die "cannot create state directory"
+if [ "$apply" -eq 1 ]; then
+  chmod 0700 "$state_dir" 2>/dev/null || ccdc_die "cannot secure state directory: $state_dir"
+else
+  chmod 0700 "$state_dir" 2>/dev/null || true
+fi
 manifest="$state_dir/guardian.manifest"   # kind|path|sha256-at-write
 sentinel="$state_dir/guardian.disarmed"
 log="$state_dir/guardian.log"
 pid_file="$state_dir/guardian-watchdog.pid"
 lock_dir="$state_dir/guardian.lock"
+lock_owner="$lock_dir/owner"
+lock_token=''
+staged_paths=''
 
 # Payload copies (what the layers actually execute).
 guardian_copy="$guardian_dir/guardian.sh"
@@ -115,6 +153,17 @@ watchdog_copy="$guardian_dir/watchdog.sh"
 common_copy="$guardian_dir/lib/common.sh"
 env_copy="$guardian_dir/guardian.env"
 tick_script="$guardian_dir/tick.sh"
+
+# Reconciliation must copy from an independent source. The files in .repair
+# are never referenced by a service ExecStart; they are the clean source used
+# to replace a deleted or edited live payload. Root can still destroy every
+# copy at once, which is the documented limit, but editing one live file no
+# longer causes a source==destination no-op followed by manifest laundering.
+repair_dir="$guardian_dir/.repair"
+repair_guardian="$repair_dir/guardian.sh"
+repair_watchdog="$repair_dir/watchdog.sh"
+repair_common="$repair_dir/lib/common.sh"
+repair_env="$repair_dir/guardian.env"
 
 unit_dir=/etc/systemd/system
 svc_watch="$unit_dir/$name-watch.service"
@@ -125,17 +174,65 @@ cron_file="/etc/cron.d/$name"
 
 created=''          # paths written during this run (their hashes get refreshed)
 need_daemon_reload=0
+pinned_env_hash=''
+units_needing_restart=''
 
 # --- capability detection ----------------------------------------------------
 # Degrade honestly. A box with no systemd gets the cron layer only, and says so;
 # it does not pretend to three layers it cannot build.
 
 have_systemd() { ccdc_have systemctl && [ -d /run/systemd/system ]; }
-have_crond() { [ -d /etc/cron.d ]; }
+
+have_crond() {
+  [ -d /etc/cron.d ] || return 1
+  { ccdc_have cron || ccdc_have crond; } || return 1
+  if ccdc_have pgrep; then
+    pgrep -x cron >/dev/null 2>&1 || pgrep -x crond >/dev/null 2>&1 || return 1
+  elif have_systemd; then
+    systemctl is-active --quiet cron.service 2>/dev/null \
+      || systemctl is-active --quiet crond.service 2>/dev/null \
+      || systemctl is-active --quiet cronie.service 2>/dev/null \
+      || return 1
+  else
+    return 1
+  fi
+}
+
+run_systemctl() {
+  if ccdc_have timeout; then
+    timeout 15 systemctl "$@"
+  else
+    systemctl "$@"
+  fi
+}
 
 # --- helpers -----------------------------------------------------------------
 
 glog() { ccdc_append_log "$log" "$@"; }
+
+release_lock() {
+  [ -n "$lock_token" ] || return 0
+  local current
+  current=$(cat "$lock_owner" 2>/dev/null || printf '')
+  if [ "$current" = "$lock_token" ]; then
+    rm -f "$lock_owner" 2>/dev/null || true
+    rmdir "$lock_dir" 2>/dev/null || true
+  fi
+  lock_token=''
+}
+
+cleanup_staged() {
+  local path
+  for path in $staged_paths; do
+    rm -f -- "$path" 2>/dev/null || true
+  done
+  release_lock
+}
+
+trap cleanup_staged EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Write one artifact, content on stdin. Honors CCDC_DRY_RUN like ccdc_action,
 # which cannot be used here because the content is a heredoc, not an argv.
@@ -146,7 +243,8 @@ write_artifact() {
     printf '[dry-run] would write %s (%s, mode %s)\n' "$path" "$kind" "$mode_bits"
     return 0
   fi
-  mkdir -p "$(dirname -- "$path")" 2>/dev/null || true
+  mkdir -p "$(dirname -- "$path")" 2>/dev/null \
+    || { ccdc_warn "cannot create parent for $path"; return 1; }
   # Write-then-rename, never truncate in place. tick.sh is being executed by a
   # running bash process (layer 1's service); bash reads a script incrementally
   # by file offset, so overwriting one in place makes the running shell resume
@@ -154,11 +252,13 @@ write_artifact() {
   # directory entry and leaves the running process on its original inode, which
   # it finishes cleanly before the next loop picks up the new file.
   local staged="${path}.new.$$"
+  staged_paths="$staged_paths $staged"
   printf '%s\n' "$content" >"$staged" || { ccdc_warn "cannot write $path"; return 1; }
-  chmod "$mode_bits" "$staged" 2>/dev/null || true
+  chmod "$mode_bits" "$staged" 2>/dev/null || { ccdc_warn "cannot chmod $path"; return 1; }
   mv -f "$staged" "$path" || { ccdc_warn "cannot install $path"; rm -f "$staged"; return 1; }
   created="$created $path"
   glog "wrote kind=$kind path=$path"
+  return 0
 }
 
 file_hash() { ccdc_hash_file "$1" 2>/dev/null | awk '{print $1}'; }
@@ -185,6 +285,111 @@ quarantine() {
   glog "TAMPER path=$path action=quarantined_and_rewritten"
 }
 
+unit_override_paths() {
+  local unit
+  for unit in "$name-watch.service" "$name.service" "$name-reconcile.service" "$name-reconcile.timer"; do
+    printf '%s\n' \
+      "/etc/systemd/system/$unit.d" \
+      "/run/systemd/system/$unit.d" \
+      "/etc/systemd/system.control/$unit.d" \
+      "/run/systemd/system.control/$unit.d" \
+      "/run/systemd/system/$unit" \
+      "/run/systemd/transient/$unit"
+  done
+}
+
+preserve_override() {
+  local path=$1 dest label
+  label=$(printf '%s' "$path" | tr '/' '_')
+  dest="$state_dir/guardian.tampered/${label}.$(ccdc_now).$$"
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would quarantine systemd override %s as %s\n' "$path" "$dest"
+    return 0
+  fi
+  mkdir -p "$state_dir/guardian.tampered" 2>/dev/null \
+    || { ccdc_warn "cannot create guardian tamper evidence directory"; return 1; }
+  mv -- "$path" "$dest" 2>/dev/null \
+    || { ccdc_warn "cannot quarantine systemd override: $path"; return 1; }
+  ccdc_warn "TAMPERED: quarantined systemd override $path"
+  glog "TAMPER path=$path action=override_quarantined evidence=$dest"
+}
+
+override_unit_for_path() {
+  case "$1" in
+    */"$name-watch.service"|*/"$name-watch.service.d") printf '%s\n' "$name-watch.service" ;;
+    */"$name.service"|*/"$name.service.d") printf '%s\n' "$name.service" ;;
+    */"$name-reconcile.service"|*/"$name-reconcile.service.d") printf '%s\n' "$name-reconcile.service" ;;
+    */"$name-reconcile.timer"|*/"$name-reconcile.timer.d") printf '%s\n' "$name-reconcile.timer" ;;
+  esac
+}
+
+ensure_no_unit_overrides() {
+  have_systemd || return 0
+  local path changed=0 affected_unit
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      preserve_override "$path" || return 1
+      affected_unit=$(override_unit_for_path "$path")
+      if [ -n "$affected_unit" ] \
+        && ! ccdc_list_contains "$affected_unit" "$units_needing_restart"; then
+        units_needing_restart="$units_needing_restart $affected_unit"
+      fi
+      changed=1
+    fi
+  done <<EOF
+$(unit_override_paths)
+EOF
+  [ "$changed" -eq 0 ] || need_daemon_reload=1
+}
+
+restart_repaired_units() {
+  local blocking=${1:-0} unit
+  [ -n "$units_needing_restart" ] || return 0
+  reload_if_needed || return 1
+  for unit in $units_needing_restart; do
+    if ccdc_is_dry_run; then
+      printf '[dry-run] would restart repaired effective unit %s\n' "$unit"
+    elif [ "$blocking" -eq 1 ]; then
+      run_systemctl restart "$unit" >>"$log" 2>&1 \
+        || { ccdc_warn "could not restart repaired unit $unit"; return 1; }
+    else
+      # A reconcile oneshot may be repairing its own override. Queueing the
+      # restart lets this pass finish its writes before systemd terminates it.
+      run_systemctl --no-block restart "$unit" >>"$log" 2>&1 \
+        || { ccdc_warn "could not queue restart for repaired unit $unit"; return 1; }
+    fi
+  done
+  units_needing_restart=''
+}
+
+new_install_has_override() {
+  local path
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      ccdc_warn "guardian unit name collides with pre-existing override: $path"
+      return 0
+    fi
+  done <<EOF
+$(unit_override_paths)
+EOF
+  return 1
+}
+
+unit_effective_matches() {
+  local unit=$1 fragment=$2 executable=${3:-} actual dropins
+  actual=$(run_systemctl show -p FragmentPath --value "$unit" 2>/dev/null || printf '')
+  [ "$actual" = "$fragment" ] || return 1
+  dropins=$(run_systemctl show -p DropInPaths --value "$unit" 2>/dev/null || printf '')
+  printf '%s\n' "$dropins" | tr ' ' '\n' | grep -F "/$unit.d/" >/dev/null && return 1
+  if [ -n "$executable" ]; then
+    run_systemctl show -p ExecStart "$unit" 2>/dev/null \
+      | grep -F -- "$executable" >/dev/null || return 1
+  fi
+  return 0
+}
+
 # True when an artifact is missing OR has been edited since we wrote it.
 #
 # Repairing a modified artifact matters as much as replacing a deleted one: an
@@ -208,6 +413,10 @@ expected_artifacts() {
   printf 'payload|%s\n' "$watchdog_copy"
   printf 'payload|%s\n' "$common_copy"
   printf 'payload|%s\n' "$env_copy"
+  printf 'repair|%s\n' "$repair_guardian"
+  printf 'repair|%s\n' "$repair_watchdog"
+  printf 'repair|%s\n' "$repair_common"
+  printf 'repair|%s\n' "$repair_env"
   if have_systemd; then
     printf 'payload|%s\n' "$tick_script"
     printf 'target|%s\n' "$svc_watch"
@@ -216,6 +425,26 @@ expected_artifacts() {
     printf 'layer2|%s\n' "$tmr_reconcile"
   fi
   have_crond && printf 'layer3|%s\n' "$cron_file"
+}
+
+# Removal cannot depend on what init system happens to be running now. A rescue
+# shell or chroot may have no /run/systemd/system even though unit files were
+# installed for the next boot.
+removal_artifacts() {
+  printf 'payload|%s\n' "$guardian_copy"
+  printf 'payload|%s\n' "$watchdog_copy"
+  printf 'payload|%s\n' "$common_copy"
+  printf 'payload|%s\n' "$env_copy"
+  printf 'repair|%s\n' "$repair_guardian"
+  printf 'repair|%s\n' "$repair_watchdog"
+  printf 'repair|%s\n' "$repair_common"
+  printf 'repair|%s\n' "$repair_env"
+  printf 'payload|%s\n' "$tick_script"
+  printf 'target|%s\n' "$svc_watch"
+  printf 'layer1|%s\n' "$svc_ticker"
+  printf 'layer2|%s\n' "$svc_reconcile"
+  printf 'layer2|%s\n' "$tmr_reconcile"
+  printf 'layer3|%s\n' "$cron_file"
 }
 
 # Rebuild the manifest from what is on disk now.
@@ -233,10 +462,11 @@ record_manifest() {
   # entries. Found on the lab VM; a sandbox with no schedulers running cannot
   # produce it.
   tmp="${manifest}.next.$$"
-  : >"$tmp" || { ccdc_warn "cannot write manifest"; return 0; }
+  staged_paths="$staged_paths $tmp"
+  : >"$tmp" || { ccdc_warn "cannot write manifest"; return 1; }
   while IFS='|' read -r kind path; do
     [ -n "${path:-}" ] || continue
-    if [ ! -e "$path" ]; then
+    if [ ! -e "$path" ] && [ ! -L "$path" ]; then
       printf '%s|%s|absent\n' "$kind" "$path" >>"$tmp"
       continue
     fi
@@ -250,7 +480,7 @@ record_manifest() {
   done <<EOF
 $(expected_artifacts)
 EOF
-  mv "$tmp" "$manifest"
+  mv "$tmp" "$manifest" || { ccdc_warn "cannot install manifest"; return 1; }
 }
 
 # One tick at a time. Two schedulers firing in the same second would otherwise
@@ -263,21 +493,55 @@ EOF
 # reconcile that is writing the same files.
 acquire_lock() {
   ccdc_is_dry_run && return 0
-  local wait_for=${1:-0} deadline stamp now age
+  local wait_for=${1:-0} deadline stamp now age owner owner_pid owner_start live_start
   deadline=$(( $(date +%s) + wait_for ))
   while :; do
     if mkdir "$lock_dir" 2>/dev/null; then
-      trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+      owner_start=$(awk '{print $22}' "/proc/$$/stat" 2>/dev/null || printf 'unknown')
+      lock_token="$$:$owner_start"
+      if ! printf '%s\n' "$lock_token" >"$lock_owner"; then
+        lock_token=''
+        rmdir "$lock_dir" 2>/dev/null || true
+        glog "lock_failed cannot_write_owner"
+        return 1
+      fi
       return 0
     fi
-    # A tick that died holding the lock must not wedge the guardian permanently.
+
+    # Break a lock immediately only when its recorded owner is demonstrably
+    # gone. Age alone is not proof: a slow systemctl call can legitimately run
+    # longer than several intervals. An ownerless empty directory is eligible
+    # only after the old age threshold.
+    owner=$(cat "$lock_owner" 2>/dev/null || printf '')
+    owner_pid=${owner%%:*}
+    owner_start=${owner#*:}
+    live_start=''
+    case "$owner_pid" in
+      ''|*[!0-9]*) ;;
+      *)
+        if kill -0 "$owner_pid" 2>/dev/null; then
+          live_start=$(awk '{print $22}' "/proc/$owner_pid/stat" 2>/dev/null || printf '')
+        fi
+        ;;
+    esac
+    if [ -n "$owner" ] && { [ -z "$live_start" ] || [ "$live_start" != "$owner_start" ]; }; then
+      glog "breaking dead tick lock owner=$owner"
+      rm -f "$lock_owner" 2>/dev/null || true
+      if rmdir "$lock_dir" 2>/dev/null; then
+        continue
+      fi
+      glog "lock_not_empty refusing_to_break path=$lock_dir"
+    fi
+
     stamp=$(stat -c '%Y' "$lock_dir" 2>/dev/null || stat -f '%m' "$lock_dir" 2>/dev/null || printf '0')
     now=$(date +%s)
     age=$((now - stamp))
-    if [ "$age" -gt $((interval * 5)) ]; then
-      glog "breaking stale tick lock age=${age}s"
-      rmdir "$lock_dir" 2>/dev/null || true
-      continue
+    if [ -z "$owner" ] && [ "$age" -gt $((interval * 5)) ]; then
+      if rmdir "$lock_dir" 2>/dev/null; then
+        glog "broke ownerless stale tick lock age=${age}s"
+        continue
+      fi
+      glog "ownerless_lock_not_empty refusing_to_break age=${age}s path=$lock_dir"
     fi
     [ "$(date +%s)" -lt "$deadline" ] || break
     sleep 1
@@ -289,16 +553,57 @@ acquire_lock() {
 # --- artifact bodies ---------------------------------------------------------
 
 copy_payload_file() {
-  local src=$1 dest=$2
-  [ -f "$src" ] || { ccdc_warn "payload source missing: $src"; return 0; }
-  [ "$src" = "$dest" ] && return 0
+  local src=$1 dest=$2 mode_bits=${3:-} staged
+  [ -f "$src" ] || { ccdc_warn "payload source missing: $src"; return 1; }
+  [ "$src" != "$dest" ] || { ccdc_warn "refusing self-copy for payload: $src"; return 1; }
+  mkdir -p "$(dirname -- "$dest")" 2>/dev/null \
+    || { ccdc_warn "cannot create payload parent for $dest"; return 1; }
   # Same write-then-rename rule as write_artifact: watchdog.sh is running under
   # the watch service while we repair it, and cp truncates in place.
-  local staged="${dest}.new.$$"
-  cp -f "$src" "$staged" 2>/dev/null || { ccdc_warn "cannot copy $src to $dest"; return 0; }
-  chmod --reference="$src" "$staged" 2>/dev/null || chmod 0700 "$staged" 2>/dev/null || true
-  mv -f "$staged" "$dest" 2>/dev/null || { ccdc_warn "cannot install $dest"; rm -f "$staged"; return 0; }
+  staged="${dest}.new.$$"
+  staged_paths="$staged_paths $staged"
+  cp -f "$src" "$staged" 2>/dev/null || { ccdc_warn "cannot copy $src to $dest"; return 1; }
+  if [ -n "$mode_bits" ]; then
+    chmod "$mode_bits" "$staged" 2>/dev/null \
+      || { ccdc_warn "cannot chmod $dest"; return 1; }
+  else
+    chmod --reference="$src" "$staged" 2>/dev/null \
+      || chmod 0700 "$staged" 2>/dev/null \
+      || { ccdc_warn "cannot chmod $dest"; return 1; }
+  fi
+  mv -f "$staged" "$dest" 2>/dev/null || { ccdc_warn "cannot install $dest"; rm -f "$staged"; return 1; }
   created="$created $dest"
+  return 0
+}
+
+matches_manifest() {
+  local path=$1 expected actual
+  [ -f "$path" ] || return 1
+  expected=$(recorded_hash "$path")
+  [ -n "$expected" ] && [ "$expected" != absent ] || return 1
+  actual=$(file_hash "$path")
+  [ -n "$actual" ] && [ "$actual" = "$expected" ]
+}
+
+repair_pair() {
+  local live=$1 repair=$2 mode_bits=$3
+  if matches_manifest "$repair"; then
+    if ! matches_manifest "$live"; then
+      if [ -e "$live" ] || [ -L "$live" ]; then quarantine "$live"; fi
+      copy_payload_file "$repair" "$live" "$mode_bits" || return 1
+      glog "payload_repaired live=$live source=$repair"
+    fi
+    return 0
+  fi
+  if matches_manifest "$live"; then
+    if [ -e "$repair" ] || [ -L "$repair" ]; then quarantine "$repair"; fi
+    copy_payload_file "$live" "$repair" "$mode_bits" || return 1
+    glog "repair_source_rebuilt repair=$repair source=$live"
+    return 0
+  fi
+  ccdc_warn "neither payload copy matches the manifest: $live and $repair"
+  glog "payload_unrecoverable live=$live repair=$repair"
+  return 1
 }
 
 write_payload() {
@@ -310,38 +615,46 @@ write_payload() {
   # edited, the tick executing it is already the attacker's code and cannot be
   # trusted to notice. A tick run from the checkout (or a fresh --install) heals
   # it; a tick run from the tampered copy will not.
-  if [ "$force" -eq 1 ] \
-    || needs_rebuild "$guardian_copy" \
-    || needs_rebuild "$watchdog_copy" \
-    || needs_rebuild "$common_copy"; then
-    if ccdc_is_dry_run; then
-      printf '[dry-run] would copy guardian.sh, watchdog.sh and lib/common.sh into %s\n' "$guardian_dir"
-    else
-      mkdir -p "$guardian_dir/lib" 2>/dev/null || ccdc_warn "cannot create $guardian_dir/lib"
-      # Copy from whichever tree this invocation is running out of: on a
-      # reconcile tick that is the installed copy, which makes the guardian
-      # able to heal its own payload after a partial delete. When source and
-      # destination are the same file that is exactly the healthy case, so skip
-      # it silently rather than letting cp complain once per tick forever.
-      copy_payload_file "$SCRIPT_DIR/watchdog.sh" "$watchdog_copy"
-      copy_payload_file "$SCRIPT_DIR/lib/common.sh" "$common_copy"
-      copy_payload_file "$SCRIPT_DIR/guardian.sh" "$guardian_copy"
-      chmod 0700 "$guardian_dir" 2>/dev/null || true
-      chmod 0700 "$guardian_copy" "$watchdog_copy" 2>/dev/null || true
-      glog "payload_refreshed dir=$guardian_dir"
-    fi
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would install/repair live and independent repair payloads in %s\n' "$guardian_dir"
+    pinned_env_hash=$(file_hash "$config")
+    [ -n "$pinned_env_hash" ] || pinned_env_hash=DRY_RUN_SHA256
+    return 0
   fi
-  # The config goes with it. A guardian pointing at /tmp/ccdc-linux.env is one
-  # tmpfiles cleanup away from restarting nothing.
-  if [ -n "$config" ] && { [ "$force" -eq 1 ] || needs_rebuild "$env_copy"; }; then
-    if ccdc_is_dry_run; then
-      printf '[dry-run] would copy %s to %s (0600)\n' "$config" "$env_copy"
-    else
-      cp -f "$config" "$env_copy" 2>/dev/null || ccdc_warn "cannot copy config to $env_copy"
-      chmod 0600 "$env_copy" 2>/dev/null || true
-      created="$created $env_copy"
-    fi
+
+  mkdir -p "$guardian_dir/lib" "$repair_dir/lib" 2>/dev/null \
+    || { ccdc_warn "cannot create payload directories under $guardian_dir"; return 1; }
+  chmod 0700 "$guardian_dir" "$guardian_dir/lib" "$repair_dir" "$repair_dir/lib" 2>/dev/null \
+    || { ccdc_warn "cannot secure payload directories under $guardian_dir"; return 1; }
+
+  if [ "$force" -eq 1 ]; then
+    # A fresh install must be launched from the checkout. Reinstalling from the
+    # live copy would bless that copy as its own clean repair source.
+    [ "$SCRIPT_DIR" != "$guardian_dir" ] \
+      || { ccdc_warn "run --install from the kit checkout, not the installed copy"; return 1; }
+    copy_payload_file "$SCRIPT_DIR/guardian.sh" "$repair_guardian" 0700 || return 1
+    copy_payload_file "$SCRIPT_DIR/watchdog.sh" "$repair_watchdog" 0700 || return 1
+    copy_payload_file "$SCRIPT_DIR/lib/common.sh" "$repair_common" 0600 || return 1
+    [ -n "$config" ] || { ccdc_warn "no configuration source for repair payload"; return 1; }
+    copy_payload_file "$config" "$repair_env" 0600 || return 1
+
+    copy_payload_file "$repair_guardian" "$guardian_copy" 0700 || return 1
+    copy_payload_file "$repair_watchdog" "$watchdog_copy" 0700 || return 1
+    copy_payload_file "$repair_common" "$common_copy" 0600 || return 1
+    copy_payload_file "$repair_env" "$env_copy" 0600 || return 1
+    pinned_env_hash=$(file_hash "$repair_env")
+    [ -n "$pinned_env_hash" ] || return 1
+    glog "payload_installed live=$guardian_dir repair=$repair_dir"
+    return 0
   fi
+
+  repair_pair "$guardian_copy" "$repair_guardian" 0700 || return 1
+  repair_pair "$watchdog_copy" "$repair_watchdog" 0700 || return 1
+  repair_pair "$common_copy" "$repair_common" 0600 || return 1
+  repair_pair "$env_copy" "$repair_env" 0600 || return 1
+  pinned_env_hash=$(file_hash "$repair_env")
+  [ -n "$pinned_env_hash" ] || return 1
+  return 0
 }
 
 write_tick_script() {
@@ -351,7 +664,7 @@ write_tick_script() {
 # reconcile pass as the timer and the cron entry.
 while :; do
   [ -f "$sentinel" ] && exit 0
-  /bin/bash "$guardian_copy" --config "$env_copy" --tick --apply >/dev/null 2>&1
+  /bin/bash "$guardian_copy" --config "$repair_env" --fallback-config "$env_copy" --config-sha256 "$pinned_env_hash" --tick --apply >/dev/null 2>&1
   sleep $interval
 done
 SCRIPT
@@ -372,6 +685,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+  [ "$?" -eq 0 ] || return 1
   need_daemon_reload=1
 }
 
@@ -390,6 +704,7 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 UNIT
+  [ "$?" -eq 0 ] || return 1
   need_daemon_reload=1
 }
 
@@ -400,8 +715,9 @@ Description=Node health reconcile
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $guardian_copy --config $env_copy --tick --apply
+ExecStart=/bin/bash $guardian_copy --config $repair_env --fallback-config $env_copy --config-sha256 $pinned_env_hash --tick --apply
 UNIT
+  [ "$?" -eq 0 ] || return 1
   need_daemon_reload=1
 }
 
@@ -421,6 +737,7 @@ Unit=$name-reconcile.service
 [Install]
 WantedBy=timers.target
 UNIT
+  [ "$?" -eq 0 ] || return 1
   need_daemon_reload=1
 }
 
@@ -439,7 +756,7 @@ write_cron() {
 # Removable with: guardian.sh --config <cfg> --uninstall --apply
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-$spec root /bin/bash $guardian_copy --config $env_copy --tick --apply >/dev/null 2>&1
+$spec root /bin/bash $guardian_copy --config $repair_env --fallback-config $env_copy --config-sha256 $pinned_env_hash --tick --apply >/dev/null 2>&1
 CRON
 }
 
@@ -461,26 +778,32 @@ ensure_watchdog() {
   local force=${1:-0}
   if have_systemd; then
     if [ "$force" -eq 1 ]; then
-      write_svc_watch
+      write_svc_watch || return 1
     elif needs_rebuild "$svc_watch"; then
       ccdc_info "watchdog unit missing or edited; rebuilding"
-      write_svc_watch
+      write_svc_watch || return 1
       # The old unit may still be loaded in memory with the attacker's edit.
-      ccdc_is_dry_run || systemctl stop "$name-watch.service" >>"$log" 2>&1 || true
+      ccdc_is_dry_run || run_systemctl stop "$name-watch.service" >>"$log" 2>&1 || true
     fi
-    reload_if_needed
+    reload_if_needed || return 1
+    if ! ccdc_is_dry_run \
+      && ! unit_effective_matches "$name-watch.service" "$svc_watch" "$watchdog_copy"; then
+      ccdc_warn "effective systemd watchdog unit differs from the installed unit"
+      return 1
+    fi
     if ccdc_is_dry_run; then
-      systemctl is-active --quiet "$name-watch.service" 2>/dev/null \
+      run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null \
         || printf '[dry-run] would start %s-watch.service\n' "$name"
       return 0
     fi
-    if ! systemctl is-active --quiet "$name-watch.service" 2>/dev/null; then
+    if ! run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null; then
       glog "watchdog_down restarting unit=$name-watch.service"
-      systemctl enable --now "$name-watch.service" >>"$log" 2>&1 \
-        || ccdc_warn "could not start $name-watch.service"
-    elif ! systemctl is-enabled --quiet "$name-watch.service" 2>/dev/null; then
+      run_systemctl enable --now "$name-watch.service" >>"$log" 2>&1 \
+        || { ccdc_warn "could not start $name-watch.service"; return 1; }
+    elif ! run_systemctl is-enabled --quiet "$name-watch.service" 2>/dev/null; then
       # Active but not enabled survives until the next reboot and no longer.
-      systemctl enable "$name-watch.service" >>"$log" 2>&1 || true
+      run_systemctl enable "$name-watch.service" >>"$log" 2>&1 \
+        || { ccdc_warn "could not enable $name-watch.service"; return 1; }
     fi
     return 0
   fi
@@ -496,24 +819,36 @@ ensure_watchdog() {
   glog "watchdog_down starting detached loop"
   setsid /bin/bash "$watchdog_copy" --config "$env_copy" --apply --interval "$interval" \
     </dev/null >>"$state_dir/watchdog.err" 2>&1 &
-  printf '%s\n' "$!" >"$pid_file"
+  local watchdog_pid=$!
+  kill -0 "$watchdog_pid" 2>/dev/null \
+    || { ccdc_warn "detached watchdog failed to start"; return 1; }
+  printf '%s\n' "$watchdog_pid" >"$pid_file" \
+    || { kill "$watchdog_pid" 2>/dev/null || true; ccdc_warn "cannot record watchdog pid"; return 1; }
 }
 
 reload_if_needed() {
   [ "$need_daemon_reload" -eq 1 ] || return 0
-  need_daemon_reload=0
   have_systemd || return 0
-  ccdc_action systemctl daemon-reload
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would run systemctl daemon-reload\n'
+    need_daemon_reload=0
+    return 0
+  fi
+  run_systemctl daemon-reload >>"$log" 2>&1 \
+    || { ccdc_warn "systemctl daemon-reload failed"; return 1; }
+  need_daemon_reload=0
 }
 
 ensure_unit_enabled() {
   local unit=$1
   ccdc_is_dry_run && { printf '[dry-run] would ensure %s is enabled and running\n' "$unit"; return 0; }
-  if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
+  if ! run_systemctl is-active --quiet "$unit" 2>/dev/null; then
     glog "layer_down restarting unit=$unit"
-    systemctl enable --now "$unit" >>"$log" 2>&1 || ccdc_warn "could not start $unit"
-  elif ! systemctl is-enabled --quiet "$unit" 2>/dev/null; then
-    systemctl enable "$unit" >>"$log" 2>&1 || true
+    run_systemctl enable --now "$unit" >>"$log" 2>&1 \
+      || { ccdc_warn "could not start $unit"; return 1; }
+  elif ! run_systemctl is-enabled --quiet "$unit" 2>/dev/null; then
+    run_systemctl enable "$unit" >>"$log" 2>&1 \
+      || { ccdc_warn "could not enable $unit"; return 1; }
   fi
 }
 
@@ -525,13 +860,21 @@ ensure_layers() {
     # Spelled out rather than `[ force ] || [ ! -f x ] && write`: that chain
     # parses as (A || B) && C, which is right by accident and unreadable on
     # hour six.
-    if [ "$force" -eq 1 ] || needs_rebuild "$tick_script"; then write_tick_script; fi
-    if [ "$force" -eq 1 ] || needs_rebuild "$svc_ticker"; then write_svc_ticker; fi
-    if [ "$force" -eq 1 ] || needs_rebuild "$svc_reconcile"; then write_svc_reconcile; fi
-    if [ "$force" -eq 1 ] || needs_rebuild "$tmr_reconcile"; then write_tmr_reconcile; fi
-    reload_if_needed
-    ensure_unit_enabled "$name.service"
-    ensure_unit_enabled "$name-reconcile.timer"
+    if [ "$force" -eq 1 ] || needs_rebuild "$tick_script"; then write_tick_script || return 1; fi
+    if [ "$force" -eq 1 ] || needs_rebuild "$svc_ticker"; then write_svc_ticker || return 1; fi
+    if [ "$force" -eq 1 ] || needs_rebuild "$svc_reconcile"; then write_svc_reconcile || return 1; fi
+    if [ "$force" -eq 1 ] || needs_rebuild "$tmr_reconcile"; then write_tmr_reconcile || return 1; fi
+    reload_if_needed || return 1
+    if ! ccdc_is_dry_run; then
+      unit_effective_matches "$name.service" "$svc_ticker" "$tick_script" \
+        || { ccdc_warn "effective ticker unit differs from the installed unit"; return 1; }
+      unit_effective_matches "$name-reconcile.service" "$svc_reconcile" "$guardian_copy" \
+        || { ccdc_warn "effective reconcile unit differs from the installed unit"; return 1; }
+      unit_effective_matches "$name-reconcile.timer" "$tmr_reconcile" \
+        || { ccdc_warn "effective reconcile timer differs from the installed unit"; return 1; }
+    fi
+    ensure_unit_enabled "$name.service" || return 1
+    ensure_unit_enabled "$name-reconcile.timer" || return 1
     built=$((built + 2))
   else
     ccdc_warn "no systemd on this box: layers 1 and 2 are unavailable, cron is the only layer"
@@ -539,7 +882,7 @@ ensure_layers() {
 
   if have_crond; then
     if [ "$force" -eq 1 ] || needs_rebuild "$cron_file"; then
-      write_cron
+      write_cron || return 1
     fi
     built=$((built + 1))
   else
@@ -550,7 +893,11 @@ ensure_layers() {
     ccdc_warn "no /etc/cron.d on this box (Alpine/OpenRC?): layer 3 unavailable and not emulated"
   fi
 
-  [ "$built" -gt 0 ] || ccdc_warn "no scheduling layer could be built; the watchdog is NOT being kept alive"
+  if [ "$built" -eq 0 ]; then
+    ccdc_warn "no scheduling layer could be built; the watchdog is NOT being kept alive"
+    return 1
+  fi
+  return 0
 }
 
 # --- disarm ------------------------------------------------------------------
@@ -558,15 +905,63 @@ ensure_layers() {
 remove_artifact() {
   local path=$1
   [ -n "$path" ] || return 0
-  [ -e "$path" ] || return 0
+  [ -e "$path" ] || [ -L "$path" ] || return 0
   ccdc_action rm -f "$path"
+}
+
+remove_exact_tree() {
+  local path=$1
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would remove exact guardian-owned tree %s\n' "$path"
+  elif [ -d "$path" ] && [ ! -L "$path" ]; then
+    find "$path" -depth -delete 2>/dev/null \
+      || { ccdc_warn "could not completely remove $path"; return 1; }
+  else
+    rm -f -- "$path" || { ccdc_warn "could not remove $path"; return 1; }
+  fi
+}
+
+remove_staging_for() {
+  local path=$1 parent base
+  parent=$(dirname -- "$path")
+  base=$(basename -- "$path")
+  [ -d "$parent" ] || return 0
+  if ccdc_is_dry_run; then
+    find "$parent" -maxdepth 1 -type f -name "${base}.new.[0-9]*" -print 2>/dev/null \
+      | sed 's/^/[dry-run] would remove stale staging file /'
+  else
+    find "$parent" -maxdepth 1 -type f -name "${base}.new.[0-9]*" -delete 2>/dev/null || true
+  fi
 }
 
 stop_units() {
   have_systemd || return 0
   local unit
   for unit in "$name.service" "$name-reconcile.timer" "$name-reconcile.service" "$name-watch.service"; do
-    ccdc_action systemctl disable --now "$unit"
+    if ccdc_is_dry_run; then
+      printf '[dry-run] would disable and stop %s\n' "$unit"
+    else
+      run_systemctl disable --now "$unit" >>"$log" 2>&1 || true
+    fi
+  done
+}
+
+# Once a unit has entered a failed state, systemd keeps it in its own list even
+# after the unit file is deleted and the daemon is reloaded: it shows in
+# `systemctl list-units --all` and `systemctl --failed` as "not-found failed",
+# indefinitely. That is a phantom of your own tooling sitting in the exact place
+# you look first during an incident, and it outlives an uninstall that otherwise
+# left zero artifacts on disk. Found by the drill's post-uninstall assertion.
+reset_failed_units() {
+  have_systemd || return 0
+  local unit
+  for unit in "$name.service" "$name-reconcile.timer" "$name-reconcile.service" "$name-watch.service"; do
+    if ccdc_is_dry_run; then
+      printf '[dry-run] would clear any failed state for %s\n' "$unit"
+    else
+      run_systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    fi
   done
 }
 
@@ -587,15 +982,38 @@ remove_all() {
     [ -n "${path:-}" ] || continue
     remove_artifact "$path"
   done <<EOF
-$(expected_artifacts)
+$(removal_artifacts)
 EOF
 
-  # The detached watchdog, if this box had no systemd to own it.
-  if ! have_systemd; then
-    local pid
-    pid=$(cat "$pid_file" 2>/dev/null || printf '')
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    remove_exact_tree "$path" || true
+  done <<EOF
+$(unit_override_paths)
+EOF
+
+  while IFS='|' read -r kind path; do
+    [ -n "$path" ] || continue
+    remove_staging_for "$path"
+  done <<EOF
+$(removal_artifacts)
+EOF
+  if ccdc_is_dry_run; then
+    [ -f "${manifest}.next.$$" ] && printf '[dry-run] would remove %s\n' "${manifest}.next.$$"
+  else
+    find "$state_dir" -maxdepth 1 -type f -name 'guardian.manifest.next.[0-9]*' -delete 2>/dev/null || true
+  fi
+
+  # A detached watchdog can remain after the host changes init systems or after
+  # a partial install, so do not condition cleanup on current capabilities.
+  local pid
+  pid=$(cat "$pid_file" 2>/dev/null || printf '')
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    if [ -r "/proc/$pid/cmdline" ] \
+      && tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -F "$watchdog_copy" >/dev/null; then
       ccdc_action kill "$pid"
+    else
+      ccdc_warn "refusing to kill reused/unrecognized pid $pid from $pid_file"
     fi
   fi
   remove_artifact "$pid_file"
@@ -603,22 +1021,115 @@ EOF
   # rmdir, never rm -rf: if anything unexpected is in there, leaving it for the
   # operator to look at beats deleting a directory tree by name.
   if [ -d "$guardian_dir" ]; then
+    ccdc_action rmdir "$repair_dir/lib"
+    ccdc_action rmdir "$repair_dir"
     ccdc_action rmdir "$guardian_dir/lib"
     ccdc_action rmdir "$guardian_dir"
   fi
 
   need_daemon_reload=1
   reload_if_needed
+  # After the reload, so systemd has already dropped the unit files; this clears
+  # what the reload cannot.
+  reset_failed_units
+}
+
+new_install_has_collision() {
+  local kind path
+  if [ -e "$guardian_dir" ] || [ -L "$guardian_dir" ]; then
+    ccdc_warn "guardian install directory already exists without this manifest: $guardian_dir"
+    return 0
+  fi
+  while IFS='|' read -r kind path; do
+    [ -n "$path" ] || continue
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      ccdc_warn "guardian install target already exists without this manifest: $path"
+      return 0
+    fi
+  done <<EOF
+$(removal_artifacts)
+EOF
+  new_install_has_override
+}
+
+manifest_matches_disk() {
+  local kind path expected actual
+  [ -f "$manifest" ] || return 1
+  while IFS='|' read -r kind path; do
+    [ -n "$path" ] || continue
+    expected=$(recorded_hash "$path")
+    [ -n "$expected" ] && [ "$expected" != absent ] || return 1
+    [ -f "$path" ] || return 1
+    actual=$(file_hash "$path")
+    [ -n "$actual" ] && [ "$actual" = "$expected" ] || return 1
+  done <<EOF
+$(expected_artifacts)
+EOF
+  return 0
+}
+
+verify_installation() {
+  local schedulers=0
+  manifest_matches_disk || { ccdc_warn "one or more installed artifacts do not match the manifest"; return 1; }
+  if have_systemd; then
+    unit_effective_matches "$name-watch.service" "$svc_watch" "$watchdog_copy" || return 1
+    unit_effective_matches "$name.service" "$svc_ticker" "$tick_script" || return 1
+    unit_effective_matches "$name-reconcile.service" "$svc_reconcile" "$guardian_copy" || return 1
+    unit_effective_matches "$name-reconcile.timer" "$tmr_reconcile" || return 1
+    run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null || return 1
+    run_systemctl is-enabled --quiet "$name-watch.service" 2>/dev/null || return 1
+    run_systemctl is-active --quiet "$name.service" 2>/dev/null || return 1
+    run_systemctl is-enabled --quiet "$name.service" 2>/dev/null || return 1
+    run_systemctl is-active --quiet "$name-reconcile.timer" 2>/dev/null || return 1
+    run_systemctl is-enabled --quiet "$name-reconcile.timer" 2>/dev/null || return 1
+    schedulers=$((schedulers + 2))
+  else
+    watchdog_running_pidfile || return 1
+  fi
+  if have_crond; then
+    [ -f "$cron_file" ] || return 1
+    schedulers=$((schedulers + 1))
+  fi
+  [ "$schedulers" -gt 0 ]
+}
+
+removal_is_clean() {
+  local kind path
+  while IFS='|' read -r kind path; do
+    [ -n "$path" ] || continue
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done <<EOF
+$(removal_artifacts)
+EOF
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+  done <<EOF
+$(unit_override_paths)
+EOF
+  [ ! -d "$guardian_dir" ]
 }
 
 # --- modes -------------------------------------------------------------------
 
 do_install() {
+  local fresh=0
   [ "$apply" -eq 1 ] && ccdc_require_root
   [ -n "$config" ] || ccdc_die "--install needs --config FILE: the layers run unattended and cannot guess it"
   [ -f "$SCRIPT_DIR/watchdog.sh" ] || ccdc_die "watchdog.sh not found next to guardian.sh"
+  { have_systemd || have_crond; } \
+    || ccdc_die "no verified systemd or cron scheduler is running; nothing was installed"
+  if [ ! -f "$manifest" ]; then
+    fresh=1
+    new_install_has_collision \
+      && ccdc_die "refusing to overwrite an unowned guardian target; choose another CCDC_GUARDIAN_NAME/DIR"
+  fi
   acquire_lock $((interval * 2)) \
-    || ccdc_warn "proceeding without the tick lock; a reconcile pass may be running"
+    || ccdc_die "could not obtain the guardian lock; no install changes were made"
+
+  if [ "$fresh" -eq 0 ]; then
+    ensure_no_unit_overrides || ccdc_die "could not quarantine a systemd override; install aborted"
+  fi
 
   # A leftover sentinel from a previous uninstall would make every layer remove
   # itself on its first tick.
@@ -627,10 +1138,25 @@ do_install() {
     ccdc_info "cleared the disarm sentinel from a previous uninstall"
   fi
 
-  write_payload 1
-  ensure_watchdog 1
-  ensure_layers 1
-  record_manifest
+  if ! write_payload 1 \
+    || ! ensure_watchdog 1 \
+    || ! ensure_layers 1 \
+    || ! restart_repaired_units 1 \
+    || ! record_manifest; then
+    if [ "$fresh" -eq 1 ]; then
+      ccdc_warn "fresh install failed; removing its partial artifacts"
+      remove_all || true
+    fi
+    ccdc_die "guardian install failed; existing installations were left for inspection"
+  fi
+
+  if ! ccdc_is_dry_run && ! verify_installation; then
+    if [ "$fresh" -eq 1 ]; then
+      ccdc_warn "fresh install verification failed; removing its partial artifacts"
+      remove_all || true
+    fi
+    ccdc_die "guardian did not become fully operational; not claiming it is armed"
+  fi
 
   if ccdc_is_dry_run; then
     ccdc_info "dry run only; nothing installed. Re-run with --apply to arm."
@@ -653,10 +1179,21 @@ do_tick() {
     return 0
   fi
 
-  write_payload 0
-  ensure_watchdog 0
-  ensure_layers 0
-  record_manifest
+  ensure_no_unit_overrides \
+    || { glog "reconcile_failed phase=systemd_overrides"; return 1; }
+  [ ! -f "$sentinel" ] || { remove_all; return 0; }
+  write_payload 0 \
+    || { glog "reconcile_failed phase=payload"; return 1; }
+  [ ! -f "$sentinel" ] || { remove_all; return 0; }
+  ensure_watchdog 0 \
+    || { glog "reconcile_failed phase=watchdog"; return 1; }
+  [ ! -f "$sentinel" ] || { remove_all; return 0; }
+  ensure_layers 0 \
+    || { glog "reconcile_failed phase=layers"; return 1; }
+  record_manifest \
+    || { glog "reconcile_failed phase=manifest"; return 1; }
+  restart_repaired_units 0 \
+    || { glog "reconcile_failed phase=effective_restart"; return 1; }
 }
 
 layer_line() {
@@ -673,7 +1210,7 @@ layer_line() {
     fi
   fi
   if [ -n "$unit" ] && have_systemd; then
-    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+    if run_systemctl is-active --quiet "$unit" 2>/dev/null; then
       extra="$extra (active)"
     else
       extra="$extra (NOT ACTIVE)"
@@ -689,8 +1226,10 @@ do_status() {
   printf 'manifest: %s\n' "$manifest"
   if [ -f "$sentinel" ]; then
     printf 'state:    DISARMED (sentinel present: %s)\n' "$sentinel"
+  elif verify_installation 2>/dev/null; then
+    printf 'state:    armed (verified)\n'
   else
-    printf 'state:    armed\n'
+    printf 'state:    DEGRADED (one or more artifacts/layers failed verification)\n'
   fi
   printf '\nlayers:\n'
   if have_systemd; then
@@ -705,12 +1244,32 @@ do_status() {
   if have_crond; then
     layer_line layer3 "$cron_file"
   else
-    printf '  layer3    n/a       no /etc/cron.d on this box\n'
+    printf '  layer3    n/a       no verified running cron daemon with /etc/cron.d support\n'
+  fi
+
+  printf '\nrepair sources:\n'
+  layer_line repair "$repair_guardian"
+  layer_line repair "$repair_watchdog"
+  layer_line repair "$repair_common"
+  layer_line repair "$repair_env"
+
+  if have_systemd; then
+    override_found=0
+    while IFS= read -r override_path; do
+      [ -n "$override_path" ] || continue
+      if [ -e "$override_path" ] || [ -L "$override_path" ]; then
+        [ "$override_found" -eq 1 ] || printf '\nSYSTEMD OVERRIDES (guardian is not healthy):\n'
+        printf '  %s\n' "$override_path"
+        override_found=1
+      fi
+    done <<EOF
+$(unit_override_paths)
+EOF
   fi
 
   printf '\nwatchdog: '
   if have_systemd; then
-    if systemctl is-active --quiet "$name-watch.service" 2>/dev/null; then
+    if run_systemctl is-active --quiet "$name-watch.service" 2>/dev/null; then
       printf 'running (%s-watch.service)\n' "$name"
     else
       printf 'NOT RUNNING\n'
@@ -734,7 +1293,7 @@ do_status() {
 do_uninstall() {
   [ "$apply" -eq 1 ] && ccdc_require_root
   acquire_lock $((interval * 2)) \
-    || ccdc_warn "proceeding without the tick lock; the sentinel still stops any late rebuild"
+    || ccdc_die "could not obtain the guardian lock; uninstall made no changes"
 
   # Sentinel first, teardown second. A tick that fires in the middle of the
   # teardown must find the sentinel already there, or it will helpfully rebuild
@@ -742,7 +1301,12 @@ do_uninstall() {
   if ccdc_is_dry_run; then
     printf '[dry-run] would write the disarm sentinel %s first, then remove every artifact\n' "$sentinel"
   else
-    printf 'guardian disarmed %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$sentinel"
+    sentinel_staged="${sentinel}.new.$$"
+    staged_paths="$staged_paths $sentinel_staged"
+    printf 'guardian disarmed %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$sentinel_staged" \
+      && chmod 0600 "$sentinel_staged" \
+      && mv -f "$sentinel_staged" "$sentinel" \
+      || ccdc_die "could not write disarm sentinel; uninstall made no changes"
     glog "uninstall_started sentinel=$sentinel"
   fi
 
@@ -753,7 +1317,10 @@ do_uninstall() {
     return 0
   fi
 
-  rm -f "$manifest"
+  if ! removal_is_clean; then
+    ccdc_die "uninstall left one or more guardian artifacts; manifest retained for retry"
+  fi
+  rm -f "$manifest" || ccdc_die "artifacts are gone but manifest could not be removed: $manifest"
   glog "uninstall_complete"
   ccdc_info "guardian removed; sentinel left at $sentinel so any late tick disarms itself"
   ccdc_info "verify with --status, then delete the sentinel by hand once nothing fires"
