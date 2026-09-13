@@ -115,11 +115,25 @@ runtime behaviour is 5.6.
   installing packages at minute one is a change you cannot later distinguish
   from the red team's.
 
-**Still unconfirmed for the BYU tryout** (ask before the event): whether
-competitors use their own laptops or provided workstations, whether the boxes
-have outbound internet, and whether the tryout follows the national rules on
-team-written tools at all. Contacts: `#team-tryouts` on the BYU Cybersecurity
-Discord, or justin_giboney@byu.edu.
+**Confirmed for the BYU tryout (2026-09-13, from the organisers):** pulling
+scripts from GitHub is explicitly allowed, and the boxes are expected to have
+internet access to pull them quickly. Branch 1A (`git clone`) is therefore the
+primary path for the tryout.
+
+Verified the same day that an **anonymous** HTTPS clone of this repo works with
+no credentials, and that the `curl | tar` fallback returns the same tree — so a
+box with egress and no SSH key can still get the kit. If the repo had been left
+private this would have failed silently on the day.
+
+Keep branches 1B-1D in the bootstrap card anyway. "Should have internet" is a
+statement about intent, not a guarantee about the network on the day, and the
+fallbacks cost nothing to carry.
+
+**Still worth confirming:** whether competitors use their own laptops or
+provided workstations — that decides whether branch 1C (push from the
+workstation over SSH) is even available if egress turns out to be missing.
+Contacts: `#team-tryouts` on the BYU Cybersecurity Discord, or
+justin_giboney@byu.edu.
 
 ## 3. Does the white team penalize blue-team persistence that looks like malware?
 

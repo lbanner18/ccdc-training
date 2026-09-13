@@ -42,7 +42,7 @@ command -v git curl wget tar; timeout 5 curl -sI https://github.com >/dev/null 2
 is faster and changes nothing on the box. Installing packages at minute one is a
 change you cannot tell apart from the red team's later.
 
-### 1A — clone (preferred)
+### 1A — clone (preferred; CONFIRMED as the expected path for the BYU tryout)
 
 ```bash
 cd ~ && git clone https://github.com/lbanner18/ccdc-training.git
@@ -163,3 +163,8 @@ Now hand over to
   authorisation. Hence 1C rather than a thumb drive.
 
 Local tryouts may differ from national rules. Confirm before the event.
+
+**BYU tryout, confirmed 2026-09-13:** GitHub scripts are fair game and the boxes
+are expected to have internet to pull them. Anonymous clone and the curl
+fallback were both verified against this repo the same day. The other branches
+stay in this card because "should have internet" is intent, not a guarantee.
