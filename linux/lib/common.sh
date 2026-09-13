@@ -40,8 +40,16 @@ ccdc_timestamp_dir() {
   local base=${1:-/var/tmp/ccdc-evidence}
   local stamp
   stamp=$(ccdc_now)
-  if ! mkdir -p "$base" 2>/dev/null; then
-    base="${TMPDIR:-/tmp}/ccdc-evidence"
+  # "Can I create it" is not the same question as "can I write to it". Run any
+  # tool as root once and the evidence directory is left root-owned 0700; every
+  # later non-root run then fails at the first mkdir, because mkdir -p on an
+  # existing directory succeeds and the old test never noticed. That looked like
+  # the read-only tools being broken. Check both.
+  if ! mkdir -p "$base" 2>/dev/null || [ ! -w "$base" ]; then
+    ccdc_warn "evidence directory is not writable by $(id -un): $base"
+    ccdc_warn "falling back to a private directory; evidence will be SPLIT across two places"
+    ccdc_warn "to keep it in one place: sudo chown -R $(id -un) $base   (or run every tool with sudo)"
+    base="${TMPDIR:-/tmp}/ccdc-evidence-$(id -un)"
     mkdir -p "$base" || ccdc_die "cannot create evidence directory"
   fi
   # Include the process ID so recon and hunt launched back-to-back cannot
