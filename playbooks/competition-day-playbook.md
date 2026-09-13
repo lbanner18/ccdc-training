@@ -20,8 +20,10 @@ command run against a guessed value is a command run twice.
 [ ] Note the current time and the competition end time. Injects have hard
     deadlines; a late inject scores zero regardless of quality.
 [ ] Snapshot every VM if the environment allows it.
-[ ] Copy the kit onto the box. Copy config/example.env to /tmp/ccdc-linux.env
-    and fill it in. Do NOT paste secrets into chat or commit the filled copy.
+[ ] Copy the kit onto the box -> bootstrap-on-the-box.md (one probe decides
+    clone / tarball / push-from-workstation). Copy config/example.env to
+    /tmp/ccdc-linux.env and fill it in. Do NOT paste secrets into chat or
+    commit the filled copy.
 ```
 
 The single most important number: **injects are half the score.** You cannot

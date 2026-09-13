@@ -67,6 +67,60 @@ Consequences for this kit:
   winter, not the spring.
 - "Frozen" also means the useful work is the work done *before* the freeze.
 
+## 2b. Getting the kit onto the box: what the rules allow
+
+Researched 2026-09-13 against https://www.nationalccdc.org/rules.html.
+
+**Rule 8.1 — removable media is banned:**
+
+> No memory sticks, flash drives, removable drives, CDROMs, electronic media,
+> or other similar electronic devices are allowed in the room during the
+> competition unless specifically authorized by the Operations or White Team in
+> advance.
+
+So a USB fallback is not a fallback. Delivery has to be network-based.
+
+**Rule 5.1 — public internet resources are valid:**
+
+> Internet resources such as FAQs, how-to's, existing forums and responses, and
+> company websites, are completely valid for competition use provided there is
+> no fee required to access those resources [...]
+
+**Rule 5.2 — but nothing private:**
+
+> Teams may not use any external, private electronic staging area or FTP site
+> for patches, software, etc. during the competition [...] All Internet
+> resources used during the competition must be freely available to all other
+> teams.
+
+This is the rule that makes the plan work. A **public** GitHub repo is freely
+available to all other teams; a private repo or a personal server would be a
+prohibited private staging area. Publishing this repo therefore does two jobs:
+it starts the 5.6.1 three-month clock, *and* it makes cloning it mid-event
+legitimate under 5.2.
+
+**The 5.6 clause that looks contradictory.** Rule 5.6 also prohibits "team
+written tools, scripts, or executables that use resources outside of the
+competition environment other than simple DNS lookups." That governs what the
+tools **do when they run** — no beaconing, no callbacks, which is design rule 4
+of this kit — not how the operator obtains them. Acquisition is 5.1/5.2;
+runtime behaviour is 5.6.
+
+**Consequences for delivery**, in `playbooks/bootstrap-on-the-box.md`:
+
+- Egress available -> `git clone` (or `curl | tar` if git is absent).
+- No egress -> push from the workstation over SSH. Needs nothing but SSH and no
+  media in the room.
+- Never `apt install` to bootstrap: if apt works you already had egress, and
+  installing packages at minute one is a change you cannot later distinguish
+  from the red team's.
+
+**Still unconfirmed for the BYU tryout** (ask before the event): whether
+competitors use their own laptops or provided workstations, whether the boxes
+have outbound internet, and whether the tryout follows the national rules on
+team-written tools at all. Contacts: `#team-tryouts` on the BYU Cybersecurity
+Discord, or justin_giboney@byu.edu.
+
 ## 3. Does the white team penalize blue-team persistence that looks like malware?
 
 **Unsupported by the published rules. Treat the claim as false as stated.**
