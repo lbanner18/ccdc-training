@@ -40,9 +40,11 @@
 2. Copy `config/example.env` outside the repo and fill in only the packet's
    scored users, services, ports, and addresses.
 3. Run recon and hunt; review the evidence manually.
-4. Run the **current** full root `redteam/drill.sh`. The prior guardian version
-   passed 57/57; manifest, collision, payload-name, and sentry changes since
-   then require a fresh result rather than inheriting that claim.
+4. ~~Run the **current** full root `redteam/drill.sh`.~~ **Done 2026-09-14 on
+   the lab VM: 63/63, exit 0**, re-run after the review fixes. The prior 57/57
+   was correctly not inherited. An earlier 62/63 in the same session was a test
+   artifact - canaries left deployed from a previous run, so the drill's deploy
+   was correctly refused by canary.sh's own collision check.
 5. Verify sentry install/restart/status/uninstall and an approved disposable
    cron/unit action on the snapshot.
 6. Test a firewall change with a short rollback window from a second SSH
