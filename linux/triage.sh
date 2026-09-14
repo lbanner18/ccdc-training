@@ -41,6 +41,10 @@ done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
 
+state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
+mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence-$(id -un)"
+mkdir -p "$state_dir" 2>/dev/null || true
+
 findings=0
 checks=0
 
@@ -74,6 +78,19 @@ detail(){ printf '         %s\n' "$1"; }
 # exactly as written. The "run this" header above carries the meaning the "$"
 # was carrying, without being a character the shell has to reject.
 fix() { printf '           %s\n' "$1"; }
+
+# Machine-readable findings, written every run alongside the human output.
+#
+# sentry.sh consumes this instead of re-implementing the checks or scraping the
+# pretty output. One detection implementation, two readers - so a check can
+# never be fixed here and stay broken there.
+#
+#   SEVERITY|CHECK|SUBJECT|DESCRIPTION
+#
+# SUBJECT is the thing to act on: a username, a path, a unit, a "unit:target"
+# pair. It is the only field sentry parses for an argument.
+findings_file="${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}"
+emit() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$findings_file.$$" 2>/dev/null || true; }
 fixhdr(){ printf '         ---- run this ----------------------------------------\n'; }
 clean() { [ "$quiet" -eq 1 ] || printf '  ok     %s\n' "$1"; }
 begin() { checks=$((checks + 1)); }
@@ -88,6 +105,7 @@ begin
 uid0=$(awk -F: '$3==0 && $1!="root" {print $1}' /etc/passwd 2>/dev/null)
 if [ -n "$uid0" ]; then
   red "account(s) with UID 0 other than root - this IS root access   [CARD 1]"
+  for u in $uid0; do emit RED uid0 "$u" "UID 0 account that is not root"; done
   for u in $uid0; do
     detail "$(grep "^$u:" /etc/passwd)"
   done
@@ -111,6 +129,7 @@ if [ -r /etc/shadow ]; then
   empty=$(awk -F: '($2=="" ) {print $1}' /etc/shadow 2>/dev/null)
   if [ -n "$empty" ]; then
     red "account(s) with an EMPTY password: $(printf '%s' "$empty" | tr '\n' ' ')   [CARD 1]"
+    for u in $empty; do emit RED emptypw "$u" "account with an empty password"; done
     detail "anyone who can reach a login prompt is already in"
     for u in $empty; do
       fixhdr
@@ -144,6 +163,7 @@ if [ -n "$keyfiles" ]; then
   done
   if [ "$total" -gt 0 ]; then
     amber "$total SSH key(s) grant login. Recognise EVERY one or remove it   [CARD 2]"
+    for f in $keyfiles; do emit AMBER sshkey "$f" "SSH keys grant login here"; done
     for f in $keyfiles; do
       while IFS= read -r k; do
         [ -n "$k" ] || continue
@@ -185,6 +205,7 @@ cronhits=$(grep -rIlE "$shells" /etc/cron.d /etc/cron.daily /etc/cron.hourly \
   /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null)
 if [ -n "$cronhits" ]; then
   red "scheduled job(s) containing reverse-shell or download-and-run patterns   [CARD 3]"
+  for f in $cronhits; do emit RED cron "$f" "scheduled job containing a reverse shell"; done
   for f in $cronhits; do
     detail "$f"
     while IFS= read -r l; do
@@ -207,6 +228,7 @@ begin
 unithits=$(grep -rIlE "$shells" /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$unithits" ]; then
   red "systemd unit(s) containing reverse-shell or download-and-run patterns   [CARD 4]"
+  for f in $unithits; do emit RED unit "$f" "unit containing a reverse shell"; done
   for f in $unithits; do
     detail "$f"
     u=$(basename "$f")
@@ -227,6 +249,7 @@ tmpunits=$(grep -rIlE '^Exec[A-Za-z]*=.*(/tmp/|/var/tmp/|/dev/shm/)' \
   /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$tmpunits" ]; then
   red "systemd unit(s) executing from a world-writable directory   [CARD 4]"
+  for f in $tmpunits; do emit RED unittmp "$f" "unit executing from a world-writable directory"; done
   for f in $tmpunits; do detail "$f"; done
 else
   clean "no systemd unit executes from /tmp, /var/tmp or /dev/shm"
@@ -237,6 +260,7 @@ begin
 nopw=$(grep -rIh '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -v '^\s*$')
 if [ -n "$nopw" ]; then
   amber "passwordless sudo is configured - confirm each line is the packet's   [CARD 7]"
+  emit AMBER nopasswd "sudoers" "passwordless sudo is configured"
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-96)"; done <<EOF
 $nopw
 EOF
@@ -253,6 +277,7 @@ suid=$(find / -xdev -perm -4000 -type f 2>/dev/null \
   | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
 if [ -n "$suid" ]; then
   red "SUID interpreter(s)/utilities - instant root for any local user   [CARD 5]"
+  for f in $suid; do emit RED suid "$f" "SUID interpreter or file utility"; done
   fixhdr
   for f in $suid; do
     detail "$(ls -l "$f" 2>/dev/null)"
@@ -267,6 +292,7 @@ begin
 tmpproc=$(ls -l /proc/*/exe 2>/dev/null | grep -E '/(tmp|var/tmp|dev/shm)/' | head -10)
 if [ -n "$tmpproc" ]; then
   red "process(es) executing from /tmp, /var/tmp or /dev/shm   [CARD 6]"
+  emit RED tmpproc "see-log" "process executing from a world-writable directory"
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $tmpproc
 EOF
@@ -305,6 +331,7 @@ $(ss -tlnH 2>/dev/null | awk '$4 !~ /^(127\.|\[::1\]|::1)/ {print $4}' | sed 's/
 EOF
   if [ -n "$unexpected" ]; then
     amber "listening TCP port(s) not in CCDC_ALLOWED_TCP_PORTS:$unexpected   [CARD 8]"
+    for p in $unexpected; do emit AMBER port "$p" "listening port not in the allow list"; done
     detail "\"nothing but scored services should show on an nmap scan\""
     for p in $unexpected; do
       detail "$(ss -tlnpH "sport = :$p" 2>/dev/null | head -1 | cut -c1-100)"
@@ -326,6 +353,7 @@ begin
 svcshell=$(awk -F: '$3>0 && $3<1000 && $7 !~ /(nologin|false|sync)$/ {print $1":"$3":"$7}' /etc/passwd 2>/dev/null)
 if [ -n "$svcshell" ]; then
   red "service account(s) with a login shell   [CARD 10]"
+  for e in $svcshell; do emit RED svcshell "${e%%:*}" "service account with a login shell"; done
   for e in $svcshell; do
     u=${e%%:*}
     detail "$e"
@@ -363,6 +391,7 @@ for entry in $admins; do
 done
 if [ -n "$suspect" ]; then
   red "system account(s) in an admin group:$suspect   [CARD 10]"
+  for e in $suspect; do emit RED admingroup "$e" "system account in an admin group"; done
   fixhdr
   for e in $suspect; do fix "sudo gpasswd -d ${e%%/*} ${e#*/}"; done
 else
@@ -373,20 +402,32 @@ fi
 # .bashrc, .profile and /etc/profile.d run every time anyone gets a shell -
 # including you, the next time you `sudo -i`. A hook here is persistence that
 # fires on the defender's own hands, and nothing above reads these files.
+# What makes a line in an rc file suspicious is NOT the path it runs. An earlier
+# version matched a bare "/usr/local/bin/", which flagged - and then proposed
+# deleting - an ordinary `export PATH="$PATH:/usr/local/bin/"`. Measured on the
+# lab box: the remediation removed the operator's real PATH line along with the
+# implant, and both the detection and the fix were "working as written".
+#
+# The signal is that a login script LAUNCHES something. A stock .bashrc sets
+# variables and defines functions; it does not background a process. So: the
+# reverse-shell patterns, execution out of a world-writable directory, or any
+# form of detached start.
+rc_launch='nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
 begin
 rchits=''
 for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc /etc/profile \
          /home/*/.bashrc /home/*/.profile /home/*/.bash_profile /etc/profile.d/*; do
   [ -f "$f" ] || continue
-  grep -qIE "$shells|/usr/local/bin/|/tmp/|/dev/shm/" "$f" 2>/dev/null && rchits="$rchits $f"
+  grep -qIE "$shells|$rc_launch" "$f" 2>/dev/null && rchits="$rchits $f"
 done
 if [ -n "$rchits" ]; then
   red "shell start-up file(s) launching something   [CARD 11]"
+  for f in $rchits; do emit RED rcfile "$f" "shell start-up file launching something"; done
   detail "these run on EVERY login, including your next sudo -i"
   for f in $rchits; do
     detail "$f"
     while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done <<EOF
-$(grep -IhE "$shells|/usr/local/bin/|/tmp/|/dev/shm/" "$f" 2>/dev/null | head -3)
+$(grep -IhE "$shells|$rc_launch" "$f" 2>/dev/null | head -3)
 EOF
     fixhdr
     fix "sudo cp $f /var/tmp/evidence-$(basename "$f")"
@@ -394,6 +435,34 @@ EOF
   done
 else
   clean "no shell start-up file launches anything unusual"
+fi
+
+# --- 9d-ii. What the start-up file LAUNCHES ----------------------------------
+# Same insight as the unit check below: the hook is the trigger, the payload is
+# one level down. A line that runs /usr/local/bin/net-diag looks entirely
+# ordinary until you read /usr/local/bin/net-diag.
+begin
+rcdeep=''
+for f in $rchits; do
+  for t in $(grep -IhoE '/(usr/local/bin|opt|usr/bin|var|srv)/[A-Za-z0-9._/-]+' "$f" 2>/dev/null | sort -u); do
+    [ -f "$t" ] || continue
+    grep -qIE "$shells" "$t" 2>/dev/null && rcdeep="$rcdeep $f::$t"
+  done
+done
+if [ -n "$rcdeep" ]; then
+  red "start-up file(s) launching a script that contains a reverse shell   [CARD 11]"
+  for e in $rcdeep; do
+    f=${e%%::*}; t=${e#*::}
+    detail "$f -> $t"
+    emit RED rcdeep "$e" "start-up file launching a script containing a reverse shell"
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-88)"; done <<EOF
+$(grep -IhE "$shells" "$t" 2>/dev/null | head -2)
+EOF
+    fixhdr
+    fix "sudo cp $t $state_dir/evidence-$(basename "$t") && sudo rm -f $t"
+  done
+else
+  clean "no start-up file launches a script containing a reverse shell"
 fi
 
 # --- 9e. Units whose ExecStart TARGET is malicious ---------------------------
@@ -409,13 +478,14 @@ for unit in /etc/systemd/system/*.service /run/systemd/system/*.service; do
   target=$(awk -F= '/^ExecStart=/ {print $2; exit}' "$unit" 2>/dev/null | awk '{print $1}' | sed 's/^[-@+!]*//')
   case "$target" in /*) ;; *) continue ;; esac
   [ -f "$target" ] || continue
-  grep -qIE "$shells" "$target" 2>/dev/null && deephits="$deephits $unit|$target"
+  grep -qIE "$shells" "$target" 2>/dev/null && deephits="$deephits $unit::$target"
 done
 if [ -n "$deephits" ]; then
   red "unit(s) whose ExecStart script contains a reverse shell   [CARD 4]"
+  for e in $deephits; do emit RED unitdeep "$e" "unit whose ExecStart script contains a reverse shell"; done
   detail "the unit itself looks clean - the payload is one level down"
   for e in $deephits; do
-    unit=${e%%|*}; target=${e#*|}; u=$(basename "$unit"); base=${u%.service}
+    unit=${e%%::*}; target=${e#*::}; u=$(basename "$unit"); base=${u%.service}
     detail "$u -> $target"
     while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done <<EOF
 $(grep -IhE "$shells" "$target" 2>/dev/null | head -2)
@@ -437,6 +507,7 @@ begin
 recent=$(find /etc -xdev -type f -mmin -30 2>/dev/null | grep -vE '/(mtab|resolv.conf|adjtime|.*\.lock)$' | head -8)
 if [ -n "$recent" ]; then
   amber "/etc file(s) modified in the last 30 minutes   [CARD 9]"
+  emit AMBER etcchange "see-log" "/etc changed recently"
   detail "if you did not change these, someone else did"
   for f in $recent; do detail "$(date -r "$f" '+%H:%M') $f"; done
 else
@@ -464,6 +535,13 @@ else
   printf '  cat or paste playbooks/remediation-cards.md - it is markdown, and bash\n'
   printf '  will try to execute the prose.\n'
 fi
+# Write-then-rename so a reader never sees a half-written findings file.
+if [ -f "$findings_file.$$" ]; then
+  mv "$findings_file.$$" "$findings_file" 2>/dev/null || rm -f "$findings_file.$$"
+else
+  : >"$findings_file" 2>/dev/null || true
+fi
+
 printf '\n  Full detail, if you want it: ./linux/hunt.sh and ./linux/recon.sh\n'
 [ "$findings" -gt 0 ] && exit 3
 exit 0

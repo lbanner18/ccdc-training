@@ -222,7 +222,39 @@ seconds of scored downtime, because chain B was still there.
 
 ---
 
-## 4. The detection loop — what you actually watch
+## 4. The sentry — it hunts so you can write injects
+
+Start this and stop hunting. It runs `triage.sh` every pass, reports only what
+is NEW, works out the exact fix, and queues it for you.
+
+```
+[ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --interval 60
+```
+
+Then, between injects — this is your whole monitoring loop:
+
+```
+[ ] cat /var/tmp/ccdc-evidence/ALERTS
+[ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply
+```
+
+It rings the terminal bell on a new RED and never acts without `--approve`.
+Two things it deliberately leaves to you, because only the packet can settle
+them: which SSH keys are legitimate, and which `NOPASSWD` sudo rules are yours.
+They appear in ALERTS under "needs your judgement".
+
+**It refuses to act until the packet is in the config.** `CCDC_ALLOWED_USERS`
+and `CCDC_SYSTEMD_SERVICES` must both be set. An empty protect list does not
+mean nothing is protected — it means nobody has told the tool what is scored,
+and that is the most dangerous state to act from.
+
+A RED finding it will not touch because of those lists is still shown, loudly,
+under "sentry will NOT touch — YOU must decide". Protection narrows what it
+touches, never what it tells you.
+
+---
+
+## 4b. The change-detection loop — what you watch
 
 The kit collects well and alerts not at all: canary trips go to a log nobody
 reads and `hunt.sh` writes a 124K report you cannot re-read every few minutes.
@@ -334,7 +366,8 @@ BEFORE : packet -> config -> snapshot -> access confirmed
 SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; who ; ss -tulpn ; keys
 HARDEN : creds -> fw.sh(+confirm) -> ssh -> services.sh   [verify each]
 ARM    : sudo arm.sh --apply      (backup + canaries + guardian + watchdog)
-WATCH  : watch.sh --interval 120  (prints only what CHANGED)
+SENTRY : sudo sentry.sh --interval 60   (detects + queues fixes)
+SIGNOFF: cat ALERTS ; sentry.sh --approve --apply
 INJECT : triage deadline+deliverables ; use responses/ ; screenshot as you go
 HIT?   : identify -> contain(snapshot!) -> eradicate(+way back in) -> recover
 ALWAYS : verify the scored service FROM THE NETWORK after every change
@@ -346,7 +379,7 @@ Three commands are the whole standing defence. If you remember nothing else:
 sudo ./linux/triage.sh   --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh      --config /tmp/ccdc-linux.env --apply
      ./linux/services.sh --config /tmp/ccdc-linux.env --review
-     ./linux/watch.sh    --config /tmp/ccdc-linux.env --interval 120
+sudo ./linux/sentry.sh  --config /tmp/ccdc-linux.env --interval 60
 ```
 
 Two things no tool here can do for you: check the scored service from off the

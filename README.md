@@ -21,9 +21,23 @@ cp config/example.env /tmp/ccdc-linux.env
 ./linux/arm.sh      --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
 
-# 3. Watch. Read-only, and prints only what CHANGED since the last pass.
-./linux/watch.sh --config /tmp/ccdc-linux.env --interval 120
+# 3. Start the sentry. It hunts so you can write injects.
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --interval 60
 ```
+
+The sentry runs triage on a loop, notices only what is NEW, and works out the
+exact remediation. It never acts on its own — findings queue for your sign-off:
+
+```bash
+cat /var/tmp/ccdc-evidence/ALERTS                                  # what is waiting
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply   # do it
+```
+
+That split is the point: detection and diagnosis are automatic, the decision is
+yours, and the typing is not. It **refuses to act at all** until
+`CCDC_ALLOWED_USERS` and `CCDC_SYSTEMD_SERVICES` are filled in from the packet —
+an empty protect list does not mean nothing is protected, it means nobody has
+told the tool what is scored.
 
 Every mutating tool is dry-run by default and needs `--apply`.
 
@@ -54,6 +68,9 @@ config/example.env       safe template; real config stays outside the repo
 linux/                    Bash tools for Linux boxes:
   arm.sh                  one command to arm the standing defence
   recon.sh hunt.sh        read-only baseline and persistence sweeps
+  sentry.sh               always-on: detect, diagnose, queue for sign-off
+  triage.sh               one-shot ranked view of what is wrong NOW
+  card.sh                 read one remediation card in the terminal
   watch.sh                detection loop; reports only what changed
   canary.sh               decoy files + auditd tripwires
   watchdog.sh             restarts a dead scored service (run via guardian)
