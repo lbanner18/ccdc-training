@@ -390,6 +390,79 @@ an account being added. Go to CARD 1.
 
 ---
 
+## CARD 10 — service account with a shell, or in an admin group
+
+`RED  service account(s) with a login shell` / `RED  system account(s) in an admin group`
+
+A system account (UID under 1000) runs a daemon. It has no reason to own a
+login shell or to be able to become root. Granting either is quiet, durable,
+and survives every password reset you do.
+
+```bash
+U=www-lab                          # <- the name triage printed
+
+# 1. Take away what it should never have had.
+sudo gpasswd -d "$U" sudo          # and wheel / admin if it is in those
+sudo usermod -s /usr/sbin/nologin "$U"
+sudo pkill -u "$U"                 # the -u matters - see the trap below
+
+# 2. THE WAY BACK IN
+sudo crontab -u "$U" -l 2>/dev/null
+sudo ls -la "/home/$U/.ssh/" 2>/dev/null
+sudo grep -rn "$U" /etc/sudoers /etc/sudoers.d 2>/dev/null
+
+# 3. VERIFY
+getent passwd "$U"                 # shell should be nologin
+id -nG "$U"                        # no sudo / wheel / admin
+```
+
+**Do NOT `userdel` a service account.** `www-lab` probably owns the scored web
+content; deleting it is downtime you caused yourself. Remove the shell and the
+group membership and leave the account in place.
+
+**Trap:** `pkill www-lab` matches process *names*, not users, so it silently
+does nothing. You want `pkill -u www-lab`. This cost real time in a drill.
+
+---
+
+## CARD 11 — shell start-up file that launches something
+
+`RED  shell start-up file(s) launching something`
+
+`.bashrc`, `.profile`, `.bash_profile` and `/etc/profile.d/*` run every time
+anyone opens a shell — **including the next time you run `sudo -i`**. This is
+persistence that fires on the defender's own hands, and no process or unit
+listing will show it until it has already run.
+
+```bash
+F=/root/.bashrc                    # <- the file triage printed
+
+sudo cp "$F" /var/tmp/evidence-$(basename "$F")   # evidence first
+sudo nano "$F"                     # delete ONLY the offending line
+```
+
+Follow whatever it launched — the hook is the trigger, not the payload:
+
+```bash
+sudo cat /usr/local/bin/<whatever-it-called>
+```
+
+Then work CARD 4 (units) and CARD 3 (schedulers), because a hook like this is
+almost always paired with a second mechanism that does not need you to log in.
+
+```bash
+# THE WAY BACK IN - every start-up file on the box
+sudo ls -la /etc/profile.d/
+for f in /root/.bashrc /root/.profile /home/*/.bashrc /home/*/.profile; do
+  echo "== $f"; sudo tail -5 "$f" 2>/dev/null
+done
+```
+
+**Trap:** your own shell has already sourced it. Removing the line does not
+kill anything it started — check `ps -ef` for the child it spawned.
+
+---
+
 ## After any remediation — the loop that closes it
 
 ```bash

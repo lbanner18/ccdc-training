@@ -63,7 +63,17 @@ detail(){ printf '         %s\n' "$1"; }
 # then-remove, exactly as the cards describe, and the irreversible step is
 # always last and always after something that shows you what you are about to
 # remove.
-fix() { printf '         \033[2m$\033[0m %s\n' "$1"; }
+# No "$" prefix. It looked like a prompt and read nicely - and the operator
+# selected the block, pasted it, and got:
+#
+#     $: command not found
+#     $: command not found
+#
+# because the prompt character came along with the text. Bash strips LEADING
+# WHITESPACE from a command line, so an indented command pastes and runs
+# exactly as written. The "run this" header above carries the meaning the "$"
+# was carrying, without being a character the shell has to reject.
+fix() { printf '           %s\n' "$1"; }
 fixhdr(){ printf '         ---- run this ----------------------------------------\n'; }
 clean() { [ "$quiet" -eq 1 ] || printf '  ok     %s\n' "$1"; }
 begin() { checks=$((checks + 1)); }
@@ -304,6 +314,120 @@ EOF
   fi
 else
   clean "port check skipped (need ss + CCDC_ALLOWED_TCP_PORTS)"
+fi
+
+# --- 9b. Service accounts that have been handed a login shell -----------------
+# A system account (UID under 1000) exists to run a daemon; it has no reason to
+# have a shell. Granting one is a quiet, durable foothold that survives password
+# resets and appears in none of the checks above - not UID 0, not an empty
+# password, not a new account at all. Found on the lab box only because the
+# operator happened to run the right `getent` by hand.
+begin
+svcshell=$(awk -F: '$3>0 && $3<1000 && $7 !~ /(nologin|false|sync)$/ {print $1":"$3":"$7}' /etc/passwd 2>/dev/null)
+if [ -n "$svcshell" ]; then
+  red "service account(s) with a login shell   [CARD 10]"
+  for e in $svcshell; do
+    u=${e%%:*}
+    detail "$e"
+    fixhdr
+    fix "sudo usermod -s /usr/sbin/nologin $u"
+    fix "sudo pkill -u $u                     # the -u matters: plain 'pkill $u' matches process NAMES"
+    fix "sudo crontab -u $u -l; sudo ls -la /home/$u/.ssh/ 2>/dev/null"
+  done
+  detail "do NOT userdel a service account - it probably owns the scored content."
+  detail "take the shell away and leave the account."
+else
+  clean "no service account has a login shell"
+fi
+
+# --- 9c. Who can become root -------------------------------------------------
+begin
+admins=''
+# sudo/wheel/admin grant ROOT. `adm` is deliberately not here: it grants log
+# file read access, and `syslog` is in it on every stock Ubuntu, so including it
+# made this check fire on a clean box - the exact "cries wolf" failure this
+# tool is supposed to avoid.
+for g in sudo wheel admin; do
+  m=$(getent group "$g" 2>/dev/null | cut -d: -f4)
+  [ -n "$m" ] && admins="$admins $g:$m"
+done
+suspect=''
+for entry in $admins; do
+  g=${entry%%:*}
+  for m in $(printf '%s' "${entry#*:}" | tr ',' ' '); do
+    uid=$(id -u "$m" 2>/dev/null || printf '99999')
+    # A SYSTEM account in an admin group is the tell. Human accounts belong
+    # there and would only be noise.
+    if [ "$uid" -lt 1000 ] 2>/dev/null; then suspect="$suspect $m/$g"; fi
+  done
+done
+if [ -n "$suspect" ]; then
+  red "system account(s) in an admin group:$suspect   [CARD 10]"
+  fixhdr
+  for e in $suspect; do fix "sudo gpasswd -d ${e%%/*} ${e#*/}"; done
+else
+  clean "no system account is in sudo/wheel/admin"
+fi
+
+# --- 9d. Shell start-up files ------------------------------------------------
+# .bashrc, .profile and /etc/profile.d run every time anyone gets a shell -
+# including you, the next time you `sudo -i`. A hook here is persistence that
+# fires on the defender's own hands, and nothing above reads these files.
+begin
+rchits=''
+for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc /etc/profile \
+         /home/*/.bashrc /home/*/.profile /home/*/.bash_profile /etc/profile.d/*; do
+  [ -f "$f" ] || continue
+  grep -qIE "$shells|/usr/local/bin/|/tmp/|/dev/shm/" "$f" 2>/dev/null && rchits="$rchits $f"
+done
+if [ -n "$rchits" ]; then
+  red "shell start-up file(s) launching something   [CARD 11]"
+  detail "these run on EVERY login, including your next sudo -i"
+  for f in $rchits; do
+    detail "$f"
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done <<EOF
+$(grep -IhE "$shells|/usr/local/bin/|/tmp/|/dev/shm/" "$f" 2>/dev/null | head -3)
+EOF
+    fixhdr
+    fix "sudo cp $f /var/tmp/evidence-$(basename "$f")"
+    fix "sudo nano $f      # delete only the offending line, keep the rest"
+  done
+else
+  clean "no shell start-up file launches anything unusual"
+fi
+
+# --- 9e. Units whose ExecStart TARGET is malicious ---------------------------
+# Check 5 reads the unit. An attacker who puts a clean path in ExecStart and
+# hides the payload one level down in that script passes it completely. On the
+# lab box net-diag.service pointed at /usr/local/bin/net-diag - an ordinary
+# path in an ordinary directory - and the reverse shell was inside the file.
+# Following the path IS the check.
+begin
+deephits=''
+for unit in /etc/systemd/system/*.service /run/systemd/system/*.service; do
+  [ -f "$unit" ] || continue
+  target=$(awk -F= '/^ExecStart=/ {print $2; exit}' "$unit" 2>/dev/null | awk '{print $1}' | sed 's/^[-@+!]*//')
+  case "$target" in /*) ;; *) continue ;; esac
+  [ -f "$target" ] || continue
+  grep -qIE "$shells" "$target" 2>/dev/null && deephits="$deephits $unit|$target"
+done
+if [ -n "$deephits" ]; then
+  red "unit(s) whose ExecStart script contains a reverse shell   [CARD 4]"
+  detail "the unit itself looks clean - the payload is one level down"
+  for e in $deephits; do
+    unit=${e%%|*}; target=${e#*|}; u=$(basename "$unit"); base=${u%.service}
+    detail "$u -> $target"
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done <<EOF
+$(grep -IhE "$shells" "$target" 2>/dev/null | head -2)
+EOF
+    fixhdr
+    fix "sudo systemctl disable --now $base.timer $u"
+    fix "sudo cp $target /var/tmp/evidence-$(basename "$target")"
+    fix "sudo rm -f $unit /etc/systemd/system/$base.timer $target"
+    fix "sudo systemctl daemon-reload && sudo systemctl reset-failed"
+  done
+else
+  clean "no unit's ExecStart script contains a reverse shell"
 fi
 
 # --- 10. Very recently modified /etc ------------------------------------------
