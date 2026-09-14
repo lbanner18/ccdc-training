@@ -108,7 +108,27 @@ fix() { printf '           %s\n' "$1"; }
 if [ "$__ccdc_triage_cli_findings_set" -eq 1 ]; then
   findings_file=$__ccdc_triage_cli_findings
 else
-  findings_file=${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}
+  # This kit's own payload directories.
+#
+# guardian's reconcile script legitimately contains the shapes the reverse-shell
+# detector hunts for, so on an armed box triage reported its own tooling as RED
+# on every pass - three findings that could never be cleared. An unclearable RED
+# is worse than a missed one: it teaches you that RED can be ignored.
+#
+# Excluded here rather than in sentry, because sentry only decides what to TOUCH
+# and these were still being reported forever. That tree is not unwatched: the
+# guardian hash-pins every file it installs and repairs drift from an
+# independent .repair source, which is a stronger check than this grep.
+own_payload() {
+  local path=$1 g gdir sdir
+  g=${CCDC_GUARDIAN_NAME:-node-health}
+  gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}
+  sdir=${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}}
+  case "$path" in "$gdir"/*|"$sdir"/*) return 0 ;; esac
+  return 1
+}
+
+findings_file=${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}
 fi
 
 validate_findings_file() {
@@ -413,6 +433,7 @@ for source in "${cron_sources[@]}"; do
       if [ "$target" != "$primary" ] && [ ! -x "$target" ] && ! is_launch_wrapper "$primary"; then
         continue
       fi
+      own_payload "$target" && continue
       grep -qIE "$shells" "$target" 2>/dev/null || continue
       hit="$source::$target"
       duplicate=0
@@ -706,6 +727,7 @@ rcdeep=''
 for f in $rchits; do
   for t in $(grep -IhoE '/(usr/local/bin|opt|usr/bin|var|srv)/[A-Za-z0-9._/-]+' "$f" 2>/dev/null | sort -u); do
     [ -f "$t" ] || continue
+    own_payload "$t" && continue
     grep -qIE "$shells" "$t" 2>/dev/null && rcdeep="$rcdeep $f::$t"
   done
 done
@@ -783,6 +805,7 @@ for unit in /etc/systemd/system/*.service /run/systemd/system/*.service; do
     for target in "${targets[@]}"; do
       [ -f "$target" ] || continue
       [ "$target" = "$primary" ] || [ "$follow_args" -eq 1 ] || continue
+      own_payload "$target" && continue
       grep -qIE "$shells" "$target" 2>/dev/null || continue
       hit="$unit::$target"
       duplicate=0

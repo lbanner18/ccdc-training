@@ -264,6 +264,43 @@ protected_unit() {
   return 1
 }
 
+# Guardian's third layer is a file in /etc/cron.d, and protected_unit() only
+# ever sees systemd unit names - so nothing was checking cron paths against our
+# own artifacts.
+#
+# Found on the lab VM: sentry queued "remove the dedicated schedule
+# /etc/cron.d/drill-health" as a RED action. That file is guardian's layer 3,
+# listed in its own manifest as layer3|/etc/cron.d/drill-health. Approving it
+# deletes the keep-alive's scheduler; guardian rebuilds it within a tick;
+# sentry flags it again next pass. An unclearable RED is worse than a missed
+# one, because it teaches the operator that RED can be ignored.
+protected_cron() {
+  local f=${1##*/} g own
+  g=${CCDC_GUARDIAN_NAME:-node-health}
+  for own in "${CCDC_GUARDIAN_CRON_NAME:-$g}" \
+             "${CCDC_GUARDIAN_WATCH_NAME:-$g-watch}" \
+             "${CCDC_GUARDIAN_TICKER_NAME:-$g}" \
+             "${CCDC_GUARDIAN_RECONCILE_NAME:-$g-reconcile}" \
+             "${CCDC_SENTRY_NAME:-ccdc-sentry}"; do
+    [ "$f" = "$own" ] && return 0
+  done
+  return 1
+}
+
+# Anything living inside our own payload directories is ours, whatever the
+# detector thinks of its contents. guardian's reconcile script legitimately
+# contains the shapes the reverse-shell detector looks for.
+protected_payload() {
+  local path=$1 g gdir sdir
+  g=${CCDC_GUARDIAN_NAME:-node-health}
+  gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}
+  sdir=${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}}
+  case "$path" in
+    "$gdir"/*|"$sdir"/*) return 0 ;;
+  esac
+  return 1
+}
+
 # Must match triage.sh's rc-file detector. Remediation captures the literal
 # matching lines and removes only exact whole-line matches.
 rc_patterns='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat|nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
@@ -289,12 +326,15 @@ can_automate() {
       # Shared system crontabs require line-level operator judgement. Dedicated
       # job files can be preserved and removed safely after explicit approval.
       case "$subject" in /etc/crontab|/var/spool/cron/*) return 1 ;; esac
+      protected_cron "$subject" && return 1
       ;;
     crondeep)
       valid_compound "$subject" || return 1
       unit=${subject%%::*}; target=${subject#*::}
       valid_cron_path "$unit" && [ -e "$unit" ] && [ -f "$target" ] || return 1
       case "$unit" in /etc/crontab|/var/spool/cron/*) return 1 ;; esac
+      protected_cron "$unit" && return 1
+      protected_payload "$target" && return 1
       ;;
     unit|unittmp)
       valid_unit_path "$subject" && [ -e "$subject" ] || return 1
@@ -305,6 +345,7 @@ can_automate() {
       unit=${subject%%::*}; target=${subject#*::}
       valid_unit_path "$unit" && [ -e "$unit" ] && [ -f "$target" ] || return 1
       protected_unit "$(unit_name_from_path "$unit")" && return 1
+      protected_payload "$target" && return 1
       ;;
     unitdropin)
       valid_dropin_subject "$subject" || return 1
@@ -342,18 +383,18 @@ render_action() {
     cron) printf 'preserve evidence, then remove scheduled job %q' "$subject" ;;
     crondeep)
       unit=${subject%%::*}; target=${subject#*::}
-      printf 'preserve both; remove the dedicated schedule %q; leave payload %q for manual review' "$unit" "$target" ;;
+      printf 'preserve both; strip the schedule lines naming %q from %q, then delete the payload' "$target" "$unit" ;;
     unit|unittmp)
       printf 'preserve unit/drop-ins; stop, disable, and remove %q; reload systemd' "$(basename -- "$subject")" ;;
     unitdeep)
       unit=${subject%%::*}; target=${subject#*::}; base=$(basename -- "$unit")
-      printf 'preserve both; stop/disable %q and remove its unit definition; leave payload %q for manual review' "$base" "$target" ;;
+      printf 'preserve both; stop/disable %q, remove its unit, timer and drop-ins, then delete the payload %q' "$base" "$target" ;;
     unitdropin)
       owner=${subject%%::*}; dropin=${subject#*::}
       printf 'preserve %q; stop/disable %q and remove only that malicious drop-in; reload systemd' "$dropin" "$owner" ;;
     unitdropindeep)
       owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
-      printf 'preserve both; stop/disable %q and remove drop-in %q; leave payload %q for manual review' "$owner" "$dropin" "$target" ;;
+      printf 'preserve all; remove drop-in %q from %q, then delete the payload %q; reload and restart the unit' "$dropin" "$owner" "$target" ;;
     suid) printf 'strip the SUID bit from %q (do not delete it)' "$subject" ;;
     rcdeep) target=${subject#*::}; printf 'preserve and remove launched payload %q' "$target" ;;
     rcfile) printf 'preserve %q and remove only the exact lines that still match the detector' "$subject" ;;
@@ -691,6 +732,38 @@ action_rcfile() {
   cat "$tmp" >"$source"
 }
 
+# A malicious drop-in leaves the unit file byte-identical while adding an
+# ExecStartPost= that runs as root on next start. can_automate already accepted
+# these, but execute_action had no branch for them, so the operator could sign
+# off on removing a drop-in attack and get "FAILED - partial changes may have
+# occurred" while the drop-in stayed. Remove only the offending fragment - the
+# unit itself is legitimate and may well be scored.
+action_unitdropin() {
+  local owner=${1%%::*} dropin=${1#*::} parent
+  new_evidence_case unitdropin || return 1
+  preserve_into_case "$dropin" || return 1
+  rm -f -- "$dropin" || return 1
+  parent=$(dirname -- "$dropin")
+  rmdir -- "$parent" 2>/dev/null || true      # only if now empty
+  systemctl daemon-reload || return 1
+  # Restart so the merged-in command stops being part of the running unit.
+  systemctl try-restart "$owner" >/dev/null 2>&1 || slog "warning: could not restart $owner after removing $dropin"
+  systemctl reset-failed >/dev/null 2>&1 || true
+}
+
+action_unitdropindeep() {
+  local owner=${1%%::*} rest=${1#*::} dropin target parent
+  dropin=${rest%%::*}; target=${rest#*::}
+  new_evidence_case unitdropindeep || return 1
+  preserve_into_case "$dropin" && preserve_into_case "$target" || return 1
+  rm -f -- "$dropin" "$target" || return 1
+  parent=$(dirname -- "$dropin")
+  rmdir -- "$parent" 2>/dev/null || true
+  systemctl daemon-reload || return 1
+  systemctl try-restart "$owner" >/dev/null 2>&1 || slog "warning: could not restart $owner after removing $dropin"
+  systemctl reset-failed >/dev/null 2>&1 || true
+}
+
 execute_action() {
   local check=$1 subject=$2
   evidence_case=''
@@ -703,6 +776,8 @@ execute_action() {
     crondeep) action_crondeep "$subject" ;;
     unit|unittmp) action_unit "$subject" ;;
     unitdeep) action_unitdeep "$subject" ;;
+    unitdropin) action_unitdropin "$subject" ;;
+    unitdropindeep) action_unitdropindeep "$subject" ;;
     suid) action_suid "$subject" ;;
     rcdeep) action_rcdeep "$subject" ;;
     rcfile) action_rcfile "$subject" ;;
