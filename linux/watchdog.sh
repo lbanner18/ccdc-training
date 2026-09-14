@@ -23,7 +23,15 @@ while [ "$#" -gt 0 ]; do
 done
 ccdc_load_config "$config"
 case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of seconds" ;; esac
-[ "$interval" -ge 5 ] || ccdc_die "--interval below 5s risks a restart storm: $interval"
+# Floor of 2s, and it must stay in step with guardian.sh's CCDC_WATCHDOG_INTERVAL
+# floor -- guardian writes this value straight into the unit's ExecStart, so a
+# stricter floor here means a unit that installs cleanly and then dies on every
+# start. The old floor was 5s "to avoid a restart storm", but the storm is
+# already prevented structurally: one restart per service per pass, and a settle
+# deadline after each restart before anything else may act. A pass is a curl and
+# a couple of systemctl calls, so the real cost of a short interval was log
+# volume, and state-change logging below removes that.
+[ "$interval" -ge 2 ] || ccdc_die "--interval below 2s leaves no room for a check to finish: $interval"
 
 log_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 if ! mkdir -p "$log_dir" 2>/dev/null || [ ! -w "$log_dir" ]; then
@@ -209,7 +217,15 @@ check_hashes() {
   while IFS= read -r path; do
     [ -n "$path" ] || continue
     if [ ! -f "$path" ]; then
-      ccdc_append_log "$log" "hash_missing path=$path"
+      log_state "hash:$path" missing "hash_missing path=$path"
+      # Carry the last known hash forward. Without this the entry drops out of
+      # the state file, so when the file reappears there is nothing to compare
+      # against and it logs as a fresh "hash_baseline" -- meaning delete-then-
+      # recreate, which is how you would edit sshd_config without tripping a
+      # content check, reads as routine. Keeping the old hash turns that back
+      # into the config_changed it actually is.
+      previous=$(awk -v p="$path" '$2 == p {print $1}' "$hash_state" 2>/dev/null || true)
+      [ -n "$previous" ] && printf '%s %s\n' "$previous" "$path" >>"$next_state"
       continue
     fi
     if ccdc_have sha256sum; then
@@ -217,7 +233,7 @@ check_hashes() {
     elif ccdc_have shasum; then
       current=$(shasum -a 256 "$path" | awk '{print $1}')
     else
-      ccdc_append_log "$log" "hash_skipped reason=no-sha256-tool path=$path"
+      log_state "hash:$path" skip "hash_skipped reason=no-sha256-tool path=$path"
       continue
     fi
     previous=$(awk -v p="$path" '$2 == p {print $1}' "$hash_state" 2>/dev/null || true)
@@ -225,6 +241,15 @@ check_hashes() {
       ccdc_append_log "$log" "hash_baseline path=$path sha256=$current"
     elif [ "$previous" != "$current" ]; then
       ccdc_append_log "$log" "config_changed path=$path previous=$previous current=$current"
+    fi
+    # Put the key back to ok, or a file that vanished once would stay latched at
+    # "missing" for the life of the process and its SECOND disappearance would
+    # log nothing. Only the missing->ok edge prints, because that edge is news;
+    # the first-ever observation is already covered by hash_baseline above.
+    if [ "${ccdc_state[hash:$path]:-ok}" != ok ]; then
+      log_state "hash:$path" ok "hash_restored path=$path"
+    else
+      ccdc_state[hash:$path]=ok
     fi
     printf '%s %s\n' "$current" "$path" >>"$next_state"
   done <<EOF
@@ -235,16 +260,71 @@ EOF
   watchdog_staged=''
 }
 
+# Log state CHANGES, not every poll.
+#
+# At a 5s interval the old per-poll logging produced ~84 lines a minute, about
+# 30,000 over a six-hour event - and watchdog.log is a file you READ when you
+# are trying to reconstruct what happened. Thirty thousand lines of "service_ok"
+# is a haystack you built for yourself. Recovery speed and a readable log were
+# in direct conflict only because every poll wrote a line.
+#
+# Now a check logs when it ENTERS a state and when it LEAVES it, so an incident
+# is two lines however long it lasted, and a quiet hour is silent. A periodic
+# heartbeat keeps "still alive, still fine" visible without the volume.
+# Associative arrays need bash 4 (2009). Fail loudly rather than limping: with
+# `set -u` and no associative array, every log_state call below would expand
+# $key as an arithmetic index and the watchdog would die mid-pass with a much
+# less obvious error than this one.
+#
+# The `=()` is load-bearing, not style. A bare `declare -A ccdc_state` DECLARES
+# the array without SETTING it, and under `set -u` the first `${#ccdc_state[@]}`
+# then aborts the shell with "unbound variable" -- which only happens while the
+# array is still empty, i.e. only on a box whose config has hash files but no
+# tcp/http/service checks. On every config we had tested, the first pass filled
+# the array before the heartbeat read it, so the crash stayed invisible.
+declare -A ccdc_state=() 2>/dev/null \
+  || ccdc_die "this watchdog needs bash 4+ for state-change logging (found ${BASH_VERSION:-unknown})"
+last_heartbeat=0
+heartbeat_every=${CCDC_WATCHDOG_HEARTBEAT_SECONDS:-300}
+
+log_state() {
+  local key=$1 state=$2 message=$3 previous
+  previous=${ccdc_state[$key]:-}
+  if [ "$previous" != "$state" ]; then
+    ccdc_state[$key]=$state
+    if [ -n "$previous" ]; then
+      ccdc_append_log "$log" "$message"
+    else
+      # First observation of this check. Record it so the log opens with what
+      # normal looked like, rather than starting mid-story.
+      ccdc_append_log "$log" "baseline $message"
+    fi
+  fi
+}
+
+heartbeat() {
+  local now healthy key
+  now=$(date +%s)
+  [ $((now - last_heartbeat)) -ge "$heartbeat_every" ] || return 0
+  last_heartbeat=$now
+  healthy=0
+  for key in "${!ccdc_state[@]}"; do
+    [ "${ccdc_state[$key]}" = ok ] && healthy=$((healthy + 1))
+  done
+  ccdc_append_log "$log" "heartbeat checks=${#ccdc_state[@]} healthy=$healthy"
+}
+
 run_once() {
   local name host port url service status
   restarted_this_pass=''
-  ccdc_append_log "$log" "check_start box=${CCDC_BOX_NAME:-unknown}"
+  # check_start/check_end per pass was two lines every interval and told you
+  # nothing; the heartbeat below carries "still running" instead.
   while IFS='|' read -r name host port; do
     [ -n "${name:-}" ] || continue
     if check_tcp "$name" "$host" "$port"; then
-      ccdc_append_log "$log" "tcp_ok name=$name host=$host port=$port"
+      log_state "tcp:$name" ok "tcp_ok name=$name host=$host port=$port"
     else
-      ccdc_append_log "$log" "tcp_unhealthy name=$name host=$host port=$port"
+      log_state "tcp:$name" bad "tcp_unhealthy name=$name host=$host port=$port"
     fi
   done <<EOF
 ${CCDC_TCP_CHECKS:-}
@@ -255,11 +335,11 @@ EOF
     status=0
     check_http "$url" || status=$?
     if [ "$status" -eq 0 ]; then
-      ccdc_append_log "$log" "http_ok name=$name url=$url"
+      log_state "http:$name" ok "http_ok name=$name url=$url"
     elif [ "$status" -eq 2 ]; then
-      ccdc_append_log "$log" "http_skipped reason=no-curl-or-wget name=$name url=$url"
+      log_state "http:$name" skip "http_skipped reason=no-curl-or-wget name=$name url=$url"
     else
-      ccdc_append_log "$log" "http_unhealthy name=$name url=$url"
+      log_state "http:$name" bad "http_unhealthy name=$name url=$url"
       [ -n "${service:-}" ] && restart_service "$service" http "$url"
     fi
   done <<EOF
@@ -270,14 +350,14 @@ EOF
     # Already restarted and verified above via its endpoint check.
     ccdc_list_contains "$service" "$restarted_this_pass" && continue
     if check_service "$service"; then
-      ccdc_append_log "$log" "service_ok service=$service"
+      log_state "svc:$service" ok "service_ok service=$service"
     else
-      ccdc_append_log "$log" "service_unhealthy service=$service"
+      log_state "svc:$service" bad "service_unhealthy service=$service"
       restart_service "$service"
     fi
   done
   check_hashes
-  ccdc_append_log "$log" "check_end"
+  heartbeat
 }
 
 [ "$apply" -eq 1 ] && ccdc_require_root

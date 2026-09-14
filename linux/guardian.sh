@@ -146,6 +146,25 @@ case "$interval" in
   ''|*[!0-9]*) ccdc_die "CCDC_GUARDIAN_INTERVAL must be a whole number of seconds: $interval" ;;
 esac
 [ "$interval" -ge 10 ] || ccdc_die "CCDC_GUARDIAN_INTERVAL below 10s just burns CPU: $interval"
+
+# One knob used to drive two unrelated things, and they want different numbers:
+#
+#   reconcile interval - how fast a REMOVED LAYER gets rebuilt. An attacker has
+#     to delete all layers inside this window, so shorter is more resilient, but
+#     every tick re-hashes the whole manifest. 30-60s is plenty.
+#   watchdog interval  - how fast a DEAD SERVICE is noticed. This one converts
+#     directly into scored downtime: your mean outage is roughly half of it.
+#     Measured on the lab box, a 60s interval produced a 57s outage.
+#
+# So the watchdog gets its own knob and a much lower floor. A pass is a curl and
+# a couple of systemctl calls - sub-second - and watchdog.sh already guards
+# against thrash with one-restart-per-pass and a settle deadline after each
+# restart, so a short interval does not turn into a restart storm.
+watchdog_interval=${CCDC_WATCHDOG_INTERVAL:-$interval}
+case "$watchdog_interval" in
+  ''|*[!0-9]*) ccdc_die "CCDC_WATCHDOG_INTERVAL must be a whole number of seconds: $watchdog_interval" ;;
+esac
+[ "$watchdog_interval" -ge 2 ] || ccdc_die "CCDC_WATCHDOG_INTERVAL below 2s leaves no room for a check to finish: $watchdog_interval"
 case "$guardian_dir" in
   /*) ;;
   *) ccdc_die "CCDC_GUARDIAN_DIR must be an absolute path: $guardian_dir" ;;
@@ -739,7 +758,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/bin/bash $watchdog_copy --config $env_copy --apply --interval $interval
+ExecStart=/bin/bash $watchdog_copy --config $env_copy --apply --interval $watchdog_interval
 Restart=always
 RestartSec=5
 
@@ -878,7 +897,7 @@ ensure_watchdog() {
     return 0
   fi
   glog "watchdog_down starting detached loop"
-  setsid /bin/bash "$watchdog_copy" --config "$env_copy" --apply --interval "$interval" \
+  setsid /bin/bash "$watchdog_copy" --config "$env_copy" --apply --interval "$watchdog_interval" \
     </dev/null >>"$state_dir/watchdog.err" 2>&1 &
   local watchdog_pid=$!
   kill -0 "$watchdog_pid" 2>/dev/null \
@@ -1283,7 +1302,7 @@ layer_line() {
 do_status() {
   printf 'guardian: %s\n' "$name"
   printf 'payload:  %s\n' "$guardian_dir"
-  printf 'interval: %ss\n' "$interval"
+  printf 'interval: %ss reconcile / %ss watchdog\n' "$interval" "$watchdog_interval"
   printf 'manifest: %s\n' "$manifest"
   if [ -f "$sentinel" ]; then
     printf 'state:    DISARMED (sentinel present: %s)\n' "$sentinel"
