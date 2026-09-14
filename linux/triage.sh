@@ -62,7 +62,7 @@ printf 'read-only. %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 begin
 uid0=$(awk -F: '$3==0 && $1!="root" {print $1}' /etc/passwd 2>/dev/null)
 if [ -n "$uid0" ]; then
-  red "account(s) with UID 0 other than root - this IS root access"
+  red "account(s) with UID 0 other than root - this IS root access   [CARD 1]"
   for u in $uid0; do
     detail "$(grep "^$u:" /etc/passwd)"
   done
@@ -76,7 +76,7 @@ begin
 if [ -r /etc/shadow ]; then
   empty=$(awk -F: '($2=="" ) {print $1}' /etc/shadow 2>/dev/null)
   if [ -n "$empty" ]; then
-    red "account(s) with an EMPTY password: $(printf '%s' "$empty" | tr '\n' ' ')"
+    red "account(s) with an EMPTY password: $(printf '%s' "$empty" | tr '\n' ' ')   [CARD 1]"
     detail "anyone who can reach a login prompt is already in"
   else
     clean "no empty-password accounts"
@@ -98,7 +98,7 @@ if [ -n "$keyfiles" ]; then
     [ "$n" -gt 0 ] && total=$((total + n))
   done
   if [ "$total" -gt 0 ]; then
-    amber "$total SSH key(s) grant login. Recognise EVERY one or remove it"
+    amber "$total SSH key(s) grant login. Recognise EVERY one or remove it   [CARD 2]"
     for f in $keyfiles; do
       while IFS= read -r k; do
         [ -n "$k" ] || continue
@@ -123,7 +123,7 @@ shells='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget
 cronhits=$(grep -rIlE "$shells" /etc/cron.d /etc/cron.daily /etc/cron.hourly \
   /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null)
 if [ -n "$cronhits" ]; then
-  red "scheduled job(s) containing reverse-shell or download-and-run patterns"
+  red "scheduled job(s) containing reverse-shell or download-and-run patterns   [CARD 3]"
   for f in $cronhits; do
     detail "$f"
     while IFS= read -r l; do
@@ -140,7 +140,7 @@ fi
 begin
 unithits=$(grep -rIlE "$shells" /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$unithits" ]; then
-  red "systemd unit(s) containing reverse-shell or download-and-run patterns"
+  red "systemd unit(s) containing reverse-shell or download-and-run patterns   [CARD 4]"
   for f in $unithits; do detail "$f"; done
 else
   clean "no systemd unit matches a reverse-shell pattern"
@@ -152,7 +152,7 @@ begin
 tmpunits=$(grep -rIlE '^Exec[A-Za-z]*=.*(/tmp/|/var/tmp/|/dev/shm/)' \
   /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$tmpunits" ]; then
-  red "systemd unit(s) executing from a world-writable directory"
+  red "systemd unit(s) executing from a world-writable directory   [CARD 4]"
   for f in $tmpunits; do detail "$f"; done
 else
   clean "no systemd unit executes from /tmp, /var/tmp or /dev/shm"
@@ -162,7 +162,7 @@ fi
 begin
 nopw=$(grep -rIh '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -v '^\s*$')
 if [ -n "$nopw" ]; then
-  amber "passwordless sudo is configured - confirm each line is the packet's"
+  amber "passwordless sudo is configured - confirm each line is the packet's   [CARD 7]"
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-96)"; done <<EOF
 $nopw
 EOF
@@ -178,7 +178,7 @@ begin
 suid=$(find / -xdev -perm -4000 -type f 2>/dev/null \
   | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
 if [ -n "$suid" ]; then
-  red "SUID interpreter(s)/utilities - instant root for any local user"
+  red "SUID interpreter(s)/utilities - instant root for any local user   [CARD 5]"
   for f in $suid; do detail "$(ls -l "$f" 2>/dev/null)"; done
 else
   clean "no SUID shells or interpreters"
@@ -188,7 +188,7 @@ fi
 begin
 tmpproc=$(ls -l /proc/*/exe 2>/dev/null | grep -E '/(tmp|var/tmp|dev/shm)/' | head -10)
 if [ -n "$tmpproc" ]; then
-  red "process(es) executing from /tmp, /var/tmp or /dev/shm"
+  red "process(es) executing from /tmp, /var/tmp or /dev/shm   [CARD 6]"
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $tmpproc
 EOF
@@ -201,7 +201,7 @@ fi
 begin
 deleted=$(ls -l /proc/*/exe 2>/dev/null | grep '(deleted)' | grep -vE '/(systemd|dbus)' | head -5)
 if [ -n "$deleted" ]; then
-  amber "process(es) whose executable was deleted from disk"
+  amber "process(es) whose executable was deleted from disk   [CARD 6]"
   detail "sometimes a mid-upgrade daemon, sometimes a payload that unlinked itself"
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $deleted
@@ -226,7 +226,7 @@ if ccdc_have ss && [ -n "${CCDC_ALLOWED_TCP_PORTS:-}" ]; then
 $(ss -tlnH 2>/dev/null | awk '$4 !~ /^(127\.|\[::1\]|::1)/ {print $4}' | sed 's/.*://' | sort -un)
 EOF
   if [ -n "$unexpected" ]; then
-    amber "listening TCP port(s) not in CCDC_ALLOWED_TCP_PORTS:$unexpected"
+    amber "listening TCP port(s) not in CCDC_ALLOWED_TCP_PORTS:$unexpected   [CARD 8]"
     detail "\"nothing but scored services should show on an nmap scan\""
     for p in $unexpected; do
       detail "$(ss -tlnpH "sport = :$p" 2>/dev/null | head -1 | cut -c1-100)"
@@ -244,7 +244,7 @@ fi
 begin
 recent=$(find /etc -xdev -type f -mmin -30 2>/dev/null | grep -vE '/(mtab|resolv.conf|adjtime|.*\.lock)$' | head -8)
 if [ -n "$recent" ]; then
-  amber "/etc file(s) modified in the last 30 minutes"
+  amber "/etc file(s) modified in the last 30 minutes   [CARD 9]"
   detail "if you did not change these, someone else did"
   for f in $recent; do detail "$(date -r "$f" '+%H:%M') $f"; done
 else
@@ -266,6 +266,10 @@ else
   printf '  clean it up and meet it again in ten minutes.\n'
   printf '  Write down what you found and when. That is the incident-report\n'
   printf '  inject, already half-composed.\n'
+  printf '\n  EXACT COMMANDS for each [CARD n] above:\n'
+  printf '      playbooks/remediation-cards.md\n'
+  printf '  Each card is: kill the access, find the way back in, verify. Knowing\n'
+  printf '  what you found and not what to type next is the same as not finding it.\n'
 fi
 printf '\n  Full detail, if you want it: ./linux/hunt.sh and ./linux/recon.sh\n'
 [ "$findings" -gt 0 ] && exit 3

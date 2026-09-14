@@ -7,6 +7,8 @@ Use the team packet to fill the bracketed values before competition day.
 [ ] Take a VM snapshot if the environment permits it.
 [ ] Get the kit on the box: bootstrap-on-the-box.md (STEP 1 probe).
 [ ] Copy the kit and local config; do not paste secrets into chat.
+[ ] sudo ./linux/triage.sh --config <cfg>   # ranked: what is ALREADY wrong
+    Each finding names a card in playbooks/remediation-cards.md
 [ ] Run recon.sh and save the evidence path.
 [ ] Run hunt.sh and review persistence, keys, sudoers, and listening ports.
 [ ] Check scored services from the outside, not only systemctl status.

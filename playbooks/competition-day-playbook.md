@@ -37,6 +37,10 @@ Everything here is read-only. Do not harden anything until you know what normal
 looks like, or you will not be able to tell your own change from an intrusion.
 
 ```
+[ ] sudo ./linux/triage.sh --config /tmp/ccdc-linux.env  # WHAT IS ALREADY WRONG
+    Twelve high-confidence checks, ranked, ~25 lines. Run this FIRST: the red
+    team's access is usually pre-placed, and it is the only tool here that
+    judges rather than collects. Each finding names a remediation card.
 [ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline snapshot
 [ ] ./linux/hunt.sh  --config /tmp/ccdc-linux.env      # persistence sweep (ro)
 [ ] Note the evidence path both printed. It is your before-picture.
@@ -265,7 +269,13 @@ improvised late; know that going in.
 Triggered by a canary trip, an audit hit, a strange process, or `/tmp` filling
 up. Work the SANS loop (see injects/responses/incident-response-procedure.md):
 
+**Every finding has a card with the exact commands:**
+[`playbooks/remediation-cards.md`](remediation-cards.md). `triage.sh` prints
+`[CARD n]` next to each finding so the lookup is instant. Knowing what you
+found and not what to type next is the same as not finding it.
+
 ```
+[ ] IDENTIFY: sudo ./linux/triage.sh --config <cfg>   <- ranks what is wrong
 [ ] IDENTIFY: what tripped? ausearch -k ccdc-canary -i  /  ps auxf  /  ss -tulpn
 [ ] CONTAIN:  disable the abused account, block the source, snapshot BEFORE you
     clean (the snapshot is your only forensics + your evidence for the IR memo).
@@ -289,7 +299,7 @@ it.
 
 ```
 BEFORE : packet -> config -> snapshot -> access confirmed
-SEE    : recon.sh ; hunt.sh ; who ; ss -tulpn ; cron ; keys ; SUID
+SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; who ; ss -tulpn ; keys
 HARDEN : creds -> fw.sh(+confirm) -> ssh -> services.sh   [verify each]
 ARM    : sudo arm.sh --apply      (backup + canaries + guardian + watchdog)
 WATCH  : watch.sh --interval 120  (prints only what CHANGED)
@@ -301,6 +311,7 @@ ALWAYS : verify the scored service FROM THE NETWORK after every change
 Three commands are the whole standing defence. If you remember nothing else:
 
 ```
+sudo ./linux/triage.sh   --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh      --config /tmp/ccdc-linux.env --apply
      ./linux/services.sh --config /tmp/ccdc-linux.env --review
      ./linux/watch.sh    --config /tmp/ccdc-linux.env --interval 120
