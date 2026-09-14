@@ -47,6 +47,11 @@ told the tool what is scored.
 Every destructive tool is dry-run by default and needs `--apply`. Detection
 tools write evidence but do not change system configuration.
 
+Once `arm.sh --apply` has run, the evidence directory is root-owned `0700`, so
+**every tool needs `sudo` from then on**. Unprivileged runs stop with a clear
+error rather than silently writing to a second directory and splitting your
+evidence in half.
+
 Do not start `watchdog.sh` by hand — `guardian.sh` (via `arm.sh`) installs it
 as a supervised unit. Launched from a shell it dies with your SSH session,
 which is the moment you need it most.

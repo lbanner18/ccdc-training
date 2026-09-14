@@ -185,6 +185,13 @@ when your SSH session drops, which is exactly when you need it.
 It deliberately does NOT touch the firewall (§2b) or services (§2d). Both need
 a human confirming against the packet.
 
+> **After this, every tool needs `sudo`.** Arming makes the evidence directory
+> root-owned and `0700`, so a later `./linux/hunt.sh` without sudo stops with
+> "evidence directory is not writable". That is deliberate: the alternative is
+> a silent fallback that splits your evidence across two directories, and you
+> discover it while writing the incident report. Read-only tools run fine
+> unprivileged *before* you arm — which is why §1 comes first.
+
 Before you move on, confirm the two settings that decide what this is worth:
 
 ```

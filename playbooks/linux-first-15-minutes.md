@@ -23,7 +23,7 @@ Use the team packet to fill the bracketed values before competition day.
 [ ] Check the current queue: sudo ./linux/sentry.sh --config <cfg> --status
 [ ] Check Splunk forwarding and record the result.
 [ ] Review the packet's scored users, ports, and firewall exceptions.
-[ ] ./linux/services.sh --config <cfg> --review, then disable deliberately.
+[ ] sudo ./linux/services.sh --config <cfg> --review, then disable deliberately.
 [ ] Apply one change at a time with --dry-run first.
 [ ] Verify the scored service after every change.
 [ ] Run recon.sh again and note the evidence path in the incident report.

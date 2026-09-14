@@ -17,7 +17,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 ccdc_load_config "$config"
+# See recon.sh: ccdc_die inside $( ) exits the subshell only.
 evidence=${output_dir:-$(ccdc_timestamp_dir)}
+[ -n "$evidence" ] || ccdc_die "no usable evidence directory; see the error above (usually: re-run with sudo)"
 mkdir -p "$evidence" || ccdc_die "cannot create $evidence"
 
 persistence_probe=$(cat <<'PROBE'

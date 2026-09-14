@@ -25,7 +25,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 ccdc_load_config "$config"
+# ccdc_die inside a command substitution exits only the SUBSHELL, so a failure
+# in ccdc_timestamp_dir leaves $evidence empty and the next line reports a
+# baffling `mkdir: cannot create directory ''` instead of the real reason.
+# Check the value here so the first error the operator sees is the true one.
 evidence=${output_dir:-$(ccdc_timestamp_dir)}
+[ -n "$evidence" ] || ccdc_die "no usable evidence directory; see the error above (usually: re-run with sudo)"
 mkdir -p "$evidence" || ccdc_die "cannot create $evidence"
 printf 'CCDC Linux evidence\nbox=%s\ntimestamp=%s\n' "${CCDC_BOX_NAME:-unknown}" "$(ccdc_now)" >"$evidence/README.txt"
 

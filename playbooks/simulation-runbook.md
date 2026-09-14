@@ -67,7 +67,8 @@ hook, a SUID root shell (`rootbash`), and a `/dev/shm` payload.
 ## Phase 2 — detect it (this is the graded skill)
 
 ```
-[ ] ./linux/hunt.sh --config /tmp/ccdc-linux.env       # persistence sweep
+[ ] sudo ./linux/hunt.sh --config /tmp/ccdc-linux.env  # persistence sweep
+    (sudo from here on: arm.sh made the evidence dir root-owned - see below)
 [ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --check   # did they touch a decoy?
 [ ] ./redteam/score.sh /var/tmp/ccdc-evidence          # score hunt vs ground truth
 ```

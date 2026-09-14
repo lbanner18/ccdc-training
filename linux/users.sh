@@ -22,7 +22,9 @@ done
 ccdc_load_config "$config"
 [ "$apply" -eq 1 ] && ccdc_require_root
 
+# See recon.sh: ccdc_die inside $( ) exits the subshell only.
 evidence=$(ccdc_timestamp_dir)
+[ -n "$evidence" ] || ccdc_die "no usable evidence directory; see the error above (usually: re-run with sudo)"
 mkdir -p "$evidence"
 ccdc_record_shell "$evidence/access-audit.txt" 'printf "%s\n" "--- root accounts ---"; awk -F: '\''$3 == 0 {print}'\'' /etc/passwd; printf "%s\n" "--- interactive accounts ---"; awk -F: '\''$7 !~ /(nologin|false)$/ {print $1":"$3":"$6":"$7}'\'' /etc/passwd; printf "%s\n" "--- sudoers ---"; for f in /etc/sudoers /etc/sudoers.d/*; do [ -r "$f" ] && { echo "--- $f"; sed -n "1,240p" "$f"; }; done; printf "%s\n" "--- key metadata ---"; find /root /home -type f -name authorized_keys -readable -exec ls -l {} \; 2>/dev/null || true'
 
