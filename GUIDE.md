@@ -68,6 +68,9 @@ These are consistent across the Linux tools; a reviewer can assume them.
 
 | Script | Mutates? | What it does |
 |---|---|---|
+| `arm.sh` | `--apply` only | The tier-1 sequence in one command: preflight, `backup.sh`, `canary.sh --deploy`, `guardian.sh --install` (which starts the watchdog). Deliberately does NOT touch the firewall or services — both need a human confirming against the packet. Preflight catches a non-writable evidence dir, a scored service already down before you arm on top of it, and `CCDC_HTTP_CHECKS` pointing at localhost. |
+| `watch.sh` | no | The detection loop, and the answer to "the kit collects well and alerts not at all". Runs `canary --check` + `hunt.sh` + `recon.sh` each pass and prints **only what changed** since the last one. Normalises away its own evidence, its own processes, and systemd's relative timer times, all of which otherwise bury the one line that matters. |
+| `services.sh` | `--disable`/`--revert` only | Attack-surface reduction. `--review` (default, read-only) sorts everything enabled or running into PROTECTED / LIKELY SCORED / CANDIDATES / UNCLASSIFIED with listening ports attached; `--disable` acts **only** on `CCDC_DISABLE_SERVICES`, which you write yourself. PROTECTED is computed from your config, so it covers this kit's own units, cron, auditd and logging. Handles socket activation (disabling `cups.service` while `cups.socket` lives is not disabling cups). Every change recorded and reversible. |
 | `recon.sh` | no | Baseline evidence snapshot: system, accounts, UID-0, sudoers, SSH config + authorized_keys, cron/timers, listeners, SUID/caps, recent /etc changes, firewall. Writes a hashed evidence dir. |
 | `hunt.sh` | no | Persistence sweep: cron/at, systemd units+timers, startup files, temp-dir executables, deleted-exe mappings, web shells, dpkg/rpm integrity, SUID/caps, and (new) per-user rc files, user-level systemd units, LD_PRELOAD injection, kernel modules, immutable-flag backdoors. |
 | `canary.sh` | `--deploy`/`--remove` only | Detection/active-defense. Lays decoy files, records a hash+inode+atime baseline, and asks auditd to log access to decoys and real sensitive files. `--check` is read-only and loopable. Manifest-tracked. |
@@ -75,10 +78,20 @@ These are consistent across the Linux tools; a reviewer can assume them.
 | `users.sh` | `--apply` only | Explicit-target account audit and guarded password rotation / lock. Never touches an account not named in config. |
 | `fw.sh` | `--apply` only | Firewall renderer (nft/iptables) with a **dead man's switch**: snapshots, arms a systemd-owned auto-rollback that survives your SSH session dying, **verifies it is armed, and only then applies** — requiring `--confirm` to keep the rules. Refuses to start a second change while one is pending. Three real lockout tests passed, the most recent against the arm-before-apply rewrite. |
 | `backup.sh` | `--apply` only | Explicit-path backup, checksum, diff, and guarded restore. |
-| `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. Manifest-tracked; repairs tampered artifacts and systemd drop-in overrides from an independent `.repair` source tree; disarm sentinel makes `--uninstall` exact. |
+| `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. Manifest-tracked; repairs tampered artifacts and systemd drop-in overrides from an independent `.repair` source tree; disarm sentinel makes `--uninstall` exact. Each layer can be named independently, and `CCDC_GUARDIAN_STATE_DIR` lets N fully independent chains run side by side. |
 
-`recon.sh` and `hunt.sh` are the first thing you run and are safe to run any
-time. Everything else is dry-run first, `--apply` second, verify third.
+`recon.sh`, `hunt.sh` and `watch.sh` are safe to run any time. Everything else
+is dry-run first, `--apply` second, verify third.
+
+**Start here, in this order:** `recon.sh` and `hunt.sh` to see the box, then
+`arm.sh --apply` to arm the standing defence, then `watch.sh` running in a
+window. `services.sh --review` and `fw.sh` are the two deliberate judgement
+calls you make with the packet in front of you.
+
+**Do not run `watchdog.sh` by hand.** `guardian.sh` installs it as a supervised
+unit; started from a shell it dies with your SSH session. The one knob worth
+setting before anything else is `CCDC_WATCHDOG_INTERVAL="5"` — your mean outage
+is roughly half of it, measured at 57s of scored downtime at 60 versus 6s at 5.
 
 ### canary.sh in more detail
 
@@ -167,6 +180,32 @@ Four design points worth understanding:
    trick `fw.sh` uses when it deletes the snapshot to disarm a pending
    rollback. The sentinel is deliberately left behind afterwards; `--install`
    clears it.
+
+5. **N independent chains, with a hot-standby handoff.** Set
+   `CCDC_GUARDIAN_STATE_DIR` (plus its own names and payload dir) and a second
+   chain shares nothing with the first — no unit name, no payload directory, no
+   manifest. Removing one removes one.
+
+   The hazard this had to solve first is two chains both restarting the same
+   service, where the second restart is an outage you inflicted on yourself
+   during an incident. The watchdog already had a singleton lock, so rather
+   than designating a primary, every chain's watchdog contends for it and the
+   **losers idle as hot standbys instead of exiting** — a watchdog that exits
+   leaves systemd restarting its unit forever and nothing covering the services
+   in between. A standby takes over within `CCDC_WATCHDOG_STANDBY_SECONDS` of
+   the holder dying, which is precisely the case this exists for. That lock
+   lives in the shared `CCDC_EVIDENCE_DIR`, so **do not give each chain its own
+   evidence dir** — splitting it puts the double restart straight back.
+
+   Payload files are named after the chain's own layers, because a red-team
+   pass found every chain on the box with one command: `ps -eo args | grep
+   watchdog.sh`. `ps` is a namespace renaming cannot hide from. After the
+   rename, no single grep over `/etc/systemd/system` and `/etc/cron.d` joins
+   two chains. **This raises discovery cost; it does not hide.** Both chains
+   are still plainly visible in `ps`, the manifest lists every artifact by real
+   path, and the cron entries still carry a label saying they are authorised
+   blue-team tooling and how to remove them — unlabelled persistence is exactly
+   what competition staff *should* treat as hostile.
 
 Portability is honest rather than clever: no systemd means layers 1–2 are
 unavailable and cron is the only layer (the watchdog is supervised through a
@@ -320,6 +359,14 @@ what keeps even a hidden guardian legible to its owner.
 | Full automated drill (plant → detect → eradicate → 6 guardian attacks → uninstall) | run end to end on the lab VM as root; VM reverted to snapshot afterwards |
 | `fw.sh` dead man's switch, **rewritten** arm-before-apply path | **retested on the lab VM 2026-09-13**, five cases: dry-run changes nothing; safe apply arms a real systemd timer; `--status` distinguishes armed from broken; a second apply while one is pending is refused; `--confirm` keeps rules and disarms |
 | `fw.sh` **real lockout** (port 22 removed from the allow list) | **passed** — a new SSH connection was refused, the switch fired unattended, and access was restored ~60s later with the baseline ruleset intact and the scored service still up |
+| `watchdog.sh` state-change logging | **lab VM** — 60s quiet went from ~84 log lines to 6, and an incident is 4 lines. Four defects found and fixed doing it, listed in the commit |
+| `CCDC_WATCHDOG_INTERVAL` effect on scored downtime | **measured by an external scorer off the box**: the same `systemctl stop` cost **57s at 60s** and **6s at 5s** |
+| Two independent guardian chains | **lab VM**, both armed under unrelated names/dirs/state, exactly one watchdog active and one in standby |
+| Two chains vs. an attacker with root who destroys one | **passed** — chain A found via `ps`, pivoted from its payload dir, all three layers + state removed, scored service stopped: recovery 2–4s, and the external scorer recorded **0s and 3s** across two runs |
+| Two chains vs. `pkill -9 -f watchdog.sh` (the old shared string) | recovered in 6s via systemd; **this is why payload files are now named per chain** |
+| Cross-chain grep after the rename | `watchdog.sh`, `tick.sh`, `guardian.sh`, `node-health`, `ccdc` each return **0 files** across `/etc/systemd/system` and `/etc/cron.d` |
+| `services.sh` review / disable / revert / status | **lab VM** — correctly protected chain B's own guardian units (`ureadahead`, `dbus-monitor-svc`); ModemManager, pollinate and snapd (socket + service) disabled and restored to exact prior state |
+| `services.sh` curated candidate list | **partly unverified** — the lab image has no cups/avahi/rpcbind, so those entries are judgement, not measurement. Run `--review` on the real box before trusting the list |
 | `hunt.sh` extended sweep | run read-only, new section emits correctly |
 | `hunt.sh` / `recon.sh` full runs | exercised previously against the lab VM |
 | `fw.sh` dead man's switch | two real lockout tests passed (prior session) |

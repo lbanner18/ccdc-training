@@ -115,57 +115,113 @@ See the ssh-access inject draft for the full config. Minimum:
 [ ] sshd -t   before restart, and hold a second session open during restart.
 ```
 
-### 2d. Then, only the exploitable
+### 2d. Turn off what nothing scores
+
+Every daemon you do not need is attack surface you are defending for free. The
+firewall only hides it from the network; it still runs locally as a privesc
+target and a place to hide persistence.
+
+```
+[ ] ./linux/services.sh --config /tmp/ccdc-linux.env --review    # READ-ONLY
+    Four buckets, with listening ports: PROTECTED / LIKELY SCORED /
+    CANDIDATES / UNCLASSIFIED. Read the UNCLASSIFIED bucket properly - an
+    attacker-installed unit lands there.
+[ ] Put the ones you agree with in CCDC_DISABLE_SERVICES. It will not choose
+    for you, by design.
+[ ] sudo ./linux/services.sh --config /tmp/ccdc-linux.env --disable   # dry run
+[ ] sudo ./linux/services.sh --config /tmp/ccdc-linux.env --disable --apply
+[ ] VERIFY THE SCORED SERVICE FROM OFF THE BOX. This is the step most likely
+    to cost you points by accident.
+[ ] Broke something? sudo ./linux/services.sh --config <cfg> --revert --apply
+```
+
+It refuses anything scored, anything of yours (sshd, cron, DNS, logging, the
+firewall, this kit's own units) and anything that merely looks scored - web,
+database, FTP, Samba, mail, DNS. If the packet says one of those really is
+disposable, disable it by hand; the refusal is deliberate.
+
+### 2e. Then, only the exploitable
 
 Do not patch everything - you do not have the bandwidth and you will break
-things. Patch what has a public exploit and is reachable. Disable and remove
-services nothing scores.
+things. Patch what has a public exploit and is reachable.
 
 ---
 
-## 3. Detection layer — lay tripwires you will actually notice
+## 3. Arm the standing defence — one command
 
-Detection is worth more than any single patch: it tells you where the attacker
-is instead of leaving you guessing. Lay canaries and watch the real files.
-
-```
-[ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --deploy --dry-run
-[ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --deploy --apply
-[ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --status   # confirm laid
-```
-
-Then check them on a loop (read-only, safe to repeat):
+This is the machinery that works while your attention is on injects. One
+command takes a restore point, lays the tripwires, and starts the keep-alive:
 
 ```
-[ ] watch -n 60 ./linux/canary.sh --config /tmp/ccdc-linux.env --check
-    (or run --check from cron and forward the alert log to Splunk)
+[ ] ./linux/arm.sh --config /tmp/ccdc-linux.env               # dry run first
+[ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
 ```
 
-A trip on `/root/.ssh/id_rsa.bak` or a read of `/etc/shadow` is the red team,
-almost without exception. That is your cue to start §7.
+That runs `backup.sh`, `canary.sh --deploy`, and `guardian.sh --install` — and
+guardian is what starts the watchdog, as a supervised unit. **Do not run
+`watchdog.sh` by hand**: started from your shell it dies when your SSH session
+drops, which is exactly when you need it.
 
-**Active defense, not just alarms.** Canaries are the endorsed shape of "make
-the attacker trip over something": decoys they cannot resist, watched files
-they must touch. Lay as many as are plausible for the box - every extra decoy
-is another tripwire and costs nothing to keep.
+It deliberately does NOT touch the firewall (§2b) or services (§2d). Both need
+a human confirming against the packet.
+
+Before you move on, confirm the two settings that decide what this is worth:
+
+```
+[ ] CCDC_HTTP_CHECKS / CCDC_TCP_CHECKS use the SAME probe the scorer uses, or
+    "recovered" in the log will not mean "scored". Point them at the address
+    the scorer reaches, NOT 127.0.0.1.
+[ ] CCDC_WATCHDOG_INTERVAL="5". This is the single highest-value number in the
+    config: your mean outage is roughly half of it. Measured on the lab box
+    against an external scorer, the same killed service cost 57s at 60 and 6s
+    at 5. A pass is a curl and two systemctl calls, so 5s is nearly free.
+```
+
+**What the canaries are for.** A trip on `/root/.ssh/id_rsa.bak`, or a read of
+`/etc/shadow`, is the red team almost without exception. That is your cue to
+start §7. Lay as many decoys as are plausible for the box - every extra one is
+another tripwire and costs nothing to keep.
+
+### Optional, if you have the time: a second independent chain
+
+If you have the time, arm a second guardian chain so removing one does not
+remove your defence. Copy your config, give the copy its own
+`CCDC_GUARDIAN_*_NAME` values, its own `CCDC_GUARDIAN_DIR` and its own
+`CCDC_GUARDIAN_STATE_DIR`, then install it too:
+
+```
+[ ] sudo ./linux/guardian.sh --config /tmp/chain-b.env --install --apply
+```
+
+Share `CCDC_EVIDENCE_DIR` between them — do not split it. The watchdog's
+singleton lock lives there, and that shared lock is what stops both chains
+restarting the same service twice (the second restart is an outage you caused
+yourself). The losing chain idles as a hot standby and takes over within
+~5s if the active one is killed.
+
+Tested on the lab box: an attacker with root who found chain A, removed all
+three of its layers plus its state, and stopped the scored service cost 0–3
+seconds of scored downtime, because chain B was still there.
 
 ---
 
-## 4. Keep services up — the watchdog
+## 4. The detection loop — what you actually watch
 
-The watchdog restarts a scored service that dies and records when it did.
+The kit collects well and alerts not at all: canary trips go to a log nobody
+reads and `hunt.sh` writes a 124K report you cannot re-read every few minutes.
+`watch.sh` closes that gap. It runs canary + hunt + recon and prints **only
+what changed since the last pass**.
 
 ```
-[ ] ./linux/watchdog.sh --config /tmp/ccdc-linux.env --once --dry-run  # test
-[ ] Run it for real as a loop (root), verifying it recovers a killed service:
-    ./linux/watchdog.sh --config /tmp/ccdc-linux.env --apply
-[ ] Confirm CCDC_HTTP_CHECKS / CCDC_TCP_CHECKS use the SAME probe the scorer
-    uses, or "recovered" in the log will not mean "scored".
+[ ] ./linux/watch.sh --config /tmp/ccdc-linux.env --interval 120
 ```
 
-> Keeping the watchdog itself alive against an attacker with root is a separate
-> capability (guardian.sh). It is not enabled here yet - see the kit README /
-> ROADMAP for its status and the decision it is waiting on.
+Read-only, so it is safe to leave running and safe to start when you are
+already panicking. A quiet pass prints one line. A new user, a new cron entry,
+a new listener or a canary trip prints a diff — that is your §7 trigger.
+
+What it **cannot** see: whether the scorer can reach your service. Nothing on
+the box can. Check that from off the box yourself.
 
 ---
 
@@ -234,13 +290,24 @@ it.
 ```
 BEFORE : packet -> config -> snapshot -> access confirmed
 SEE    : recon.sh ; hunt.sh ; who ; ss -tulpn ; cron ; keys ; SUID
-HARDEN : creds -> fw.sh(+confirm) -> ssh -> remove unscored   [verify each]
-DETECT : canary.sh --deploy ; watch canary.sh --check ; auditd ; Splunk
-HOLD   : watchdog.sh --apply  (recovers scored services)
+HARDEN : creds -> fw.sh(+confirm) -> ssh -> services.sh   [verify each]
+ARM    : sudo arm.sh --apply      (backup + canaries + guardian + watchdog)
+WATCH  : watch.sh --interval 120  (prints only what CHANGED)
 INJECT : triage deadline+deliverables ; use responses/ ; screenshot as you go
 HIT?   : identify -> contain(snapshot!) -> eradicate(+way back in) -> recover
 ALWAYS : verify the scored service FROM THE NETWORK after every change
 ```
+
+Three commands are the whole standing defence. If you remember nothing else:
+
+```
+sudo ./linux/arm.sh      --config /tmp/ccdc-linux.env --apply
+     ./linux/services.sh --config /tmp/ccdc-linux.env --review
+     ./linux/watch.sh    --config /tmp/ccdc-linux.env --interval 120
+```
+
+Two things no tool here can do for you: check the scored service from off the
+box, and write the injects. Both are half your score.
 
 Sources for the strategy above: BYU tryout page (format, even scoring split),
 mubix *How to Win CCDC* (https://howtowinccdc.com/), and the CCDC red-team

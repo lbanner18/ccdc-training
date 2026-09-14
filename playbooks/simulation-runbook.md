@@ -34,15 +34,18 @@ memory. Do it under a timer — the tryout clock is the real adversary.
 ```
 [ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline BEFORE plant
 [ ] Note the evidence path. This is your known-good picture.
-[ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --deploy --dry-run
-[ ] sudo ./linux/canary.sh --config /tmp/ccdc-linux.env --deploy --apply
+[ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
+    # backup + canaries + guardian; guardian starts the watchdog as a unit.
+    # Do NOT run watchdog.sh by hand with `&` - it dies with your shell, and
+    # it will not be supervised, which is the whole point of guardian.
 [ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --status   # decoys + audit rules laid
-[ ] sudo ./linux/watchdog.sh --config /tmp/ccdc-linux.env --apply &   # keep services up
 [ ] (optional) sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --apply then --confirm
 ```
 
 **Pass:** `canary.sh --status` lists the decoys and, if auditd is present, the
-`ccdc-canary` / `ccdc-sensitive` rules. The watchdog is logging health checks.
+`ccdc-canary` / `ccdc-sensitive` rules. `guardian.sh --status` shows all three
+layers present and active, and `watchdog.log` opens with a `baseline` line per
+check (it logs state CHANGES, so silence afterwards is success, not failure).
 
 ---
 

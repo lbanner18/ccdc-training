@@ -12,14 +12,32 @@ cd ccdc-training
 cp config/example.env /tmp/ccdc-linux.env
 # Edit /tmp/ccdc-linux.env for this box. Do not commit it.
 
+# 1. See the box before you change it (both read-only)
 ./linux/recon.sh --config /tmp/ccdc-linux.env
-./linux/hunt.sh --config /tmp/ccdc-linux.env
-./linux/watchdog.sh --config /tmp/ccdc-linux.env --once --dry-run
+./linux/hunt.sh  --config /tmp/ccdc-linux.env
+
+# 2. Arm the standing defence: backup + canaries + guardian, and guardian
+#    starts the watchdog as a supervised unit. Dry run first, as always.
+./linux/arm.sh      --config /tmp/ccdc-linux.env
+sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
+
+# 3. Watch. Read-only, and prints only what CHANGED since the last pass.
+./linux/watch.sh --config /tmp/ccdc-linux.env --interval 120
 ```
 
-The first two commands are read-only. `watchdog.sh` is also non-mutating until
-you pass `--apply`; it logs an unhealthy service rather than restarting it in
-dry-run mode.
+Every mutating tool is dry-run by default and needs `--apply`.
+
+Do not start `watchdog.sh` by hand — `guardian.sh` (via `arm.sh`) installs it
+as a supervised unit. Launched from a shell it dies with your SSH session,
+which is the moment you need it most.
+
+`arm.sh` deliberately leaves two things to you, because both can take a scored
+service off the board if you get them wrong:
+
+```bash
+./linux/services.sh --config /tmp/ccdc-linux.env --review   # what should not run
+./linux/fw.sh       --config /tmp/ccdc-linux.env            # what should not be reachable
+```
 
 ## Before any mutation
 
@@ -33,8 +51,17 @@ dry-run mode.
 
 ```text
 config/example.env       safe template; real config stays outside the repo
-linux/                    Bash tools for Linux boxes (recon, hunt, watchdog,
-                          users, fw, backup, canary)
+linux/                    Bash tools for Linux boxes:
+  arm.sh                  one command to arm the standing defence
+  recon.sh hunt.sh        read-only baseline and persistence sweeps
+  watch.sh                detection loop; reports only what changed
+  canary.sh               decoy files + auditd tripwires
+  watchdog.sh             restarts a dead scored service (run via guardian)
+  guardian.sh             keeps the watchdog alive against an attacker w/ root
+  services.sh             review and reversibly disable unneeded daemons
+  fw.sh                   firewall with an automatic lockout rollback
+  users.sh backup.sh      accounts; restore points
+  diff-evidence.sh        compare two evidence snapshots
 windows/                  PowerShell first-pass tools
 splunk/                   starter searches and field notes
 injects/                  memo and incident-report templates
