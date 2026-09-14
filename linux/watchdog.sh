@@ -48,7 +48,18 @@ hash_state="$log_dir/watchdog.sha256"
 watchdog_lock="$log_dir/watchdog.lock"
 watchdog_lock_owner="$watchdog_lock/owner"
 watchdog_lock_token=''
+watchdog_lock_holder=''
 watchdog_staged=''
+
+# How often a watchdog that lost the singleton lock re-tries for it. This is the
+# failover window: kill the active watchdog and a standby one picks up your
+# services this many seconds later, at worst. Kept short because idling is free
+# -- a failed mkdir is the entire cost of a standby pass.
+standby_interval=${CCDC_WATCHDOG_STANDBY_SECONDS:-5}
+case "$standby_interval" in
+  ''|*[!0-9]*) ccdc_die "CCDC_WATCHDOG_STANDBY_SECONDS must be a whole number of seconds: $standby_interval" ;;
+esac
+[ "$standby_interval" -ge 1 ] || ccdc_die "CCDC_WATCHDOG_STANDBY_SECONDS must be at least 1: $standby_interval"
 
 watchdog_process_start() {
   awk '{print $22}' "/proc/$1/stat" 2>/dev/null || printf 'unknown'
@@ -82,7 +93,10 @@ acquire_watchdog_lock() {
     *) kill -0 "$pid" 2>/dev/null && live_start=$(watchdog_process_start "$pid") ;;
   esac
   if [ -n "$live_start" ] && [ "$live_start" = "$expected_start" ]; then
-    ccdc_warn "another watchdog already owns $watchdog_lock (pid $pid)"
+    # Silent: in standby this is retried every few seconds, and a warning per
+    # attempt would fill watchdog.err with the one thing that is working.
+    # Callers log the transition instead.
+    watchdog_lock_holder=$pid
     return 1
   fi
   rm -f "$watchdog_lock_owner" 2>/dev/null || return 1
@@ -361,12 +375,68 @@ EOF
 }
 
 [ "$apply" -eq 1 ] && ccdc_require_root
-acquire_watchdog_lock || ccdc_die "watchdog singleton lock is unavailable; refusing a duplicate recovery loop"
+
+# Do we still hold the lock we think we hold?
+#
+# The EXIT trap releases the lock on a clean stop, but the whole point of this
+# tool is that someone is trying to kill it, and `kill -9` runs no traps. It can
+# also lose the lock without dying: `rm -rf` on the evidence directory takes the
+# lock directory with it, and then a second watchdog is free to create it. So
+# ownership is re-checked every pass rather than assumed from start-up.
+holds_watchdog_lock() {
+  [ -n "$watchdog_lock_token" ] || return 1
+  [ "$(cat "$watchdog_lock_owner" 2>/dev/null || printf '')" = "$watchdog_lock_token" ]
+}
+
 if [ "$once" -eq 1 ]; then
+  acquire_watchdog_lock || ccdc_die "watchdog singleton lock is unavailable; refusing a duplicate recovery loop"
   run_once
-else
-  while :; do
-    run_once
-    sleep "$interval"
-  done
+  exit 0
 fi
+
+# The loop, with the singleton lock as a hot-standby handoff.
+#
+# Running several independent guardian chains means several watchdog units, and
+# two watchdogs restarting the same service is not redundancy -- the second
+# restart is an outage you inflicted on yourself, during an incident, while
+# reading a log that now has two writers. So only the lock holder acts.
+#
+# The losers do NOT exit. A watchdog that exits on a lost lock leaves its unit
+# to be restarted by systemd every RestartSec forever, and worse, nothing is
+# watching your services the moment the holder dies until some other layer
+# notices. Instead they idle here re-trying the lock, so when the holder is
+# killed -- which is the scenario this is for -- the next chain picks up the
+# services within one standby interval, with no coordination between the chains
+# and nothing designated as primary.
+standby_logged=0
+active_logged=0
+while :; do
+  if ! holds_watchdog_lock; then
+    watchdog_lock_token=''
+    if acquire_watchdog_lock; then
+      standby_logged=0
+      if [ "$active_logged" -eq 0 ]; then
+        ccdc_append_log "$log" "watchdog_active pid=$$ interval=${interval}s"
+        active_logged=1
+      fi
+      # A new holder inherits nothing from the old one's memory, so let the
+      # first pass re-log its baseline instead of reporting a silent "no change"
+      # against states it never observed.
+      ccdc_state=()
+    else
+      active_logged=0
+      if [ "$standby_logged" -eq 0 ]; then
+        ccdc_append_log "$log" "watchdog_standby pid=$$ holder=${watchdog_lock_holder:-unknown}"
+        # Also to stderr, once: if you ran this by hand you are staring at a
+        # terminal that is doing nothing, and "it is idle on purpose" is the
+        # only thing you need to know.
+        ccdc_warn "another watchdog (pid ${watchdog_lock_holder:-?}) is active; standing by to take over if it dies"
+        standby_logged=1
+      fi
+      sleep "$standby_interval"
+      continue
+    fi
+  fi
+  run_once
+  sleep "$interval"
+done

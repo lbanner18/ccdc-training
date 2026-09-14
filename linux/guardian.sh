@@ -208,9 +208,27 @@ unit_timer="$reconcile_name.timer"
 # field, greppable with `systemctl list-units`. Derive each from its own name.
 describe() { printf '%s' "$1" | tr '_-' '  '; }
 
-# State lives with the evidence, next to the watchdog and canary logs, so one
-# directory is the whole story when you write the incident report.
-state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
+# State lives with the evidence by default, next to the watchdog and canary
+# logs, so one directory is the whole story when you write the incident report.
+#
+# Override it to run SEVERAL INDEPENDENT CHAINS. Each chain needs its own
+# manifest, sentinel, lock and pidfile, or the second install overwrites the
+# first one's manifest and then "uninstall" tears down a set of artifacts that
+# is no longer the set that exists. With a state dir per chain you get N fully
+# separate keep-alives that share nothing but the box:
+#
+#   CCDC_GUARDIAN_STATE_DIR=/var/lib/misc/.netmon   ...chain A's own names
+#   CCDC_GUARDIAN_STATE_DIR=/var/cache/man/.sync    ...chain B's own names
+#
+# Deliberately NOT split: CCDC_EVIDENCE_DIR. Every chain still writes evidence
+# and the watchdog's singleton lock to one shared place, and the shared lock is
+# exactly what stops two chains from restarting the same service twice. Split
+# the evidence dir as well and you get the double restart back.
+state_dir=${CCDC_GUARDIAN_STATE_DIR:-${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}}
+case "$state_dir" in
+  /*) ;;
+  *) ccdc_die "CCDC_GUARDIAN_STATE_DIR must be an absolute path: $state_dir" ;;
+esac
 mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence"
 mkdir -p "$state_dir" 2>/dev/null || ccdc_die "cannot create state directory"
 if [ "$apply" -eq 1 ]; then
@@ -228,11 +246,49 @@ lock_token=''
 staged_paths=''
 
 # Payload copies (what the layers actually execute).
-guardian_copy="$guardian_dir/guardian.sh"
-watchdog_copy="$guardian_dir/watchdog.sh"
+#
+# Named after this chain's own layers, NOT after the kit. The unit names, the
+# payload directory and the state directory can all be made unrelated between
+# chains, and a red-team test still found every chain on the box in one command:
+#
+#     ps -eo args | grep watchdog.sh
+#
+# because every chain executed a file called watchdog.sh. `ps` is a namespace no
+# amount of renaming elsewhere can hide from -- the running process has to say
+# what it is running. So the file itself takes the layer's name, and a chain
+# whose watch layer is "systemd-netmon" runs /usr/local/lib/netmon/systemd-netmon.sh.
+# There is then no string shared between two chains for one grep to find.
+#
+# This is defence in depth against a hurried attacker, not concealment: the
+# manifest still lists every artifact by real path, --status prints them, and
+# anyone who reads a unit file learns everything. Rule 5.6 tooling stays public
+# and unmodified; what changes is only the filename we copy it to.
+watchdog_basename=${CCDC_GUARDIAN_WATCHDOG_FILE:-$watch_name.sh}
+self_basename=${CCDC_GUARDIAN_SELF_FILE:-$reconcile_name.sh}
+case "$watchdog_basename$self_basename" in
+  */*) ccdc_die "CCDC_GUARDIAN_WATCHDOG_FILE and CCDC_GUARDIAN_SELF_FILE are filenames, not paths" ;;
+esac
+guardian_copy="$guardian_dir/$self_basename"
+watchdog_copy="$guardian_dir/$watchdog_basename"
 common_copy="$guardian_dir/lib/common.sh"
 env_copy="$guardian_dir/guardian.env"
-tick_script="$guardian_dir/tick.sh"
+# Same reasoning as the payload names above: tick.sh is named in the ticker
+# unit's ExecStart, so leaving it fixed put the shared thread straight back --
+# `grep -rl tick.sh /etc/systemd/system` would find every chain at once.
+tick_basename=${CCDC_GUARDIAN_TICK_FILE:-$ticker_name.sh}
+case "$tick_basename" in
+  */*) ccdc_die "CCDC_GUARDIAN_TICK_FILE is a filename, not a path: $tick_basename" ;;
+esac
+tick_script="$guardian_dir/$tick_basename"
+
+# These three share a directory, so identical names would silently overwrite one
+# another and the chain would execute the wrong script. Easy to do by hand when
+# the layer names are chosen to look plausible rather than to be distinct.
+if [ "$tick_basename" = "$watchdog_basename" ] \
+  || [ "$tick_basename" = "$self_basename" ] \
+  || [ "$watchdog_basename" = "$self_basename" ]; then
+  ccdc_die "payload filenames collide in $guardian_dir: $self_basename / $watchdog_basename / $tick_basename (give the watch, ticker and reconcile layers different names)"
+fi
 
 # Reconciliation must copy from an independent source. The files in .repair
 # are never referenced by a service ExecStart; they are the clean source used
@@ -240,8 +296,8 @@ tick_script="$guardian_dir/tick.sh"
 # copy at once, which is the documented limit, but editing one live file no
 # longer causes a source==destination no-op followed by manifest laundering.
 repair_dir="$guardian_dir/.repair"
-repair_guardian="$repair_dir/guardian.sh"
-repair_watchdog="$repair_dir/watchdog.sh"
+repair_guardian="$repair_dir/$self_basename"
+repair_watchdog="$repair_dir/$watchdog_basename"
 repair_common="$repair_dir/lib/common.sh"
 repair_env="$repair_dir/guardian.env"
 
@@ -740,8 +796,8 @@ write_payload() {
 write_tick_script() {
   write_artifact payload "$tick_script" 0700 <<SCRIPT
 #!/bin/bash
-# Generated by guardian.sh. Layer 1: a supervised sleep loop that runs the same
-# reconcile pass as the timer and the cron entry.
+# Authorised blue-team service keep-alive, layer 1 of 3: a supervised sleep loop
+# that runs the same reconcile pass as the timer and the cron entry.
 while :; do
   [ -f "$sentinel" ] && exit 0
   /bin/bash "$guardian_copy" --config "$repair_env" --fallback-config "$env_copy" --config-sha256 "$pinned_env_hash" --tick --apply >/dev/null 2>&1
@@ -832,8 +888,14 @@ write_cron() {
     spec="*/$minutes * * * *"
   fi
   write_artifact layer3 "$cron_file" 0644 <<CRON
-# Generated by guardian.sh. Layer 3: the scheduler that survives a systemd purge.
-# Removable with: guardian.sh --config <cfg> --uninstall --apply
+# Authorised blue-team service keep-alive, layer 3 of 3: the scheduler that
+# survives a systemd purge. This is defensive tooling, not an implant.
+# Remove with: $guardian_copy --config <cfg> --uninstall --apply
+#
+# The label names THIS chain's own payload rather than the kit, because a fixed
+# string here is a join key: one `grep -rl` across /etc/cron.d would otherwise
+# link every independent chain on the box. The path below is already on the
+# ExecStart line underneath, so nothing is hidden that was not already visible.
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 $spec root /bin/bash $guardian_copy --config $repair_env --fallback-config $env_copy --config-sha256 $pinned_env_hash --tick --apply >/dev/null 2>&1
@@ -849,7 +911,11 @@ watchdog_running_pidfile() {
   kill -0 "$pid" 2>/dev/null || return 1
   # PIDs get reused. Confirm it is still our process before believing the file.
   if [ -r "/proc/$pid/cmdline" ]; then
-    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -q 'watchdog.sh' || return 1
+    # Match this chain's own payload path, not the literal "watchdog.sh": the
+    # copy is named after the chain now, and matching the kit's filename would
+    # make this always false (guardian would respawn a watchdog it already has,
+    # every tick) and would also match ANOTHER chain's watchdog.
+    tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | grep -qF "$watchdog_copy" || return 1
   fi
   return 0
 }
@@ -1303,6 +1369,7 @@ do_status() {
   printf 'guardian: %s\n' "$name"
   printf 'payload:  %s\n' "$guardian_dir"
   printf 'interval: %ss reconcile / %ss watchdog\n' "$interval" "$watchdog_interval"
+  printf 'statedir: %s\n' "$state_dir"
   printf 'manifest: %s\n' "$manifest"
   if [ -f "$sentinel" ]; then
     printf 'state:    DISARMED (sentinel present: %s)\n' "$sentinel"

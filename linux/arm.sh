@@ -142,12 +142,22 @@ fi
 note "verify what is actually running"
 if [ "$apply" -eq 1 ]; then
   if [ "$skip_guardian" -eq 0 ] && ccdc_have systemctl; then
+    # Each layer can be named independently (CCDC_GUARDIAN_*_NAME), so these
+    # cannot be derived from CCDC_GUARDIAN_NAME alone -- doing that reported
+    # every layer as "NOT active" on exactly the configs that hide best.
+    # Mirrors the derivation in guardian.sh; keep the two in step.
     gname=${CCDC_GUARDIAN_NAME:-node-health}
-    for u in "$gname-watch.service" "$gname.service" "$gname-reconcile.timer"; do
+    for u in "${CCDC_GUARDIAN_WATCH_NAME:-$gname-watch}.service" \
+             "${CCDC_GUARDIAN_TICKER_NAME:-$gname}.service" \
+             "${CCDC_GUARDIAN_RECONCILE_NAME:-$gname-reconcile}.timer"; do
       systemctl is-active --quiet "$u" 2>/dev/null && good "active: $u" || bad "NOT active: $u"
     done
   fi
-  pgrep -f watchdog.sh >/dev/null 2>&1 && good "watchdog process running" || bad "no watchdog process"
+  # The installed copy is named after the chain's watch layer, so "watchdog.sh"
+  # is not what is in `ps`. Look for the payload directory instead, which every
+  # layer of this chain names and no other chain does.
+  gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/${CCDC_GUARDIAN_NAME:-node-health}}
+  pgrep -f "$gdir" >/dev/null 2>&1 && good "watchdog process running" || bad "no watchdog process"
   [ "$skip_canary" -eq 1 ] || [ -f "$evidence_dir/canary.manifest" ] \
     && good "canary manifest present" || bad "no canary manifest"
 else
