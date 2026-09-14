@@ -68,6 +68,19 @@ as not finding it.
 
 `RED  account(s) with UID 0 other than root`
 
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# UID-0 accounts that are not root
+awk -F: '$3==0 && $1!="root" {print}' /etc/passwd
+
+# accounts with NO password at all
+sudo awk -F: '$2=="" {print $1}' /etc/shadow
+```
+
 > ### ☠️ READ THIS BEFORE YOU TYPE ANYTHING
 >
 > **Never run `pkill -u <name>` or `ps -u <name>` on a UID-0 account.** The name
@@ -143,6 +156,21 @@ safe and is the right first move, and plain `userdel -r "$U"` works.
 
 `AMBER  N SSH key(s) grant login`
 
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# every file that grants SSH login, and what is in it
+sudo find /root /home -maxdepth 3 -name authorized_keys -exec ls -la {} \;
+sudo find /root /home -maxdepth 3 -name authorized_keys -exec cat {} \;
+
+# the two sshd settings that point key auth somewhere you are not watching
+sudo grep -rnE 'AuthorizedKeysFile|AuthorizedKeysCommand|Match ' \
+     /etc/ssh/sshd_config /etc/ssh/sshd_config.d
+```
+
 ```bash
 # 0. FIRST: which key are YOU using? Do not lock yourself out.
 #    Run this from your LOCAL machine, not the box:
@@ -187,6 +215,25 @@ have just locked yourself out of the box mid-competition. Delete the one line.
 
 `RED  scheduled job(s) containing reverse-shell or download-and-run patterns`
 
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+SHELLS='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
+
+# scheduled jobs containing a reverse shell or download-and-run
+sudo grep -rIlE "$SHELLS" /etc/cron.d /etc/cron.daily /etc/cron.hourly \
+     /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron
+
+# every scheduler on the box, not just cron.d
+sudo ls -la /etc/cron.d/ /etc/cron.daily/
+for u in $(cut -d: -f1 /etc/passwd); do sudo crontab -u "$u" -l 2>/dev/null | sed "s|^|$u: |"; done
+systemctl list-timers --all --no-pager
+sudo atq
+```
+
 ```bash
 F=/etc/cron.d/apt-compat-check     # <- the file triage printed
 
@@ -222,6 +269,28 @@ the entry to whatever it invoked and remove that too.
 ## CARD 4 — systemd unit that calls home, or runs from /tmp
 
 `RED  systemd unit(s) containing reverse-shell...` / `...executing from a
+
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+SHELLS='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
+
+# units whose own text contains a reverse shell
+sudo grep -rIlE "$SHELLS" /etc/systemd/system /run/systemd/system
+
+# units executing out of a world-writable directory
+sudo grep -rIlE '^Exec[A-Za-z]*=.*(/tmp/|/var/tmp/|/dev/shm/)' /etc/systemd/system
+
+# THE ONE THAT MATTERS: follow ExecStart one level down and read the script.
+# A clean path in an ordinary directory hides the payload from both greps above.
+for unit in /etc/systemd/system/*.service; do
+  t=$(awk -F= '/^ExecStart=/ {print $2; exit}' "$unit" | awk '{print $1}' | sed 's/^[-@+!]*//')
+  [ -f "$t" ] && grep -qIE "$SHELLS" "$t" && echo "HIT: $unit -> $t"
+done
+```
 world-writable directory`
 
 ```bash
@@ -257,6 +326,22 @@ is why the `*.d/` lines above are not optional — and it is the attack
 
 `RED  SUID interpreter(s)/utilities`
 
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# SUID shells, interpreters and file utilities - never a legitimate choice
+sudo find / -xdev -perm -4000 -type f 2>/dev/null \
+  | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$'
+
+# the full lists, when you have time to read them
+sudo find / -xdev -perm -4000 -type f 2>/dev/null   # SUID
+sudo find / -xdev -perm -2000 -type f 2>/dev/null   # SGID
+getcap -r / 2>/dev/null                             # capabilities
+```
+
 ```bash
 F=/usr/bin/python3.12              # <- whatever triage printed
 
@@ -283,6 +368,22 @@ interpreters, and file utilities (`find`, `vim`, `less`, `tar`, `cp`, `env`).
 ## CARD 6 — process running from /tmp, or with a deleted executable
 
 `RED  process(es) executing from /tmp...` / `AMBER  ...executable was deleted`
+
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# processes executing from a world-writable directory
+ls -l /proc/*/exe 2>/dev/null | grep -E '/(tmp|var/tmp|dev/shm)/'
+
+# processes whose executable was deleted from disk (memory-only payloads)
+ls -l /proc/*/exe 2>/dev/null | grep '(deleted)'
+
+# what is it talking to?
+sudo ss -tnp | grep -v 127.0.0.1
+```
 
 ```bash
 P=1234                             # <- the PID triage printed
@@ -316,6 +417,19 @@ keep killing it; find what restarts it.
 
 `AMBER  passwordless sudo is configured`
 
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# passwordless sudo
+sudo grep -rIh '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d
+
+# read every drop-in - a file named "10-base" is not automatically legitimate
+sudo grep -rn '^[^#]' /etc/sudoers.d/
+```
+
 ```bash
 sudo grep -rn NOPASSWD /etc/sudoers /etc/sudoers.d
 
@@ -343,6 +457,20 @@ your next command will prompt for a password you may not have.
 
 `AMBER  listening TCP port(s) not in CCDC_ALLOWED_TCP_PORTS`
 
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# every listening socket, with the process that owns it
+sudo ss -tulpn
+
+# ignore 127.0.0.x and ::1 - they show on no nmap scan. Compare what is left
+# against the scored ports in your packet.
+sudo ss -tlnH | awk '$4 !~ /^(127\.|\[::1\])/ {print $4}' | sed 's/.*://' | sort -un
+```
+
 ```bash
 P=4444                             # <- the port triage printed
 
@@ -367,6 +495,23 @@ channel.
 ## CARD 9 — /etc changed and it was not you
 
 `AMBER  /etc file(s) modified in the last N minutes`
+
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# /etc files changed in the last 30 minutes
+sudo find /etc -xdev -type f -mmin -30 2>/dev/null
+
+# what changed vs your baseline (this is why recon.sh runs FIRST)
+./linux/diff-evidence.sh <old-evidence-dir> <new-evidence-dir>
+
+# package-owned files, checked against the distro's own hashes
+sudo dpkg --verify 2>/dev/null | head -20     # Debian/Ubuntu
+sudo rpm -Va 2>/dev/null | head -20           # RHEL/CentOS
+```
 
 ```bash
 # 1. WAS it you? Your own hardening shows up here. Check the timestamps against
@@ -393,6 +538,23 @@ an account being added. Go to CARD 1.
 ## CARD 10 — service account with a shell, or in an admin group
 
 `RED  service account(s) with a login shell` / `RED  system account(s) in an admin group`
+
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+# service accounts (UID < 1000) that have been given a login shell
+awk -F: '$3>0 && $3<1000 && $7 !~ /(nologin|false|sync)$/ {print $1":"$3":"$7}' /etc/passwd
+
+# who can become root. adm is NOT one of these - it grants log read access,
+# and syslog is in it on every stock Ubuntu.
+getent group sudo wheel admin
+
+# every account with a real shell, for comparison
+getent passwd | awk -F: '$7 ~ /(bash|sh)$/ {print $1, $7}'
+```
 
 A system account (UID under 1000) runs a daemon. It has no reason to own a
 login shell or to be able to become root. Granting either is quiet, durable,
@@ -428,6 +590,25 @@ does nothing. You want `pkill -u www-lab`. This cost real time in a drill.
 ## CARD 11 — shell start-up file that launches something
 
 `RED  shell start-up file(s) launching something`
+
+### Find it yourself
+
+The command that surfaces this. `triage.sh` runs exactly this internally, so
+if the scripts are gone - or you just want to check by hand - type this:
+
+```bash
+SHELLS='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
+
+# start-up files that launch something. These run on EVERY login, including
+# your next `sudo -i`.
+for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc \
+         /etc/profile /home/*/.bashrc /home/*/.profile /etc/profile.d/*; do
+  [ -f "$f" ] && grep -HIE "$SHELLS|/usr/local/bin/|/tmp/|/dev/shm/" "$f"
+done
+
+# quick eyeball of the usual suspects
+sudo tail -5 /root/.bashrc /home/*/.bashrc
+```
 
 `.bashrc`, `.profile`, `.bash_profile` and `/etc/profile.d/*` run every time
 anyone opens a shell — **including the next time you run `sudo -i`**. This is

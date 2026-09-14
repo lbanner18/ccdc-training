@@ -101,6 +101,7 @@ printf '%s\n' "$body" | awk '
     sub(/^> ?/, "", line)                      # blockquote markers
     gsub(/\*\*/, "", line)                     # bold
     gsub(/`/, "", line)                        # inline code ticks
+    sub(/^###+ /, "", line)                    # sub-headings
     if (line ~ /^## CARD /) {
       sub(/^## /, "", line)
       print "  " line
@@ -111,7 +112,10 @@ printf '%s\n' "$body" | awk '
     if (incode) {
       if (line ~ /^[[:space:]]*$/) { print ""; next }
       if (line ~ /^[[:space:]]*#/) { print "        " line; next }   # comment
-      print "      $ " line                                          # command
+      # No "$" prefix: it reads like a prompt and pastes like a syntax error
+      # ("$: command not found"). Bash strips leading whitespace, so an
+      # indented command pastes and runs exactly as written.
+      print "      " line                                            # command
       next
     }
     print "  " line
