@@ -4,7 +4,52 @@ One card per finding `triage.sh` can print. Each card is: **kill the access,
 find the way back in, verify**. Work them in that order every time.
 
 Written because finding a foothold and not knowing the next command is the same
-as not finding it. Keep this open in a second window next to `triage.sh`.
+as not finding it.
+
+> ## ⛔ DO NOT `cat` OR PASTE THIS FILE INTO A SHELL
+>
+> Read it with **`./linux/card.sh <n> <name-or-path>`** instead:
+>
+> ```
+> ./linux/card.sh              # list the cards
+> ./linux/card.sh 1 backupsvc  # card 1, with the real username filled in
+> ```
+>
+> This is markdown. Pasted into bash it executes the prose — measured on the
+> lab box, hundreds of lines of `command not found`, plus real `sudo userdel`
+> and `pkill` lines firing blind. Nothing broke only because the placeholders
+> happened to be unset.
+>
+> The original version of this file said "keep this open in a second window".
+> That assumed two terminals. With one, "open it" means `cat`, and `cat` of a
+> file full of `sudo` is a loaded gun aimed at whoever is in the biggest hurry
+> — which is exactly who these cards are for. `card.sh` prints; it never runs.
+>
+> **Also: never leave `$U` or `$F` unset.** `grep -rn "$U" /etc/ssh/sshd_config`
+> with `$U` empty matches every line and dumps the whole file. It does not
+> error. Pass the value to `card.sh` and there is no variable to forget.
+>
+> ### If the scripts are gone
+>
+> This file is the fallback, and it is deliberately readable without any of
+> them — a red team that deletes `linux/` takes `card.sh` with it, and that is
+> the moment you most need these commands. Three ways in, none of which
+> execute anything:
+>
+> ```
+> less playbooks/remediation-cards.md          # scroll; /CARD 1 to search
+> sed -n '/## CARD 1/,/^---/p' playbooks/remediation-cards.md
+> ```
+>
+> or read it on another device at
+> `github.com/lbanner18/ccdc-training/blob/main/playbooks/remediation-cards.md`.
+>
+> **`less`, not `cat`.** `less` pages it into a viewer; `cat` dumps it into your
+> scrollback, and the next thing you do is select-and-paste part of it.
+>
+> Every command in this file is a real command you could have typed yourself.
+> Nothing here depends on a script in this repo, by design: the scripts are the
+> fast path, this is the path that survives.
 
 **Three rules that apply to every card:**
 

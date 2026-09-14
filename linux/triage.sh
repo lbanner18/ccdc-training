@@ -335,9 +335,10 @@ else
   printf '  Write down what you found and when. That is the incident-report\n'
   printf '  inject, already half-composed.\n'
   printf '\n  EXACT COMMANDS for each [CARD n] above:\n'
-  printf '      playbooks/remediation-cards.md\n'
-  printf '  Each card is: kill the access, find the way back in, verify. Knowing\n'
-  printf '  what you found and not what to type next is the same as not finding it.\n'
+  printf '      ./linux/card.sh <n> <name-or-path>     e.g. ./linux/card.sh 1 backupsvc\n'
+  printf '  Reads the card in this terminal with the real value filled in. Do NOT\n'
+  printf '  cat or paste playbooks/remediation-cards.md - it is markdown, and bash\n'
+  printf '  will try to execute the prose.\n'
 fi
 printf '\n  Full detail, if you want it: ./linux/hunt.sh and ./linux/recon.sh\n'
 [ "$findings" -gt 0 ] && exit 3

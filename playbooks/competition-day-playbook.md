@@ -282,10 +282,29 @@ improvised late; know that going in.
 Triggered by a canary trip, an audit hit, a strange process, or `/tmp` filling
 up. Work the SANS loop (see injects/responses/incident-response-procedure.md):
 
+**If the scripts are gone.** A red team that deletes `linux/` takes every tool
+here with it. Each tool's manual equivalent is in the cards or in §1 above, and
+`playbooks/remediation-cards.md` is written to be read with `less` and typed by
+hand. Re-cloning is usually faster:
+
+```
+[ ] git clone https://github.com/lbanner18/ccdc-training /tmp/kit2
+[ ] less playbooks/remediation-cards.md      # less, NEVER cat - it is markdown
+```
+
 **Every finding has a card with the exact commands:**
-[`playbooks/remediation-cards.md`](remediation-cards.md). `triage.sh` prints
-`[CARD n]` next to each finding so the lookup is instant. Knowing what you
-found and not what to type next is the same as not finding it.
+`triage.sh` prints `[CARD n]` next to each finding, and it also prints the
+literal command with this box's real values already in it. To read a whole
+card:
+
+```
+[ ] ./linux/card.sh                      # list the nine cards
+[ ] ./linux/card.sh 1 backupsvc          # card 1, real username filled in
+```
+
+Do NOT `cat` or paste `playbooks/remediation-cards.md` into a shell. It is
+markdown; bash executes the prose. Use `card.sh`, or `less` if the scripts are
+gone.
 
 ```
 [ ] IDENTIFY: sudo ./linux/triage.sh --config <cfg>   <- ranks what is wrong

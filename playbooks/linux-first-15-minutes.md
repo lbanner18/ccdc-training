@@ -8,6 +8,8 @@ Use the team packet to fill the bracketed values before competition day.
 [ ] Get the kit on the box: bootstrap-on-the-box.md (STEP 1 probe).
 [ ] Copy the kit and local config; do not paste secrets into chat.
 [ ] sudo ./linux/triage.sh --config <cfg>   # ranked: what is ALREADY wrong
+    It prints the fix command too. ./linux/card.sh <n> <name> for the full card.
+    NEVER cat playbooks/remediation-cards.md - use less, it is markdown.
     Each finding names a card in playbooks/remediation-cards.md
 [ ] Run recon.sh and save the evidence path.
 [ ] Run hunt.sh and review persistence, keys, sudoers, and listening ports.
