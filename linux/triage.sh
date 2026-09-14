@@ -50,6 +50,21 @@ checks=0
 red()   { findings=$((findings + 1)); printf '\n  \033[1;31mRED\033[0m    %s\n' "$1"; }
 amber() { findings=$((findings + 1)); printf '\n  \033[1;33mAMBER\033[0m  %s\n' "$1"; }
 detail(){ printf '         %s\n' "$1"; }
+
+# Print the literal command to run, with this box's real values already in it.
+#
+# The card reference alone was not enough. Watching a real operator work a
+# finding, he typed `sudo remove t-implant` - inventing a command - because the
+# actual fix was a sed incantation inside a markdown file he was not looking at
+# while the clock ran. A reference tells you where to go read; under pressure
+# you need the command under your cursor. So triage now prints it.
+#
+# Nothing here is destructive-by-surprise: the ordering is lock-then-verify-
+# then-remove, exactly as the cards describe, and the irreversible step is
+# always last and always after something that shows you what you are about to
+# remove.
+fix() { printf '         \033[2m$\033[0m %s\n' "$1"; }
+fixhdr(){ printf '         ---- run this ----------------------------------------\n'; }
 clean() { [ "$quiet" -eq 1 ] || printf '  ok     %s\n' "$1"; }
 begin() { checks=$((checks + 1)); }
 
@@ -66,7 +81,16 @@ if [ -n "$uid0" ]; then
   for u in $uid0; do
     detail "$(grep "^$u:" /etc/passwd)"
   done
-  detail "fix: userdel -r <name>  (confirm against the packet first)"
+  detail "confirm against the packet first - a scored account can have a bad UID"
+  for u in $uid0; do
+    fixhdr
+    fix "sudo passwd -l $u"
+    fix "sudo usermod -s /usr/sbin/nologin $u"
+    fix "ps -ef | grep -w $u | grep -v grep      # kill these by PID, NOT by user"
+    fix "sudo userdel -f -r $u                   # -f required; warns about PID 1"
+  done
+  detail "NEVER pkill -u on a UID-0 account: the name resolves to root and you"
+  detail "would kill every root process on the box. See CARD 1."
 else
   clean "no UID-0 accounts besides root"
 fi
@@ -78,6 +102,13 @@ if [ -r /etc/shadow ]; then
   if [ -n "$empty" ]; then
     red "account(s) with an EMPTY password: $(printf '%s' "$empty" | tr '\n' ' ')   [CARD 1]"
     detail "anyone who can reach a login prompt is already in"
+    for u in $empty; do
+      fixhdr
+      fix "sudo passwd -l $u"
+      fix "sudo usermod -s /usr/sbin/nologin $u"
+      fix "sudo pkill -9 -u $u                     # safe here: this is NOT UID 0"
+      fix "sudo userdel -r $u                      # only if the packet says it is not scored"
+    done
   else
     clean "no empty-password accounts"
   fi
@@ -94,7 +125,11 @@ keyfiles=$(find /root /home -maxdepth 3 -name authorized_keys -type f 2>/dev/nul
 if [ -n "$keyfiles" ]; then
   total=0
   for f in $keyfiles; do
-    n=$(grep -c '^[^#]' "$f" 2>/dev/null || printf '0')
+    # `grep -c` PRINTS 0 and EXITS 1 when there are no matches, so a
+    # `|| printf 0` fallback appends a second 0 and the test below then dies
+    # with "integer expression expected". Check for empty instead.
+    n=$(grep -c '^[^#]' "$f" 2>/dev/null)
+    [ -n "$n" ] || n=0
     [ "$n" -gt 0 ] && total=$((total + n))
   done
   if [ "$total" -gt 0 ]; then
@@ -103,10 +138,26 @@ if [ -n "$keyfiles" ]; then
       while IFS= read -r k; do
         [ -n "$k" ] || continue
         detail "$(printf '%s' "$f"): ...$(printf '%s' "$k" | tail -c 45)"
+        # A ready-to-run deletion for THIS key, matched on the LAST 24 chars
+        # of the key body.
+        #
+        # It must be the tail. The first 24 characters are the algorithm
+        # prefix - every ed25519 key begins "AAAAC3NzaC1lZDI1NTE5AAAA" - so a
+        # leading slice matches EVERY key of that type and the command would
+        # empty the file, locking you out. Caught on the lab box only because
+        # the generated command was read before it was run.
+        #
+        # The | delimiter is also deliberate: base64 contains / and would
+        # terminate a /.../ expression early.
+        slice=$(printf '%s' "$k" | awk '{print $2}' | tail -c 25 | tr -d '\n')
+        [ -n "$slice" ] && fix "sudo cp $f $f.bak && sudo sed -i '\\|$slice|d' $f"
       done <<EOF
 $(grep '^[^#]' "$f" 2>/dev/null)
 EOF
     done
+    detail "delete ONLY the lines you do not recognise - never truncate the file,"
+    detail "your own key is probably in it. Keep this session open, then verify:"
+    fix "sudo sshd -t && ssh banneluk@\$(hostname -I | awk '{print \$1}')   # from ANOTHER terminal"
   else
     clean "no SSH authorized_keys entries"
   fi
@@ -131,7 +182,12 @@ if [ -n "$cronhits" ]; then
     done <<EOF
 $(grep -IhE "$shells" "$f" 2>/dev/null | head -3)
 EOF
+    fixhdr
+    fix "sudo cp $f /var/tmp/evidence-$(basename "$f")   # keep it, the IR inject wants it"
+    fix "sudo rm -f $f"
   done
+  detail "then follow what it CALLED - the cron line is the schedule, not the payload:"
+  fix "sudo ss -tnp | grep -v 127.0.0.1        # is it connected right now?"
 else
   clean "no scheduled job matches a reverse-shell pattern"
 fi
@@ -141,7 +197,15 @@ begin
 unithits=$(grep -rIlE "$shells" /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$unithits" ]; then
   red "systemd unit(s) containing reverse-shell or download-and-run patterns   [CARD 4]"
-  for f in $unithits; do detail "$f"; done
+  for f in $unithits; do
+    detail "$f"
+    u=$(basename "$f")
+    fixhdr
+    fix "sudo systemctl cat $u                  # read it before you delete it"
+    fix "sudo systemctl disable --now $u"
+    fix "sudo rm -f $f && sudo rm -rf $f.d      # .d holds drop-in overrides"
+    fix "sudo systemctl daemon-reload && sudo systemctl reset-failed"
+  done
 else
   clean "no systemd unit matches a reverse-shell pattern"
 fi
@@ -179,7 +243,11 @@ suid=$(find / -xdev -perm -4000 -type f 2>/dev/null \
   | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
 if [ -n "$suid" ]; then
   red "SUID interpreter(s)/utilities - instant root for any local user   [CARD 5]"
-  for f in $suid; do detail "$(ls -l "$f" 2>/dev/null)"; done
+  fixhdr
+  for f in $suid; do
+    detail "$(ls -l "$f" 2>/dev/null)"
+    fix "sudo chmod u-s $f                      # strip SUID; do NOT delete the binary"
+  done
 else
   clean "no SUID shells or interpreters"
 fi

@@ -47,18 +47,31 @@ looks like, or you will not be able to tell your own change from an intrusion.
 ```
 
 Read, by hand, in this order — this is where the red team's pre-placed access
-lives:
+lives. **Every line below is a real command you can paste**; explanations are on
+their own `#` lines so nothing here is ambiguous at 10:05:
 
 ```
-[ ] who / w / last            - who is logged in right now, who has been
-[ ] ss -tulpn                 - every listening port; anything not scored is a
-                                question. "Nothing but scored services should
-                                show on an nmap scan."
-[ ] cat /etc/passwd           - accounts with UID 0 or a shell that shouldn't
-[ ] crontab -l; ls /etc/cron.d /etc/cron.*/  - scheduled footholds
-[ ] cat /root/.ssh/authorized_keys and each user's - unknown keys = access
-[ ] systemctl list-unit-files --state=enabled      - boot-start services
-[ ] find / -perm -4000 -type f 2>/dev/null         - SUID binaries
+# who is logged in right now, and who has been
+[ ] who
+[ ] w
+[ ] last | head -20
+# every listening port. Anything not scored is a question:
+# "nothing but scored services should show on an nmap scan"
+[ ] ss -tulpn
+# accounts with UID 0, or a service account that has a login shell
+[ ] awk -F: '$3==0 {print $1}' /etc/passwd
+[ ] getent passwd | awk -F: '$7 ~ /(bash|sh)$/ {print $1, $7}'
+# who can become root
+[ ] getent group sudo admin wheel
+# scheduled footholds
+[ ] ls -la /etc/cron.d/ /etc/cron.daily/
+[ ] systemctl list-timers --all --no-pager
+# unknown keys are access
+[ ] sudo cat /root/.ssh/authorized_keys
+[ ] sudo find /home -name authorized_keys -exec ls -la {} \;
+# boot-start services, and SUID binaries
+[ ] systemctl list-unit-files --state=enabled
+[ ] sudo find / -xdev -perm -4000 -type f 2>/dev/null
 ```
 
 If you find a foothold now, note it, but do not start pulling threads before
