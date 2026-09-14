@@ -187,6 +187,13 @@ cat <<'NEXT'
     ./linux/watch.sh --config <cfg>     change-detection loop (read-only)
     and check the scored service FROM OFF THE BOX, which no tool here can do
 
+  What still needs you, once, as a judgement call:
+    ./linux/services.sh --config <cfg> --review    what should not be running
+    ./linux/fw.sh       --config <cfg>             what should not be reachable
+  Neither runs here. Both can take a scored service off the board if you get
+  them wrong, so they stay a decision you make with the packet in front of you,
+  not something a setup script does on your behalf.
+
   Disarm everything:
     sudo ./linux/guardian.sh --config <cfg> --uninstall --apply
     sudo ./linux/canary.sh   --config <cfg> --remove    --apply
