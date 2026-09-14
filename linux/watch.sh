@@ -15,8 +15,8 @@ set -u
 #   ./watch.sh --config FILE --interval 120   loop faster
 #   ./watch.sh --config FILE --once           one pass and exit
 #
-# READ-ONLY. It never mutates anything, so it is safe to leave running and safe
-# to start when you are already panicking.
+# DETECTION-ONLY. It never changes system configuration, but it does write and
+# rotate evidence snapshots under CCDC_EVIDENCE_DIR.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
@@ -45,6 +45,7 @@ case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of 
 ccdc_load_config "$config"
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
+ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 if [ -e "$state_dir" ] && [ ! -w "$state_dir" ]; then
   ccdc_die "evidence dir not writable by $(id -un): $state_dir (sudo chown -R $(id -un) $state_dir)"
 fi
@@ -91,7 +92,7 @@ normalise() {
   # hidden from THIS view -- it would still show up in cron, units, SUID and
   # listeners, which is where it has to live to be persistence at all.
   grep -v -F -- "$state_dir" "$1" 2>/dev/null \
-    | grep -vE '(watch|hunt|recon|canary)\.sh( |$)' \
+    | grep -vE '(sentry|watch|hunt|recon|canary)\.sh( |$)' \
     | grep -vE '^[A-Z][a-z]{2} [0-9]{4}-[0-9]{2}-[0-9]{2}.*\.(timer|service)[[:space:]]*$' \
     | grep -vE '^[A-Z][a-z]{2} [0-9]{4}-[0-9]{2}-[0-9]{2}.*(ago|left)[[:space:]]'
 }
@@ -110,7 +111,7 @@ quiet() { printf '%s  %s\n' "$(stamp)" "$1"; }
 prev_dir=$(ls -dt "$watch_dir"/pass-* 2>/dev/null | head -1 || true)
 
 one_pass() {
-  local changed=0 trips=0 rc=0 f added removed this_dir
+  local changed=0 trips=0 failed=0 rc=0 f added removed this_dir prior_dir d canary_out
 
   # 1. canary first: it is instant and it is the highest-confidence signal on
   # the box. A moved decoy is not an anomaly to weigh, it is someone in.
@@ -119,19 +120,26 @@ one_pass() {
     trips=1
     alert "CANARY TRIPPED"
     printf '%s\n' "$canary_out" | grep -E 'TRIPPED|AUDIT|HINT' | sed 's/^/      /'
+  elif [ "${rc:-0}" -ne 0 ]; then
+    failed=1
+    alert "canary.sh failed this pass (exit $rc)"
+    printf '%s\n' "$canary_out" | tail -n 8 | sed 's/^/      /'
   fi
 
   # 2. full sweep into its own directory, then diff against the last one.
   this_dir="$watch_dir/pass-$(ccdc_now)-$$"
   if ! "$SCRIPT_DIR/hunt.sh" --config "$config" --output-dir "$this_dir/hunt" >/dev/null 2>&1; then
     alert "hunt.sh failed this pass"
-    return 0
+    rm -rf -- "$this_dir"
+    return 4
   fi
   if ! "$SCRIPT_DIR/recon.sh" --config "$config" --output-dir "$this_dir/recon" >/dev/null 2>&1; then
     alert "recon.sh failed this pass"
-    return 0
+    rm -rf -- "$this_dir"
+    return 4
   fi
 
+  prior_dir=$prev_dir
   if [ -n "$prev_dir" ] && [ -d "$prev_dir" ]; then
     while IFS= read -r f; do
       [ -n "$f" ] || continue
@@ -151,7 +159,12 @@ one_pass() {
 $watch_files
 EOF
   else
-    quiet "baseline captured ($(basename "$this_dir")) - changes reported from the next pass"
+    if [ "$failed" -eq 0 ]; then
+      quiet "baseline captured ($(basename "$this_dir")) - changes reported from the next pass"
+    else
+      printf '%s  evidence baseline captured (%s); detector health is degraded\n' \
+        "$(stamp)" "$(basename "$this_dir")"
+    fi
   fi
 
   prev_dir="$this_dir"
@@ -162,25 +175,28 @@ EOF
     [ -n "$old" ] && rm -rf -- "$old"
   done
 
-  if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ]; then
+  if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$failed" -eq 0 ]; then
     quiet "quiet - no persistence/privilege changes, no canary trips"
   else
     printf '\n    evidence: %s\n' "$this_dir"
-    [ -n "$prev_dir" ] && printf '    compare:  ./linux/diff-evidence.sh <prev> %s\n' "$this_dir"
+    [ -n "$prior_dir" ] && printf '    compare:  ./linux/diff-evidence.sh %s %s\n' "$prior_dir" "$this_dir"
     printf '\n'
   fi
+  [ "$failed" -eq 0 ] || return 4
+  [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] || return 3
+  return 0
 }
 
-printf 'watch.sh: read-only detection loop, every %ss. Ctrl-C to stop.\n' "$interval"
+printf 'watch.sh: detection-only loop, every %ss. Ctrl-C to stop.\n' "$interval"
 printf '  watching: canary trips + persistence/privilege changes\n'
 printf '  NOT watching: whether the scorer can reach your service. Check that\n'
 printf '  from OFF the box yourself - nothing here can see it.\n\n'
 
 if [ "$once" -eq 1 ]; then
   one_pass
-  exit 0
+  exit $?
 fi
 while :; do
-  one_pass
+  one_pass || rc=$?
   sleep "$interval"
 done

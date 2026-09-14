@@ -40,18 +40,16 @@ ccdc_timestamp_dir() {
   local base=${1:-/var/tmp/ccdc-evidence}
   local stamp
   stamp=$(ccdc_now)
+  ccdc_validate_state_dir "$base" "evidence directory"
   # "Can I create it" is not the same question as "can I write to it". Run any
   # tool as root once and the evidence directory is left root-owned 0700; every
   # later non-root run then fails at the first mkdir, because mkdir -p on an
   # existing directory succeeds and the old test never noticed. That looked like
   # the read-only tools being broken. Check both.
-  if ! mkdir -p "$base" 2>/dev/null || [ ! -w "$base" ]; then
-    ccdc_warn "evidence directory is not writable by $(id -un): $base"
-    ccdc_warn "falling back to a private directory; evidence will be SPLIT across two places"
-    ccdc_warn "to keep it in one place: sudo chown -R $(id -un) $base   (or run every tool with sudo)"
-    base="${TMPDIR:-/tmp}/ccdc-evidence-$(id -un)"
-    mkdir -p "$base" || ccdc_die "cannot create evidence directory"
-  fi
+  mkdir -p "$base" 2>/dev/null \
+    || ccdc_die "cannot create evidence directory: $base (run with sudo or fix its ownership)"
+  [ -w "$base" ] \
+    || ccdc_die "evidence directory is not writable by $(id -un): $base (run with sudo; refusing to split evidence into a fallback)"
   # Include the process ID so recon and hunt launched back-to-back cannot
   # accidentally merge their evidence when they share the same second.
   printf '%s/%s-%s-%s\n' "$base" "${CCDC_BOX_NAME:-box}" "$stamp" "$$"
@@ -102,6 +100,60 @@ ccdc_list_contains() {
 
 ccdc_require_root() {
   [ "$(id -u)" -eq 0 ] || ccdc_die "run as root (or through sudo) for this operation"
+}
+
+# State directories are chmod'd and populated by several root-run tools.  A
+# typo such as CCDC_EVIDENCE_DIR=/var must never turn into `chmod 0700 /var`.
+# Keep writable state beneath a conventional state root, require a leaf below
+# that root, reject traversal, and refuse to follow an existing symlink in any
+# component.  This is deliberately stricter than "is absolute": state can be
+# relocated, but it cannot be pointed at an arbitrary part of the target.
+ccdc_validate_state_dir() {
+  local path=${1:-} label=${2:-state directory} probe parent
+  [ -n "$path" ] || ccdc_die "$label is empty"
+  case "$path" in
+    /*) ;;
+    *) ccdc_die "$label must be absolute: $path" ;;
+  esac
+  case "$path" in
+    *'//'*) ccdc_die "$label contains an empty path component: $path" ;;
+    */./*|*/.|*/../*|*/..) ccdc_die "$label contains path traversal: $path" ;;
+    *[!A-Za-z0-9_./@+-]*) ccdc_die "$label contains unsupported whitespace or control characters: $path" ;;
+  esac
+  case "$path" in
+    /var/tmp/?*|/var/lib/?*|/run/?*|/tmp/?*|/root/?*|/home/?*/?*) ;;
+    *)
+      ccdc_die "$label must be a dedicated leaf below /var/tmp, /var/lib, /run, /tmp, /root, or a user home: $path"
+      ;;
+  esac
+
+  probe=$path
+  while [ "$probe" != / ]; do
+    [ ! -L "$probe" ] || ccdc_die "$label contains a symlink component: $probe"
+    parent=$(dirname -- "$probe")
+    [ "$parent" != "$probe" ] || break
+    probe=$parent
+  done
+}
+
+# Claim a dedicated state tree before a root service trusts predictable file
+# names inside it. Recon is commonly run as the operator before arm.sh, so the
+# directory may legitimately begin user-owned. Chown the directory itself
+# first (closing writes), reject top-level symlink traps, then migrate the
+# existing evidence to root ownership. Nested evidence may intentionally
+# preserve symlinks as forensic artifacts; control files are all top-level.
+ccdc_secure_state_dir() {
+  local path=$1 label=${2:-state directory} trap_path
+  ccdc_require_root
+  ccdc_validate_state_dir "$path" "$label"
+  mkdir -p -- "$path" || ccdc_die "cannot create $label: $path"
+  [ -d "$path" ] && [ ! -L "$path" ] || ccdc_die "$label is not a real directory: $path"
+  chown 0:0 "$path" || ccdc_die "cannot claim $label as root-owned: $path"
+  chmod 0700 "$path" || ccdc_die "cannot secure $label: $path"
+  trap_path=$(find "$path" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null)
+  [ -z "$trap_path" ] || ccdc_die "$label contains a top-level symlink trap: $trap_path (move it aside and retry)"
+  chown -R 0:0 -- "$path" || ccdc_die "cannot make existing $label evidence root-owned: $path"
+  chmod -R go-rwx -- "$path" || ccdc_die "cannot remove group/world access from $label: $path"
 }
 
 ccdc_is_dry_run() {

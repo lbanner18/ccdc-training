@@ -132,6 +132,15 @@ if [ -n "$config_sha256" ]; then
 fi
 ccdc_load_config "$config"
 
+# Mutation mode is a command-line decision, not a configuration decision.  A
+# sourced config is allowed to contain the kit-wide CCDC_DRY_RUN default, but it
+# must not turn an explicit dry run into an applying run (or vice versa).
+if [ "$apply" -eq 1 ]; then
+  CCDC_DRY_RUN=0
+else
+  CCDC_DRY_RUN=1
+fi
+
 name=${CCDC_GUARDIAN_NAME:-node-health}
 interval=${CCDC_GUARDIAN_INTERVAL:-60}
 guardian_dir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$name}
@@ -229,12 +238,52 @@ case "$state_dir" in
   /*) ;;
   *) ccdc_die "CCDC_GUARDIAN_STATE_DIR must be an absolute path: $state_dir" ;;
 esac
-mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence"
-mkdir -p "$state_dir" 2>/dev/null || ccdc_die "cannot create state directory"
-if [ "$apply" -eq 1 ]; then
+
+# This directory is chmod 0700 when an applying operation uses it.  Reject a
+# broad directory (or an alias to one) before that chmod can hide a system tree.
+# Requiring a dedicated leaf also makes a typo such as /var or /var/tmp fail
+# closed instead of changing the host's permissions.
+state_path_is_safe() {
+  local path=$1 probe
+  case "$path" in
+    *[!A-Za-z0-9_./-]*|*//*|*/./*|*/../*|*/.|*/..|*/)
+      return 1 ;;
+  esac
+  case "$path" in
+    /*/*/*) ;;
+    *) return 1 ;;
+  esac
+
+  # Reject every existing symlink component.  Checking only the final path is
+  # insufficient: /safe/link/state can resolve to /etc/state even when the
+  # final component itself is a real directory.
+  probe=$path
+  while [ "$probe" != / ]; do
+    [ ! -L "$probe" ] || return 1
+    probe=${probe%/*}
+    [ -n "$probe" ] || probe=/
+  done
+  return 0
+}
+
+state_path_is_safe "$state_dir" \
+  || ccdc_die "CCDC_GUARDIAN_STATE_DIR must be a dedicated, non-symlinked leaf at least three levels below /: $state_dir"
+
+# Status and every dry-run mode are observational: do not create the state
+# directory and do not repair its permissions merely by inspecting the chain.
+if [ "$apply" -eq 1 ] && [ "$mode" != status ]; then
+  ccdc_require_root
+  mkdir -p "$state_dir" 2>/dev/null || ccdc_die "cannot create state directory: $state_dir"
+  state_path_is_safe "$state_dir" \
+    || ccdc_die "state directory resolved through a symlink after creation: $state_dir"
+  # Recon may have created the shared evidence directory as the operator.
+  # Claim it before trusting predictable root-service state names inside it.
+  chown 0:0 "$state_dir" 2>/dev/null || ccdc_die "cannot make state directory root-owned: $state_dir"
   chmod 0700 "$state_dir" 2>/dev/null || ccdc_die "cannot secure state directory: $state_dir"
-else
-  chmod 0700 "$state_dir" 2>/dev/null || true
+  state_trap=$(find "$state_dir" -mindepth 1 -maxdepth 1 -type l -print -quit 2>/dev/null)
+  [ -z "$state_trap" ] || ccdc_die "state directory contains a top-level symlink trap: $state_trap"
+  chown -R 0:0 -- "$state_dir" 2>/dev/null || ccdc_die "cannot secure existing guardian state ownership"
+  chmod -R go-rwx -- "$state_dir" 2>/dev/null || ccdc_die "cannot secure existing guardian state modes"
 fi
 manifest="$state_dir/guardian.manifest"   # kind|path|sha256-at-write
 sentinel="$state_dir/guardian.disarmed"
@@ -344,7 +393,10 @@ run_systemctl() {
 
 # --- helpers -----------------------------------------------------------------
 
-glog() { ccdc_append_log "$log" "$@"; }
+glog() {
+  ccdc_is_dry_run && return 0
+  ccdc_append_log "$log" "$@"
+}
 
 release_lock() {
   [ -n "$lock_token" ] || return 0
@@ -422,15 +474,57 @@ quarantine() {
 }
 
 unit_override_paths() {
-  local unit
+  local unit dropins path
   for unit in "$unit_watch" "$unit_ticker" "$unit_reconcile" "$unit_timer"; do
     printf '%s\n' \
       "/etc/systemd/system/$unit.d" \
       "/run/systemd/system/$unit.d" \
       "/etc/systemd/system.control/$unit.d" \
       "/run/systemd/system.control/$unit.d" \
+      "/usr/local/lib/systemd/system/$unit.d" \
+      "/usr/lib/systemd/system/$unit.d" \
+      "/lib/systemd/system/$unit.d" \
       "/run/systemd/system/$unit" \
       "/run/systemd/transient/$unit"
+
+    # The static list covers the normal administrator, runtime and vendor
+    # locations.  Also ask the manager for the effective paths so generator or
+    # distribution-specific load directories cannot hold an invisible drop-in.
+    # Only unit-specific directories are ours to quarantine; a global
+    # service.d drop-in may legitimately affect every service on the host.
+    if have_systemd; then
+      dropins=$(run_systemctl show -p DropInPaths --value "$unit" 2>/dev/null || printf '')
+      for path in $dropins; do
+        case "$path" in
+          */"$unit.d"/*) printf '%s\n' "$path" ;;
+        esac
+      done
+    fi
+  done
+}
+
+# Unit files can be supplied by the administrator, the runtime, generators, or
+# vendor packages.  Checking only /etc/systemd/system before a fresh install
+# can silently shadow a real distro unit with the same plausible name.
+systemd_unit_file_paths() {
+  local unit root
+  for unit in "$unit_watch" "$unit_ticker" "$unit_reconcile" "$unit_timer"; do
+    for root in \
+      /etc/systemd/system.control \
+      /run/systemd/system.control \
+      /run/systemd/transient \
+      /run/systemd/generator.early \
+      /etc/systemd/system \
+      /etc/systemd/system.attached \
+      /run/systemd/system \
+      /run/systemd/system.attached \
+      /run/systemd/generator \
+      /usr/local/lib/systemd/system \
+      /usr/lib/systemd/system \
+      /lib/systemd/system \
+      /run/systemd/generator.late; do
+      printf '%s/%s\n' "$root" "$unit"
+    done
   done
 }
 
@@ -452,10 +546,10 @@ preserve_override() {
 
 override_unit_for_path() {
   case "$1" in
-    */"$unit_watch"|*/"$unit_watch.d") printf '%s\n' "$unit_watch" ;;
-    */"$unit_ticker"|*/"$unit_ticker.d") printf '%s\n' "$unit_ticker" ;;
-    */"$unit_reconcile"|*/"$unit_reconcile.d") printf '%s\n' "$unit_reconcile" ;;
-    */"$unit_timer"|*/"$unit_timer.d") printf '%s\n' "$unit_timer" ;;
+    */"$unit_watch"|*/"$unit_watch.d"|*/"$unit_watch.d"/*) printf '%s\n' "$unit_watch" ;;
+    */"$unit_ticker"|*/"$unit_ticker.d"|*/"$unit_ticker.d"/*) printf '%s\n' "$unit_ticker" ;;
+    */"$unit_reconcile"|*/"$unit_reconcile.d"|*/"$unit_reconcile.d"/*) printf '%s\n' "$unit_reconcile" ;;
+    */"$unit_timer"|*/"$unit_timer.d"|*/"$unit_timer.d"/*) printf '%s\n' "$unit_timer" ;;
   esac
 }
 
@@ -509,6 +603,35 @@ new_install_has_override() {
     fi
   done <<EOF
 $(unit_override_paths)
+EOF
+  return 1
+}
+
+new_install_has_systemd_unit() {
+  have_systemd || return 1
+  local unit load fragment path
+
+  # First ask the manager.  This catches aliases, generated units and load
+  # paths a distribution may insert beyond the standard directories below.
+  for unit in "$unit_watch" "$unit_ticker" "$unit_reconcile" "$unit_timer"; do
+    load=$(run_systemctl show -p LoadState --value "$unit" 2>/dev/null || printf '')
+    fragment=$(run_systemctl show -p FragmentPath --value "$unit" 2>/dev/null || printf '')
+    if [ -n "$fragment" ] || { [ -n "$load" ] && [ "$load" != not-found ]; }; then
+      ccdc_warn "guardian unit name is already known to systemd: $unit (load=${load:-unknown}, fragment=${fragment:-none})"
+      return 0
+    fi
+  done
+
+  # A unit placed on disk since the last daemon-reload is not known to the
+  # manager yet, so also inspect every standard system-unit load directory.
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    if [ -e "$path" ] || [ -L "$path" ]; then
+      ccdc_warn "guardian unit name collides with a pre-existing systemd unit: $path"
+      return 0
+    fi
+  done <<EOF
+$(systemd_unit_file_paths)
 EOF
   return 1
 }
@@ -581,6 +704,62 @@ removal_artifacts() {
   printf 'layer2|%s\n' "$svc_reconcile"
   printf 'layer2|%s\n' "$tmr_reconcile"
   printf 'layer3|%s\n' "$cron_file"
+}
+
+current_artifact_path() {
+  local candidate=$1 kind path
+  while IFS='|' read -r kind path; do
+    [ "$path" = "$candidate" ] && return 0
+  done <<EOF
+$(removal_artifacts)
+EOF
+  return 1
+}
+
+manifest_contains_path() {
+  local candidate=$1 kind path hash extra
+  while IFS='|' read -r kind path hash extra; do
+    [ "$path" = "$candidate" ] && return 0
+  done <"$manifest"
+  return 1
+}
+
+# A manifest is also the installation's layout identity.  Reusing its state
+# directory with different unit names, payload filenames, cron name or payload
+# directory used to rewrite the manifest around the new layout and strand the
+# old root services.  Refuse that in-place migration; the safe sequence is to
+# uninstall with the previous config and then install the new one.
+manifest_layout_matches_config() {
+  local kind path hash extra required
+  [ -f "$manifest" ] || return 1
+  while IFS='|' read -r kind path hash extra; do
+    if [ -z "${kind:-}" ] || [ -z "${path:-}" ] || [ -z "${hash:-}" ] || [ -n "${extra:-}" ]; then
+      ccdc_warn "malformed guardian manifest entry; expected kind|path|sha256: ${kind:-}|${path:-}|${hash:-}"
+      return 1
+    fi
+    case "$kind" in
+      payload|repair|target|layer1|layer2|layer3) ;;
+      *) ccdc_warn "unknown guardian manifest artifact kind: $kind"; return 1 ;;
+    esac
+    if ! current_artifact_path "$path"; then
+      ccdc_warn "existing manifest belongs to a different guardian layout: $path"
+      return 1
+    fi
+  done <"$manifest"
+
+  # These copies exist on every supported init system and collectively encode
+  # the payload directory plus all configurable payload filenames.  Their
+  # absence means the manifest is truncated and cannot safely establish which
+  # layout owns the installed files.
+  for required in \
+    "$guardian_copy" "$watchdog_copy" "$common_copy" "$env_copy" \
+    "$repair_guardian" "$repair_watchdog" "$repair_common" "$repair_env"; do
+    if ! manifest_contains_path "$required"; then
+      ccdc_warn "guardian manifest is incomplete; required layout path is absent: $required"
+      return 1
+    fi
+  done
+  return 0
 }
 
 # Rebuild the manifest from what is on disk now.
@@ -1117,11 +1296,16 @@ reset_failed_units() {
 remove_all() {
   stop_units
 
-  local kind path
+  local kind path hash extra bad_manifest=0
   if [ -f "$manifest" ]; then
-    while IFS='|' read -r kind path; do
-      [ -n "${path:-}" ] || continue
-      remove_artifact "$path"
+    while IFS='|' read -r kind path hash extra; do
+      if [ -z "${path:-}" ] || [ -z "${hash:-}" ] || [ -n "${extra:-}" ] \
+        || ! current_artifact_path "$path"; then
+        ccdc_warn "refusing unrecognized path from guardian manifest: ${path:-<empty>}"
+        bad_manifest=1
+        continue
+      fi
+      remove_artifact "$path" || bad_manifest=1
     done <"$manifest"
   fi
   while IFS='|' read -r kind path; do
@@ -1178,6 +1362,7 @@ EOF
   # After the reload, so systemd has already dropped the unit files; this clears
   # what the reload cannot.
   reset_failed_units
+  [ "$bad_manifest" -eq 0 ]
 }
 
 new_install_has_collision() {
@@ -1195,6 +1380,7 @@ new_install_has_collision() {
   done <<EOF
 $(removal_artifacts)
 EOF
+  new_install_has_systemd_unit && return 0
   new_install_has_override
 }
 
@@ -1240,7 +1426,13 @@ verify_installation() {
 }
 
 removal_is_clean() {
-  local kind path
+  local kind path hash extra
+  if [ -f "$manifest" ]; then
+    while IFS='|' read -r kind path hash extra; do
+      [ -n "${path:-}" ] || continue
+      [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
+    done <"$manifest"
+  fi
   while IFS='|' read -r kind path; do
     [ -n "$path" ] || continue
     [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
@@ -1269,6 +1461,8 @@ do_install() {
     fresh=1
     new_install_has_collision \
       && ccdc_die "refusing to overwrite an unowned guardian target; choose another CCDC_GUARDIAN_NAME/DIR"
+  elif ! manifest_layout_matches_config; then
+    ccdc_die "refusing an in-place guardian layout/name change; use the previously installed config to run --uninstall --apply, then install the new layout"
   fi
   acquire_lock $((interval * 2)) \
     || ccdc_die "could not obtain the guardian lock; no install changes were made"
@@ -1439,6 +1633,9 @@ EOF
 
 do_uninstall() {
   [ "$apply" -eq 1 ] && ccdc_require_root
+  if [ -f "$manifest" ] && ! manifest_layout_matches_config; then
+    ccdc_die "current config does not describe the installed guardian layout; use the previously installed config for --uninstall"
+  fi
   acquire_lock $((interval * 2)) \
     || ccdc_die "could not obtain the guardian lock; uninstall made no changes"
 

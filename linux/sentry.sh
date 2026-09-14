@@ -1,26 +1,20 @@
 #!/usr/bin/env bash
 set -u
 
-# sentry.sh - the always-on loop. It hunts so you can write injects.
+# sentry.sh - supervised detection, diagnosis, and approval-gated remediation.
 #
-# The kit's problem was never detection, it was that every tool needed you to
-# run it AND read it. Nothing on the box would ever interrupt you. That is the
-# wrong shape for an operator whose other half of the score is writing memos:
-# an operator who finds every implant and submits two injects loses to one who
-# finds half and submits six.
+# The standing service runs triage plus the broader change detector and keeps a
+# current, structured queue. Queue records contain only severity/check/subject
+# data; attacker-controlled paths are never saved and later evaluated as shell.
+# Every approval refreshes triage and re-checks the packet protection lists
+# immediately before invoking fixed remediation functions with quoted argv.
 #
-# So this runs triage on a loop, notices only what is NEW, works out the exact
-# remediation, and puts it in a queue. You sign off; it types.
-#
-#   sudo ./sentry.sh --config FILE --interval 60      start the loop
-#   ./sentry.sh --config FILE --status                what is waiting for me?
-#   sudo ./sentry.sh --config FILE --approve --apply  do everything queued
-#   sudo ./sentry.sh --config FILE --approve 3 --apply   just item 3
-#   sudo ./sentry.sh --config FILE --revert --apply   undo what it did
-#
-# It NEVER acts without --approve. That is deliberate: the thing that decides
-# whether an account is scored is the packet, and the packet lives in your head
-# and in the config, not in a heuristic.
+#   sudo ./sentry.sh --config FILE --install --apply   install/start service
+#   sudo ./sentry.sh --config FILE --status            current findings
+#   sudo ./sentry.sh --config FILE --approve --apply   approve current queue
+#   sudo ./sentry.sh --config FILE --approve 3 --apply approve one item
+#   sudo ./sentry.sh --config FILE --ack               acknowledge watch events
+#   sudo ./sentry.sh --config FILE --uninstall --apply remove service/copy
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
@@ -29,7 +23,10 @@ umask 077
 
 config=''
 mode=loop
-interval=60
+interval=''
+watch_interval=''
+triage_timeout=''
+watch_timeout=''
 apply=0
 item=''
 bell=1
@@ -37,309 +34,894 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
     --interval) interval=${2:?missing interval}; shift 2 ;;
+    --watch-interval) watch_interval=${2:?missing watch interval}; shift 2 ;;
+    --triage-timeout) triage_timeout=${2:?missing triage timeout}; shift 2 ;;
+    --watch-timeout) watch_timeout=${2:?missing watch timeout}; shift 2 ;;
     --status) mode=status; shift ;;
     --approve) mode=approve; shift
-               case "${1:-}" in ''|-*) ;; *) item=$1; shift ;; esac ;;
+      case "${1:-}" in ''|-*) ;; *) item=$1; shift ;; esac ;;
+    --ack) mode=ack; shift ;;
     --revert) mode=revert; shift ;;
     --once) mode=once; shift ;;
-    --apply) apply=1; CCDC_DRY_RUN=0; shift ;;
+    --loop) mode=loop; shift ;;
+    --install) mode=install; shift ;;
+    --uninstall) mode=uninstall; shift ;;
+    --apply) apply=1; shift ;;
+    --dry-run) apply=0; shift ;;
     --no-bell) bell=0; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--interval N] [--status|--approve [N]|--revert|--once] [--apply]\n' "$0"
+      printf 'usage: %s --config FILE [--interval N] [--watch-interval N] [--triage-timeout N] [--watch-timeout N]\n' "$0"
+      printf '       [--status|--approve [N]|--ack|--revert|--once|--loop|--install|--uninstall] [--apply]\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+# A sourced config must not be able to turn a CLI dry-run into an apply.
+if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
+
+interval=${interval:-${CCDC_SENTRY_INTERVAL:-60}}
+watch_interval=${watch_interval:-${CCDC_WATCH_INTERVAL:-120}}
+triage_timeout=${triage_timeout:-${CCDC_TRIAGE_TIMEOUT:-45}}
+watch_timeout=${watch_timeout:-${CCDC_WATCH_TIMEOUT:-90}}
 case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of seconds" ;; esac
+case "$watch_interval" in ''|*[!0-9]*) ccdc_die "--watch-interval must be a whole number of seconds" ;; esac
+case "$triage_timeout" in ''|*[!0-9]*) ccdc_die "--triage-timeout must be a whole number of seconds" ;; esac
+case "$watch_timeout" in ''|*[!0-9]*) ccdc_die "--watch-timeout must be a whole number of seconds" ;; esac
 [ "$interval" -ge 20 ] || ccdc_die "--interval below 20s is churn: a triage pass is not free"
+[ "$watch_interval" -ge 30 ] || ccdc_die "--watch-interval below 30s is churn: a full sweep is not free"
+[ "$triage_timeout" -ge 10 ] && [ "$triage_timeout" -le 300 ] \
+  || ccdc_die "--triage-timeout must be between 10 and 300 seconds"
+[ "$watch_timeout" -ge 15 ] && [ "$watch_timeout" -le 600 ] \
+  || ccdc_die "--watch-timeout must be between 15 and 600 seconds"
+case "$item" in ''|*[!0-9]*) [ -z "$item" ] || ccdc_die "approval item must be a positive integer" ;; esac
+[ -z "$item" ] || [ "$item" -gt 0 ] || ccdc_die "approval item must be a positive integer"
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
-mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence-$(id -un)"
-mkdir -p "$state_dir" || ccdc_die "cannot create state directory"
+ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 
-alerts="$state_dir/ALERTS"          # short, human, cat it any time
-queue="$state_dir/sentry.queue"     # pending actions: check|subject|command
-seen="$state_dir/sentry.seen"       # findings already reported
+alerts="$state_dir/ALERTS"
+queue="$state_dir/sentry.queue"             # SEVERITY|CHECK|SUBJECT only
+reviewed="$state_dir/sentry.reviewed"       # immutable operator-reviewed queue snapshot
+seen="$state_dir/sentry.seen"               # CHECK|SUBJECT for current pass
 log="$state_dir/sentry.log"
-undo="$state_dir/sentry.undo"
+undo="$state_dir/sentry.undo"               # time|check|subject|evidence-dir
 findings="$state_dir/triage.findings"
+triage_health="$state_dir/sentry.health.triage"
+watch_health="$state_dir/sentry.health.watch"
+last_pass="$state_dir/sentry.last-pass"
+watch_last="$state_dir/sentry.watch.last"
+watch_pending="$state_dir/sentry.watch.pending"
+watch_pending_key="$state_dir/sentry.watch.pending.key"
+lock_file="$state_dir/.sentry.lock"
+artifact_seq=0
+lock_held=0
 
-# --- the safety invariant ----------------------------------------------------
-#
-# An empty protect list does not mean "nothing to protect". It means the packet
-# has not been entered yet, which is the single most dangerous state to act
-# from: every account looks disposable when you have not been told which ones
-# are scored. So remediation is refused outright until the config shows real
-# knowledge of this box.
-#
-# This is what makes the automation safe. Fill these in from the packet BEFORE
-# the event, not during it.
+ensure_state() {
+  if [ "$(id -u)" -eq 0 ]; then
+    ccdc_secure_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
+  else
+    [ -d "$state_dir" ] && [ ! -L "$state_dir" ] || ccdc_die "state directory is unavailable: $state_dir"
+    [ -w "$state_dir" ] || ccdc_die "state directory is not writable by $(id -un): $state_dir"
+  fi
+}
+
+release_lock() {
+  if [ "$lock_held" -eq 1 ]; then
+    flock -u 9 2>/dev/null || true
+    exec 9>&-
+    lock_held=0
+  fi
+}
+trap release_lock EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+acquire_lock() {
+  ccdc_have flock || ccdc_die "flock is required for sentry state coordination"
+  [ ! -L "$lock_file" ] || ccdc_die "refusing symlink lock file: $lock_file"
+  exec 9>"$lock_file" || ccdc_die "cannot open sentry lock: $lock_file"
+  if ! flock -n 9; then
+    exec 9>&-
+    return 1
+  fi
+  lock_held=1
+}
+
+slog() { ccdc_append_log "$log" "$*" || printf 'sentry: cannot append %s\n' "$log" >&2; }
+
+slog_subject() {
+  local prefix=$1 subject=$2 quoted
+  printf -v quoted '%q' "$subject"
+  slog "$prefix subject=$quoted"
+}
+
 packet_entered() {
   [ -n "${CCDC_ALLOWED_USERS:-}" ] && [ -n "${CCDC_SYSTEMD_SERVICES:-}" ]
 }
 
-# Things sentry must never touch, whatever triage says about them.
-protected_user() {
-  ccdc_list_contains "$1" "${CCDC_ALLOWED_USERS:-}" && return 0
-  [ "$1" = root ] && return 0
-  [ "$1" = "$(id -un)" ] && return 0            # never lock yourself out
-  return 1
-}
-protected_unit() {
-  local u=${1##*/}; u=${u%.service}; u=${u%.timer}
-  ccdc_list_contains "$u" "${CCDC_SYSTEMD_SERVICES:-}" && return 0
-  ccdc_list_contains "$u" "${CCDC_PROTECT_SERVICES:-}" && return 0
-  local g=${CCDC_GUARDIAN_NAME:-node-health}
-  for own in "${CCDC_GUARDIAN_WATCH_NAME:-$g-watch}" "${CCDC_GUARDIAN_TICKER_NAME:-$g}" \
-             "${CCDC_GUARDIAN_RECONCILE_NAME:-$g-reconcile}" "${CCDC_GUARDIAN_CRON_NAME:-$g}"; do
-    [ "$u" = "$own" ] && return 0
-  done
-  case "$u" in ssh|sshd|cron|crond|dbus|systemd-*|auditd|rsyslog|ufw|firewalld) return 0 ;; esac
-  return 1
-}
-
-slog() { ccdc_append_log "$log" "$*"; }
-
-# Must stay identical to the rc-file test in triage.sh, or sentry proposes
-# removing lines triage never flagged (or misses ones it did).
-rc_patterns='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat|nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
-
-# --- turn a finding into a proposed command ----------------------------------
-#
-# Returns the command on stdout, or nothing if this finding is not something
-# sentry should act on. HOLD findings (SSH keys, NOPASSWD sudo, ports, /etc
-# changes) deliberately produce no command: telling your own key from theirs,
-# or your own sudo rule from an implanted one, needs the packet and your
-# memory. Those are reported and left for you.
-propose() {
-  local check=$1 subject=$2 u unit target base g lines_file
-  case "$check" in
-    uid0)
-      u=$subject; protected_user "$u" && return 0
-      printf 'passwd -l %s && usermod -s /usr/sbin/nologin %s && userdel -f -r %s' "$u" "$u" "$u" ;;
-    emptypw)
-      u=$subject; protected_user "$u" && return 0
-      printf 'passwd -l %s && usermod -s /usr/sbin/nologin %s' "$u" "$u" ;;
-    svcshell)
-      u=$subject; protected_user "$u" && return 0
-      printf 'usermod -s /usr/sbin/nologin %s && pkill -u %s' "$u" "$u" ;;
-    admingroup)
-      u=${subject%%/*}; g=${subject#*/}; protected_user "$u" && return 0
-      printf 'gpasswd -d %s %s' "$u" "$g" ;;
-    cron)
-      printf 'cp %s %s/evidence-%s && rm -f %s' "$subject" "$state_dir" "$(basename "$subject")" "$subject" ;;
-    unit|unittmp)
-      unit=$subject; base=$(basename "$unit"); protected_unit "$base" && return 0
-      printf 'systemctl disable --now %s; rm -f %s; rm -rf %s.d; systemctl daemon-reload; systemctl reset-failed' \
-        "$base" "$unit" "$unit" ;;
-    unitdeep)
-      unit=${subject%%::*}; target=${subject#*::}
-      base=$(basename "$unit"); protected_unit "$base" && return 0
-      printf 'systemctl disable --now %s %s.timer 2>/dev/null; cp %s %s/evidence-%s; rm -f %s %s %s.timer; systemctl daemon-reload; systemctl reset-failed' \
-        "$base" "${base%.service}" "$target" "$state_dir" "$(basename "$target")" \
-        "$unit" "$target" "${unit%.service}" ;;
-    suid)
-      printf 'chmod u-s %s' "$subject" ;;
-    rcdeep)
-      # subject is "rcfile::payload". The rc line is handled by the rcfile
-      # finding on the same file; this removes what it called.
-      target=${subject#*::}
-      printf 'cp %s %s/evidence-%s && rm -f %s' "$target" "$state_dir" "$(basename "$target")" "$target" ;;
-    rcfile)
-      # Remove the EXACT lines that triggered detection, by fixed-string
-      # whole-line match - not by re-applying the detection regex with sed.
-      #
-      # That regex includes a bare "/usr/local/bin/", and a .bashrc or a
-      # profile.d script very plausibly has a legitimate PATH line containing
-      # it. Re-running the pattern as a delete would silently eat that line. On
-      # the lab box it happened to remove exactly one line and nothing else;
-      # that was luck. Matching the literal offending lines cannot over-reach.
-      lines_file="$state_dir/.rcfile-$(basename "$subject").lines"
-      grep -IhE "$rc_patterns" "$subject" 2>/dev/null >"$lines_file" || return 0
-      [ -s "$lines_file" ] || return 0
-      printf 'cp %s %s/evidence-%s && grep -vxFf %s %s >%s.new && cat %s.new >%s && rm -f %s.new' \
-        "$subject" "$state_dir" "$(basename "$subject")" \
-        "$lines_file" "$subject" "$lines_file" "$lines_file" "$subject" "$lines_file" ;;
+valid_name() {
+  case "$1" in
+    ''|*[!A-Za-z0-9_.@+-]*|.*|-*) return 1 ;;
     *) return 0 ;;
   esac
 }
 
-# --- one pass ----------------------------------------------------------------
-
-run_pass() {
-  local sev check subject desc cmd key new=0 newred=0
-  "$SCRIPT_DIR/triage.sh" --config "$config" --quiet >/dev/null 2>&1 || true
-  [ -f "$findings" ] || return 0
-  touch "$seen" "$queue" 2>/dev/null || true
-
-  while IFS='|' read -r sev check subject desc; do
-    [ -n "${sev:-}" ] || continue
-    key="$check|$subject"
-    grep -qxF "$key" "$seen" 2>/dev/null && continue      # already reported
-    printf '%s\n' "$key" >>"$seen"
-    new=$((new + 1))
-    [ "$sev" = RED ] && newred=$((newred + 1))
-
-    cmd=$(propose "$check" "$subject")
-    if [ -n "$cmd" ]; then
-      printf '%s|%s|%s|%s\n' "$sev" "$check" "$subject" "$cmd" >>"$queue"
-      slog "queued sev=$sev check=$check subject=$subject"
-    else
-      slog "reported sev=$sev check=$check subject=$subject (no automatic action)"
-    fi
-  done <"$findings"
-
-  [ "$new" -gt 0 ] && write_alerts
-  # Ring only for RED. A bell for every AMBER trains you to ignore the bell.
-  # Guarded: with no controlling terminal (a --once run over ssh, or the loop
-  # started detached) /dev/tty does not exist and the redirect itself errors
-  # before the 2>/dev/null can suppress it.
-  # `[ -w /dev/tty ]` is not enough: the device node exists and tests writable
-  # even when this process has no controlling terminal, and the redirect then
-  # fails before 2>/dev/null can suppress it. `[ -t 1 ]` asks the question that
-  # actually matters - is anyone looking at my output.
-  if [ "$newred" -gt 0 ] && [ "$bell" -eq 1 ] && [ -t 1 ]; then
-    printf '\a' || true
-  fi
+valid_path() {
+  case "$1" in /*) ;; *) return 1 ;; esac
+  case "$1" in *'|'*|*$'\n'*|*$'\r'*|*'::'*|*[[:cntrl:]]*) return 1 ;; esac
+  case "$1" in *'//'|*'//'*) return 1 ;; esac
+  case "$1" in */./*|*/.|*/../*|*/..) return 1 ;; esac
   return 0
 }
 
+valid_compound() {
+  local value=$1 left right
+  case "$value" in *::* ) ;; *) return 1 ;; esac
+  left=${value%%::*}; right=${value#*::}
+  [ "$value" = "$left::$right" ] || return 1
+  valid_path "$left" && valid_path "$right"
+}
+
+valid_cron_path() {
+  valid_path "$1" || return 1
+  case "$1" in
+    /etc/crontab|/etc/cron.d/*|/etc/cron.daily/*|/etc/cron.hourly/*|\
+    /etc/cron.weekly/*|/etc/cron.monthly/*|/var/spool/cron/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+valid_unit_path() {
+  valid_path "$1" || return 1
+  case "$1" in
+    /etc/systemd/system/*.service|/etc/systemd/system/*.timer|\
+    /run/systemd/system/*.service|/run/systemd/system/*.timer|\
+    /etc/systemd/system/*.service.d/*.conf|/etc/systemd/system/*.timer.d/*.conf|\
+    /run/systemd/system/*.service.d/*.conf|/run/systemd/system/*.timer.d/*.conf) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+unit_name_from_path() {
+  local path=$1 parent
+  case "$path" in
+    *.service.d/*.conf|*.timer.d/*.conf)
+      parent=$(basename -- "$(dirname -- "$path")")
+      printf '%s\n' "${parent%.d}"
+      ;;
+    *) basename -- "$path" ;;
+  esac
+}
+
+valid_dropin_subject() {
+  local value=$1 owner path parent
+  case "$value" in *::* ) ;; *) return 1 ;; esac
+  owner=${value%%::*}; path=${value#*::}
+  [ "$value" = "$owner::$path" ] || return 1
+  valid_name "$owner" && valid_unit_path "$path" || return 1
+  case "$owner" in *.service|*.timer) ;; *) return 1 ;; esac
+  parent=$(basename -- "$(dirname -- "$path")")
+  [ "${parent%.d}" = "$owner" ]
+}
+
+valid_dropin_deep_subject() {
+  local value=$1 owner rest dropin target parent
+  case "$value" in *::*::* ) ;; *) return 1 ;; esac
+  owner=${value%%::*}; rest=${value#*::}; dropin=${rest%%::*}; target=${rest#*::}
+  [ "$value" = "$owner::$dropin::$target" ] || return 1
+  case "$target" in *::* ) return 1 ;; esac
+  valid_name "$owner" && valid_unit_path "$dropin" && valid_path "$target" || return 1
+  case "$owner" in *.service|*.timer) ;; *) return 1 ;; esac
+  parent=$(basename -- "$(dirname -- "$dropin")")
+  [ "${parent%.d}" = "$owner" ]
+}
+
+safe_root_owned_path() {
+  local path=$1 parent mode owner
+  valid_path "$path" && [ -f "$path" ] && [ ! -L "$path" ] || return 1
+  owner=$(stat -Lc '%u' -- "$path" 2>/dev/null) || return 1
+  [ "$owner" -eq 0 ] || return 1
+  parent=$(dirname -- "$path")
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
+  mode=$(stat -Lc '%a' -- "$parent" 2>/dev/null) || return 1
+  case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+  [ $((8#$mode & 0022)) -eq 0 ]
+}
+
+list_contains_unit() {
+  local needle=${1##*/} item
+  needle=${needle%.service}; needle=${needle%.timer}
+  for item in ${2:-}; do
+    item=${item##*/}; item=${item%.service}; item=${item%.timer}
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+protected_user() {
+  ccdc_list_contains "$1" "${CCDC_ALLOWED_USERS:-}" && return 0
+  [ "$1" = root ] && return 0
+  return 1
+}
+
+protected_unit() {
+  local u=${1##*/} g own
+  u=${u%.service}; u=${u%.timer}
+  list_contains_unit "$u" "${CCDC_SYSTEMD_SERVICES:-}" && return 0
+  list_contains_unit "$u" "${CCDC_PROTECT_SERVICES:-}" && return 0
+  g=${CCDC_GUARDIAN_NAME:-node-health}
+  for own in "${CCDC_GUARDIAN_WATCH_NAME:-$g-watch}" \
+             "${CCDC_GUARDIAN_TICKER_NAME:-$g}" \
+             "${CCDC_GUARDIAN_RECONCILE_NAME:-$g-reconcile}" \
+             "${CCDC_GUARDIAN_CRON_NAME:-$g}" \
+             "${CCDC_SENTRY_NAME:-ccdc-sentry}"; do
+    [ "$u" = "$own" ] && return 0
+  done
+  case "$u" in ssh|sshd|cron|crond|dbus|auditd|rsyslog|ufw|firewalld) return 0 ;; esac
+  return 1
+}
+
+# Must match triage.sh's rc-file detector. Remediation captures the literal
+# matching lines and removes only exact whole-line matches.
+rc_patterns='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat|nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
+
+can_automate() {
+  local check=$1 subject=$2 user group unit target owner rest dropin
+  case "$check" in
+    uid0|emptypw|svcshell)
+      valid_name "$subject" || return 1
+      getent passwd "$subject" >/dev/null 2>&1 || return 1
+      protected_user "$subject" && return 1
+      ;;
+    admingroup)
+      case "$subject" in */*) ;; *) return 1 ;; esac
+      user=${subject%%/*}; group=${subject#*/}
+      valid_name "$user" && valid_name "$group" || return 1
+      getent passwd "$user" >/dev/null 2>&1 || return 1
+      protected_user "$user" && return 1
+      case "$group" in sudo|wheel|admin) ;; *) return 1 ;; esac
+      ;;
+    cron)
+      valid_cron_path "$subject" && [ -e "$subject" ] || return 1
+      # Shared system crontabs require line-level operator judgement. Dedicated
+      # job files can be preserved and removed safely after explicit approval.
+      case "$subject" in /etc/crontab|/var/spool/cron/*) return 1 ;; esac
+      ;;
+    crondeep)
+      valid_compound "$subject" || return 1
+      unit=${subject%%::*}; target=${subject#*::}
+      valid_cron_path "$unit" && [ -e "$unit" ] && [ -f "$target" ] || return 1
+      case "$unit" in /etc/crontab|/var/spool/cron/*) return 1 ;; esac
+      ;;
+    unit|unittmp)
+      valid_unit_path "$subject" && [ -e "$subject" ] || return 1
+      protected_unit "$(unit_name_from_path "$subject")" && return 1
+      ;;
+    unitdeep)
+      valid_compound "$subject" || return 1
+      unit=${subject%%::*}; target=${subject#*::}
+      valid_unit_path "$unit" && [ -e "$unit" ] && [ -f "$target" ] || return 1
+      protected_unit "$(unit_name_from_path "$unit")" && return 1
+      ;;
+    unitdropin)
+      valid_dropin_subject "$subject" || return 1
+      owner=${subject%%::*}; dropin=${subject#*::}
+      [ -f "$dropin" ] && [ ! -L "$dropin" ] || return 1
+      protected_unit "$owner" && return 1
+      ;;
+    unitdropindeep)
+      valid_dropin_deep_subject "$subject" || return 1
+      owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
+      [ -f "$dropin" ] && [ ! -L "$dropin" ] && [ -f "$target" ] || return 1
+      protected_unit "$owner" && return 1
+      ;;
+    suid)
+      safe_root_owned_path "$subject" && [ -u "$subject" ] || return 1
+      ;;
+    # Login startup files live in user-writable directories and deep payloads
+    # can frame legitimate paths. Report them prominently, but do not race a
+    # user-controlled parent or delete the referenced file automatically.
+    rcdeep|rcfile) return 1 ;;
+    *) return 1 ;;
+  esac
+  return 0
+}
+
+render_action() {
+  local check=$1 subject=$2 user group unit target base owner rest dropin
+  case "$check" in
+    uid0) printf 'lock account, remove login shell, then delete UID-0 alias while retaining its home (no pkill): %q' "$subject" ;;
+    emptypw) printf 'lock account and remove login shell: %q' "$subject" ;;
+    svcshell) printf 'remove service-account login shell and stop its current processes: %q' "$subject" ;;
+    admingroup)
+      user=${subject%%/*}; group=${subject#*/}
+      printf 'remove %q from admin group %q' "$user" "$group" ;;
+    cron) printf 'preserve evidence, then remove scheduled job %q' "$subject" ;;
+    crondeep)
+      unit=${subject%%::*}; target=${subject#*::}
+      printf 'preserve both; remove the dedicated schedule %q; leave payload %q for manual review' "$unit" "$target" ;;
+    unit|unittmp)
+      printf 'preserve unit/drop-ins; stop, disable, and remove %q; reload systemd' "$(basename -- "$subject")" ;;
+    unitdeep)
+      unit=${subject%%::*}; target=${subject#*::}; base=$(basename -- "$unit")
+      printf 'preserve both; stop/disable %q and remove its unit definition; leave payload %q for manual review' "$base" "$target" ;;
+    unitdropin)
+      owner=${subject%%::*}; dropin=${subject#*::}
+      printf 'preserve %q; stop/disable %q and remove only that malicious drop-in; reload systemd' "$dropin" "$owner" ;;
+    unitdropindeep)
+      owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
+      printf 'preserve both; stop/disable %q and remove drop-in %q; leave payload %q for manual review' "$owner" "$dropin" "$target" ;;
+    suid) printf 'strip the SUID bit from %q (do not delete it)' "$subject" ;;
+    rcdeep) target=${subject#*::}; printf 'preserve and remove launched payload %q' "$target" ;;
+    rcfile) printf 'preserve %q and remove only the exact lines that still match the detector' "$subject" ;;
+    *) printf 'no automatic action' ;;
+  esac
+}
+
+queue_has() {
+  local want_check=$1 want_subject=$2 sev check subject
+  [ -f "$queue" ] || return 1
+  while IFS='|' read -r sev check subject; do
+    [ "$check" = "$want_check" ] && [ "$subject" = "$want_subject" ] && return 0
+  done <"$queue"
+  return 1
+}
+
+new_state_file() {
+  mktemp "$state_dir/.sentry-state.XXXXXX" \
+    || ccdc_die "cannot create a private state file in $state_dir"
+}
+
+atomic_empty() {
+  local target=$1 tmp
+  tmp=$(new_state_file)
+  mv -f -- "$tmp" "$target" || { rm -f -- "$tmp"; return 1; }
+}
+
+publish_review_snapshot() {
+  local tmp
+  tmp=$(new_state_file)
+  if [ -f "$queue" ] && ! cp -- "$queue" "$tmp"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+  mv -f -- "$tmp" "$reviewed" || { rm -f -- "$tmp"; return 1; }
+}
+
 write_alerts() {
-  local n sev check subject cmd
-  n=$(grep -c . "$queue" 2>/dev/null); [ -n "$n" ] || n=0
+  local n=0 sev check subject desc i=0 heldred=0 action watch_count=0 tmp quoted
+  tmp=$(new_state_file) || return 1
+  [ -f "$queue" ] && n=$(wc -l <"$queue" 2>/dev/null | tr -d ' ') || true
+  [ -n "$n" ] || n=0
+  [ -f "$watch_pending" ] && watch_count=$(grep -c '^===== watch event ' "$watch_pending" 2>/dev/null || true)
+  [ -n "$watch_count" ] || watch_count=0
   {
-    printf 'ALERTS  %s  (sentry is watching, interval %ss)\n' "$(date -u '+%H:%M:%SZ')" "$interval"
-    printf '=========================================================\n\n'
+    printf 'ALERTS  %s  (supervised sentry, triage %ss / full sweep %ss)\n' "$(date -u '+%H:%M:%SZ')" "$interval" "$watch_interval"
+    printf '==================================================================\n\n'
+    if [ -s "$triage_health" ] || [ -s "$watch_health" ]; then
+      printf '  MONITOR HEALTH PROBLEM - detection is not current:\n'
+      [ ! -s "$triage_health" ] || sed 's/^/    /' "$triage_health"
+      [ ! -s "$watch_health" ] || sed 's/^/    /' "$watch_health"
+      [ ! -s "$triage_health" ] \
+        || printf '\n  The action queue was cleared and cannot execute until triage refreshes cleanly.\n'
+      printf '\n'
+    fi
     if [ "$n" -eq 0 ]; then
       printf '  Nothing waiting for your sign-off.\n\n'
     else
-      printf '  %s action(s) WAITING FOR SIGN-OFF. Review, then:\n' "$n"
-      printf '      sudo ./linux/sentry.sh --config <cfg> --approve --apply\n\n'
-      local i=0
-      while IFS='|' read -r sev check subject cmd; do
+      printf '  %s current action(s) WAITING FOR SIGN-OFF. Freeze a reviewed snapshot, then approve it:\n' "$n"
+      printf '      sudo ./linux/sentry.sh --config <cfg> --status\n'
+      printf '      sudo ./linux/sentry.sh --config <cfg> --approve [N] --apply\n\n'
+      while IFS='|' read -r sev check subject; do
         [ -n "${sev:-}" ] || continue
-        i=$((i + 1))
-        printf '  [%s] %-5s %s  %s\n' "$i" "$sev" "$check" "$subject"
-        printf '        will run: %s\n\n' "$cmd"
+        i=$((i + 1)); action=$(render_action "$check" "$subject")
+        printf -v quoted '%q' "$subject"
+        printf '  [%s] %-5s %s  %s\n' "$i" "$sev" "$check" "$quoted"
+        printf '        will: %s\n\n' "$action"
       done <"$queue"
     fi
-    # A RED finding sentry declined to act on must still be LOUD. Otherwise a
-    # protect-list entry silently hides a real compromise: on the lab box
-    # www-lab was in CCDC_ALLOWED_USERS, so a service account that had been
-    # handed a shell and put in the sudo group produced no queue entry and no
-    # alert line at all. Protection must narrow what sentry TOUCHES, never what
-    # it TELLS you.
-    local heldred=0
-    while IFS='|' read -r sev check subject desc; do
-      [ "${sev:-}" = RED ] || continue
-      grep -qF "|$check|$subject|" "$queue" 2>/dev/null && continue
-      if [ "$heldred" -eq 0 ]; then
-        printf '  RED findings sentry will NOT touch - YOU must decide:\n'
-        heldred=1
-      fi
-      printf '    %-12s %s\n' "$check" "$subject"
-      printf '                 %s\n' "$desc"
-      case "$check" in
-        svcshell|admingroup|uid0|emptypw)
-          printf '                 reason: named in CCDC_ALLOWED_USERS (or is root/you).\n'
-          printf '                 If the packet does NOT score this account, remove it from\n'
-          printf '                 CCDC_ALLOWED_USERS and sentry will queue the fix.\n' ;;
-        unit|unittmp|unitdeep)
-          printf '                 reason: named in CCDC_SYSTEMD_SERVICES/CCDC_PROTECT_SERVICES,\n'
-          printf '                 or it is one of this kit own units.\n' ;;
-      esac
-      printf '\n'
-    done <"$findings"
-    [ "$heldred" -eq 1 ] && printf '\n'
 
-    printf '  Reported but NOT actionable automatically (needs your judgement):\n'
-    grep -E '^AMBER' "$findings" 2>/dev/null | while IFS='|' read -r sev check subject desc; do
-      printf '    %-12s %s  - %s\n' "$check" "$subject" "$desc"
-    done
-    printf '\n  Full detail: sudo ./linux/triage.sh --config <cfg>\n'
-  } >"$alerts.tmp" && mv "$alerts.tmp" "$alerts"
+    if [ -f "$findings" ]; then
+      while IFS='|' read -r sev check subject desc; do
+        [ "${sev:-}" = RED ] || continue
+        queue_has "$check" "$subject" && continue
+        if [ "$heldred" -eq 0 ]; then
+          printf '  RED findings sentry will NOT touch - YOU must decide:\n'
+          heldred=1
+        fi
+        printf -v quoted '%q' "$subject"
+        printf '    %-12s %s\n' "$check" "$quoted"
+        printf '                 %s\n' "$desc"
+        case "$check" in
+          svcshell|admingroup|uid0|emptypw)
+            printf '                 held: protected/invalid account or unsafe subject.\n' ;;
+          unit|unittmp|unitdeep)
+            printf '                 held: protected unit or unsafe/non-current path.\n' ;;
+          *) printf '                 held: this finding needs judgement or is not safely automatable.\n' ;;
+        esac
+        printf '\n'
+      done <"$findings"
+      [ "$heldred" -eq 1 ] && printf '\n'
+
+      printf '  Reported but NOT actionable automatically (needs your judgement):\n'
+      while IFS='|' read -r sev check subject desc; do
+        [ "${sev:-}" = AMBER ] || continue
+        printf -v quoted '%q' "$subject"
+        printf '    %-12s %s  - %s\n' "$check" "$quoted" "$desc"
+      done <"$findings"
+    fi
+
+    if [ "$watch_count" -gt 0 ]; then
+      printf '\n  %s unacknowledged change/canary event(s):\n' "$watch_count"
+      tail -n 80 "$watch_pending" | sed 's/^/    /'
+      printf '\n  After review: sudo ./linux/sentry.sh --config <cfg> --ack\n'
+    fi
+    printf '\n  Full ranked detail: sudo ./linux/triage.sh --config <cfg>\n'
+    printf '  Verify scored services FROM OFF THE BOX; an on-box probe cannot see scorer reachability.\n'
+  } >"$tmp" || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$alerts" || { rm -f -- "$tmp"; return 1; }
 }
 
-# --- modes -------------------------------------------------------------------
+run_triage() {
+  local rc=0 now fresh=no
+  rm -f -- "$findings"
+  "$SCRIPT_DIR/triage.sh" --config "$config" --quiet >/dev/null 2>>"$log" || rc=$?
+  [ -f "$findings" ] && fresh=yes
+  if { [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; } || [ "$fresh" != yes ]; then
+    now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    printf '%s triage failed (exit %s or no fresh findings file); inspect %s\n' "$now" "$rc" "$log" >"$triage_health"
+    : >"$queue"
+    slog "HEALTH triage failed rc=$rc fresh_findings=$fresh"
+    return 4
+  fi
+  rm -f -- "$triage_health"
+  return 0
+}
+
+rebuild_queue() {
+  local sev check subject desc key new=0 newred=0
+  : >"$queue.next"; : >"$seen.next"
+  [ -f "$seen" ] || : >"$seen"
+  while IFS='|' read -r sev check subject desc; do
+    [ -n "${sev:-}" ] || continue
+    case "$sev" in RED|AMBER) ;; *) continue ;; esac
+    key="$check|$subject"
+    printf '%s\n' "$key" >>"$seen.next"
+    if ! grep -qxF -- "$key" "$seen" 2>/dev/null; then
+      new=$((new + 1)); [ "$sev" = RED ] && newred=$((newred + 1))
+      slog "new sev=$sev check=$check subject=$subject"
+    fi
+    if [ "$sev" = RED ] && can_automate "$check" "$subject"; then
+      printf '%s|%s|%s\n' "$sev" "$check" "$subject" >>"$queue.next"
+    fi
+  done <"$findings"
+  mv -f -- "$queue.next" "$queue"
+  mv -f -- "$seen.next" "$seen"
+  if [ "$newred" -gt 0 ] && [ "$bell" -eq 1 ] && [ -t 1 ]; then printf '\a' || true; fi
+  printf '%s|%s\n' "$new" "$newred"
+}
+
+run_watch_if_due() {
+  local now previous=0 rc=0 key=''
+  now=$(date +%s)
+  [ -f "$watch_last" ] && read -r previous <"$watch_last" || true
+  case "$previous" in ''|*[!0-9]*) previous=0 ;; esac
+  [ $((now - previous)) -ge "$watch_interval" ] || return 0
+  printf '%s\n' "$now" >"$watch_last"
+  "$SCRIPT_DIR/watch.sh" --config "$config" --interval "$watch_interval" --once >"$watch_last.tmp" 2>&1 || rc=$?
+  mv -f -- "$watch_last.tmp" "$watch_last.output"
+  case "$rc" in
+    0) rm -f -- "$watch_health"; return 0 ;;
+    3)
+      key=$(grep -E 'CANARY|BOX CHANGED|TRIPPED|AUDIT|HINT|^[[:space:]]+---|^[[:space:]]+[<>]' "$watch_last.output" 2>/dev/null \
+        | cksum | awk '{print $1":"$2}')
+      if [ -n "$key" ] && { [ ! -f "$watch_pending_key" ] || ! grep -qxF -- "$key" "$watch_pending_key"; }; then
+        {
+          printf '===== watch event %s =====\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+          cat "$watch_last.output"
+          printf '\n'
+        } >>"$watch_pending"
+        printf '%s\n' "$key" >>"$watch_pending_key"
+        tail -n 600 "$watch_pending" >"$watch_pending.tmp" && mv -f -- "$watch_pending.tmp" "$watch_pending"
+      fi
+      rm -f -- "$watch_health"
+      return 0
+      ;;
+    *)
+      printf '%s watch.sh failed (exit %s); inspect %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$rc" "$watch_last.output" >"$watch_health"
+      slog "HEALTH watch failed rc=$rc"
+      return 4
+      ;;
+  esac
+}
+
+run_pass_locked() {
+  local counts queued_count
+  if ! run_triage; then
+    write_alerts
+    return 4
+  fi
+  counts=$(rebuild_queue)
+  run_watch_if_due || true
+  printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$last_pass"
+  write_alerts
+  queued_count=$(wc -l <"$queue" 2>/dev/null || true)
+  slog "pass new=${counts%%|*} new_red=${counts#*|} queued=$queued_count"
+  return 0
+}
+
+run_pass() {
+  local rc
+  if ! acquire_lock; then
+    slog "pass skipped: another sentry command holds the lock"
+    return 0
+  fi
+  run_pass_locked; rc=$?
+  release_lock
+  return "$rc"
+}
+
+new_evidence_case() {
+  local check=$1
+  artifact_seq=$((artifact_seq + 1))
+  evidence_case="$state_dir/removed/$(ccdc_now)-$$-$artifact_seq-$check"
+  [ ! -L "$state_dir/removed" ] || return 1
+  mkdir -p -- "$evidence_case" || return 1
+  chmod 0700 "$evidence_case" 2>/dev/null || true
+  evidence_copy_seq=0
+}
+
+preserve_into_case() {
+  local path=$1 destination
+  [ -e "$path" ] || [ -L "$path" ] || return 0
+  evidence_copy_seq=$((evidence_copy_seq + 1))
+  destination="$evidence_case/$evidence_copy_seq-$(basename -- "$path")"
+  cp -a -- "$path" "$destination" || return 1
+}
+
+action_uid0() {
+  local user=$1 record uid auth_file
+  record=$(getent passwd "$user") || return 1
+  uid=$(printf '%s\n' "$record" | cut -d: -f3)
+  [ "$uid" = 0 ] && [ "$user" != root ] || return 1
+  new_evidence_case uid0 || return 1
+  for auth_file in /etc/passwd /etc/shadow /etc/group /etc/gshadow; do preserve_into_case "$auth_file" || return 1; done
+  printf '%s\n' "$record" >"$evidence_case/account.record"
+  passwd -l "$user" || return 1
+  usermod -s /usr/sbin/nologin "$user" || return 1
+  # Never recursively remove a UID-0 alias's home: it may deliberately point at
+  # /root or at scored content. The account is removed; its files remain for
+  # deliberate review/restoration.
+  userdel -f "$user"
+}
+
+action_emptypw() {
+  local user=$1 auth_file
+  new_evidence_case emptypw || return 1
+  for auth_file in /etc/passwd /etc/shadow /etc/group /etc/gshadow; do preserve_into_case "$auth_file" || return 1; done
+  passwd -l "$user" && usermod -s /usr/sbin/nologin "$user"
+}
+
+action_svcshell() {
+  local user=$1 uid auth_file
+  uid=$(id -u "$user" 2>/dev/null) || return 1
+  [ "$uid" -gt 0 ] && [ "$uid" -lt 1000 ] || return 1
+  new_evidence_case svcshell || return 1
+  for auth_file in /etc/passwd /etc/shadow; do preserve_into_case "$auth_file" || return 1; done
+  usermod -s /usr/sbin/nologin "$user" || return 1
+  pkill -u "$user" 2>/dev/null || true
+  return 0
+}
+
+action_admingroup() {
+  local user=${1%%/*} group=${1#*/} auth_file
+  new_evidence_case admingroup || return 1
+  for auth_file in /etc/group /etc/gshadow; do preserve_into_case "$auth_file" || return 1; done
+  gpasswd -d "$user" "$group"
+}
+
+action_cron() {
+  local source=$1
+  new_evidence_case cron || return 1
+  preserve_into_case "$source" || return 1
+  rm -f -- "$source"
+}
+
+action_crondeep() {
+  local source=${1%%::*} target=${1#*::} tmp rc=0
+  new_evidence_case crondeep || return 1
+  preserve_into_case "$source" && preserve_into_case "$target" || return 1
+  tmp="$evidence_case/cron.cleaned"
+  grep -vF -- "$target" "$source" >"$tmp" || rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 1
+  cat "$tmp" >"$source" || return 1
+  rm -f -- "$target"
+}
+
+action_unit() {
+  local unit=$1 base
+  base=$(basename -- "$unit")
+  new_evidence_case unit || return 1
+  preserve_into_case "$unit" && preserve_into_case "$unit.d" || return 1
+  systemctl disable --now "$base" >/dev/null 2>&1 || slog "warning: could not disable $base before removal"
+  rm -f -- "$unit" || return 1
+  [ ! -e "$unit.d" ] || rm -rf -- "$unit.d" || return 1
+  systemctl daemon-reload && systemctl reset-failed >/dev/null 2>&1
+}
+
+action_unitdeep() {
+  local unit=${1%%::*} target=${1#*::} base stem timer
+  base=$(basename -- "$unit"); stem=${base%.service}; timer="$(dirname -- "$unit")/$stem.timer"
+  new_evidence_case unitdeep || return 1
+  preserve_into_case "$unit" && preserve_into_case "$unit.d" \
+    && preserve_into_case "$timer" && preserve_into_case "$target" || return 1
+  systemctl disable --now "$base" "$stem.timer" >/dev/null 2>&1 \
+    || slog "warning: could not disable $base/$stem.timer before removal"
+  rm -f -- "$unit" "$timer" "$target" || return 1
+  [ ! -e "$unit.d" ] || rm -rf -- "$unit.d" || return 1
+  systemctl daemon-reload && systemctl reset-failed >/dev/null 2>&1
+}
+
+action_suid() {
+  local path=$1
+  new_evidence_case suid || return 1
+  preserve_into_case "$path" || return 1
+  chmod u-s -- "$path"
+}
+
+action_rcdeep() {
+  local target=${1#*::}
+  new_evidence_case rcdeep || return 1
+  preserve_into_case "$target" || return 1
+  rm -f -- "$target"
+}
+
+action_rcfile() {
+  local source=$1 lines tmp rc=0
+  new_evidence_case rcfile || return 1
+  preserve_into_case "$source" || return 1
+  lines="$evidence_case/offending.lines"; tmp="$evidence_case/cleaned"
+  grep -IhE "$rc_patterns" "$source" >"$lines" 2>/dev/null || return 1
+  [ -s "$lines" ] || return 1
+  grep -vxFf "$lines" "$source" >"$tmp" || rc=$?
+  [ "$rc" -eq 0 ] || [ "$rc" -eq 1 ] || return 1
+  cat "$tmp" >"$source"
+}
+
+execute_action() {
+  local check=$1 subject=$2
+  evidence_case=''
+  case "$check" in
+    uid0) action_uid0 "$subject" ;;
+    emptypw) action_emptypw "$subject" ;;
+    svcshell) action_svcshell "$subject" ;;
+    admingroup) action_admingroup "$subject" ;;
+    cron) action_cron "$subject" ;;
+    crondeep) action_crondeep "$subject" ;;
+    unit|unittmp) action_unit "$subject" ;;
+    unitdeep) action_unitdeep "$subject" ;;
+    suid) action_suid "$subject" ;;
+    rcdeep) action_rcdeep "$subject" ;;
+    rcfile) action_rcfile "$subject" ;;
+    *) return 1 ;;
+  esac
+}
+
+finding_present() {
+  local want_sev=$1 want_check=$2 want_subject=$3 sev check subject desc
+  while IFS='|' read -r sev check subject desc; do
+    [ "$sev" = "$want_sev" ] && [ "$check" = "$want_check" ] \
+      && [ "$subject" = "$want_subject" ] && return 0
+  done <"$findings"
+  return 1
+}
 
 do_status() {
-  [ -f "$alerts" ] && cat "$alerts" || printf 'sentry has not run yet.\n'
-}
-
-do_approve() {
-  local sev check subject cmd i=0 done_n=0 skipped=0
-  [ -s "$queue" ] || { printf 'sentry: nothing queued.\n'; return 0; }
-  packet_entered || ccdc_die "refusing to act: CCDC_ALLOWED_USERS and CCDC_SYSTEMD_SERVICES are not both set.
-An empty protect list does not mean nothing is protected - it means the packet
-has not been entered, and every account looks disposable. Fill them in first."
-
-  : >"$queue.next"
-  while IFS='|' read -r sev check subject cmd; do
-    [ -n "${sev:-}" ] || continue
-    i=$((i + 1))
-    if [ -n "$item" ] && [ "$item" != "$i" ]; then
-      printf '%s|%s|%s|%s\n' "$sev" "$check" "$subject" "$cmd" >>"$queue.next"
-      continue
-    fi
-    printf '\n[%s] %s %s  %s\n' "$i" "$sev" "$check" "$subject"
-    printf '    %s\n' "$cmd"
-    if ccdc_is_dry_run; then
-      printf '    [dry-run] not executed. Add --apply.\n'
-      printf '%s|%s|%s|%s\n' "$sev" "$check" "$subject" "$cmd" >>"$queue.next"
-      skipped=$((skipped + 1))
-      continue
-    fi
-    if sh -c "$cmd" >>"$log" 2>&1; then
-      printf '    done\n'
-      slog "applied check=$check subject=$subject cmd=$cmd"
-      printf '%s|%s|%s\n' "$check" "$subject" "$cmd" >>"$undo"
-      done_n=$((done_n + 1))
-    else
-      printf '    FAILED - see %s\n' "$log"
-      slog "FAILED check=$check subject=$subject cmd=$cmd"
-      printf '%s|%s|%s|%s\n' "$sev" "$check" "$subject" "$cmd" >>"$queue.next"
-    fi
-  done <"$queue"
-  mv "$queue.next" "$queue"
-  printf '\n'
-  if ccdc_is_dry_run; then
-    ccdc_info "dry run: $skipped action(s) would run. Re-run with --apply."
+  if [ -f "$alerts" ]; then
+    cat "$alerts" 2>/dev/null || ccdc_die "cannot read $alerts (run status with sudo)"
   else
-    ccdc_info "$done_n action(s) applied. Record: $undo"
-    printf '  Now verify the scored service FROM OFF THE BOX.\n'
-    # The findings that produced these are stale now; let the next pass re-see
-    # anything that did not actually clear.
-    : >"$seen"
-    write_alerts
+    printf 'sentry has not completed a pass yet.\n'
   fi
 }
 
+do_approve() {
+  local sev check subject i=0 done_n=0 failed_n=0 selected=0 action
+  ccdc_require_root
+  ensure_state
+  acquire_lock || ccdc_die "another sentry command is running; retry in a moment"
+  if ! run_triage; then
+    write_alerts
+    ccdc_die "fresh triage failed; stale queued actions were discarded"
+  fi
+  rebuild_queue >/dev/null
+  [ -s "$queue" ] || { write_alerts; printf 'sentry: nothing currently actionable.\n'; return 0; }
+  packet_entered || ccdc_die "refusing to act: fill both CCDC_ALLOWED_USERS and CCDC_SYSTEMD_SERVICES from the packet first"
+
+  while IFS='|' read -r sev check subject; do
+    [ -n "${sev:-}" ] || continue
+    i=$((i + 1))
+    [ -z "$item" ] || [ "$item" = "$i" ] || continue
+    selected=$((selected + 1)); action=$(render_action "$check" "$subject")
+    printf '\n[%s] %s %s  %s\n    %s\n' "$i" "$sev" "$check" "$subject" "$action"
+    if ! finding_present "$sev" "$check" "$subject" || ! can_automate "$check" "$subject"; then
+      printf '    SKIPPED: no longer current or now protected.\n'
+      slog "skipped stale/protected check=$check subject=$subject"
+      continue
+    fi
+    if ccdc_is_dry_run; then
+      printf '    [dry-run] not executed. Re-run with --apply.\n'
+      continue
+    fi
+    if execute_action "$check" "$subject" >>"$log" 2>&1; then
+      printf '    done; evidence: %s\n' "$evidence_case"
+      printf '%s|%s|%s|%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$check" "$subject" "$evidence_case" >>"$undo"
+      slog "applied check=$check subject=$subject evidence=$evidence_case"
+      done_n=$((done_n + 1))
+    else
+      printf '    FAILED - see %s; partial changes may have occurred.\n' "$log"
+      slog "FAILED check=$check subject=$subject evidence=${evidence_case:-none}"
+      failed_n=$((failed_n + 1))
+    fi
+  done <"$queue"
+  [ "$selected" -gt 0 ] || ccdc_die "approval item $item does not exist in the refreshed queue"
+
+  if [ "$apply" -eq 1 ]; then
+    run_triage && rebuild_queue >/dev/null || true
+    run_watch_if_due || true
+    write_alerts
+    printf '\n%s action(s) applied, %s failed. Verify scored services FROM OFF THE BOX.\n' "$done_n" "$failed_n"
+    [ "$failed_n" -eq 0 ] || return 1
+  else
+    write_alerts
+    printf '\nDry run only; %s current action(s) selected. Add --apply to sign off.\n' "$selected"
+  fi
+}
+
+do_ack() {
+  ccdc_require_root
+  ensure_state
+  rm -f -- "$watch_pending" "$watch_pending_key"
+  write_alerts
+  ccdc_info "change/canary event summaries acknowledged; underlying evidence was retained"
+}
+
 do_revert() {
-  printf 'sentry applied these, newest first:\n\n'
+  printf 'sentry actions, newest first:\n\n'
   [ -s "$undo" ] || { printf '  (nothing)\n'; return 0; }
   tac "$undo" 2>/dev/null || cat "$undo"
-  printf '\nThere is no automatic undo: removing a unit and deleting an account\n'
-  printf 'are not reversible by replaying a command backwards. Use your backups:\n'
-  printf '  sudo ./linux/backup.sh --config <cfg> --list\n'
-  printf 'Evidence copies of everything removed are in %s/evidence-*\n' "$state_dir"
+  printf '\nThere is no blind automatic undo for account or persistence removal.\n'
+  printf 'Each record names its evidence directory; restore deliberately, then verify off-box.\n'
+}
+
+managed_name=${CCDC_SENTRY_NAME:-ccdc-sentry}
+install_dir=${CCDC_SENTRY_DIR:-/usr/local/lib/$managed_name}
+unit_name="$managed_name.service"
+unit_path="/etc/systemd/system/$unit_name"
+installed_config="$install_dir/sentry.env"
+owner_marker="$install_dir/.ccdc-sentry-owned"
+
+validate_install_layout() {
+  local probe parent
+  case "$managed_name" in ''|*[!A-Za-z0-9_-]*) ccdc_die "CCDC_SENTRY_NAME must contain only letters, digits, underscore, and hyphen" ;; esac
+  case "$install_dir" in
+    /usr/local/lib/?*|/opt/?*|/var/lib/?*) ;;
+    *) ccdc_die "CCDC_SENTRY_DIR must be a dedicated leaf below /usr/local/lib, /opt, or /var/lib: $install_dir" ;;
+  esac
+  case "$install_dir" in
+    *' '*|*'|'*|*':'*|*'//'*) ccdc_die "CCDC_SENTRY_DIR contains characters unsupported in a systemd ExecStart: $install_dir" ;;
+    */./*|*/.|*/../*|*/..) ccdc_die "CCDC_SENTRY_DIR contains path traversal: $install_dir" ;;
+  esac
+  probe=$install_dir
+  while [ "$probe" != / ]; do
+    [ ! -L "$probe" ] || ccdc_die "CCDC_SENTRY_DIR contains a symlink component: $probe"
+    parent=$(dirname -- "$probe")
+    [ "$parent" != "$probe" ] || break
+    probe=$parent
+  done
+}
+
+known_unit_collision() {
+  local candidate
+  for candidate in "$unit_path" "/run/systemd/system/$unit_name" \
+      "/usr/local/lib/systemd/system/$unit_name" "/usr/lib/systemd/system/$unit_name" "/lib/systemd/system/$unit_name"; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ "$candidate" = "$unit_path" ] && [ -f "$owner_marker" ] && return 1
+    return 0
+  done
+  if ccdc_have systemctl; then
+    [ "$(systemctl show -p LoadState --value "$unit_name" 2>/dev/null)" != loaded ] || return 0
+  fi
+  return 1
+}
+
+do_install() {
+  local tmp
+  validate_install_layout
+  if [ "$apply" -ne 1 ]; then
+    printf '[dry-run] would install a private copy of linux/ at %s\n' "$install_dir"
+    printf '[dry-run] would install and start %s (triage %ss, full sweep %ss)\n' "$unit_path" "$interval" "$watch_interval"
+    return 0
+  fi
+  ccdc_require_root; ensure_state
+  if [ -d "$install_dir" ] && [ ! -f "$owner_marker" ]; then
+    ccdc_die "install directory exists without this tool's ownership marker: $install_dir"
+  fi
+  if [ -f "$owner_marker" ] && [ "$(cat "$owner_marker" 2>/dev/null)" != "$managed_name" ]; then
+    ccdc_die "ownership marker does not match CCDC_SENTRY_NAME; uninstall with the old config first"
+  fi
+  if [ ! -f "$owner_marker" ] && known_unit_collision; then
+    ccdc_die "systemd unit name already exists and is not owned by this install: $unit_name"
+  fi
+  ccdc_have systemctl || ccdc_die "systemctl is required to install supervised sentry"
+  mkdir -p -- "$install_dir" || ccdc_die "cannot create $install_dir"
+  if [ "$SCRIPT_DIR" != "$install_dir" ]; then
+    cp -a -- "$SCRIPT_DIR/." "$install_dir/" || ccdc_die "could not install sentry tool copy"
+  fi
+  if [ "$config" != "$installed_config" ]; then
+    cp -- "$config" "$installed_config" || ccdc_die "could not install sentry config"
+  fi
+  printf '%s\n' "$managed_name" >"$owner_marker"
+  chown -R 0:0 "$install_dir" || ccdc_die "could not make the installed sentry root-owned"
+  chmod -R go-w "$install_dir" || ccdc_die "could not secure $install_dir"
+  chmod 0600 "$installed_config" "$owner_marker" || ccdc_die "could not secure installed sentry config"
+
+  tmp="$unit_path.tmp.$$"
+  {
+    printf '[Unit]\nDescription=CCDC supervised detection and approval queue\nAfter=local-fs.target\n\n'
+    printf '[Service]\nType=simple\nExecStart=%s/sentry.sh --config %s --interval %s --watch-interval %s --loop --no-bell\n' \
+      "$install_dir" "$installed_config" "$interval" "$watch_interval"
+    printf 'Restart=always\nRestartSec=5s\nNice=10\nIOSchedulingClass=idle\nUMask=0077\n\n'
+    printf '[Install]\nWantedBy=multi-user.target\n'
+  } >"$tmp" || ccdc_die "cannot stage $unit_path"
+  install -m 0644 "$tmp" "$unit_path" || ccdc_die "cannot install $unit_path"
+  rm -f -- "$tmp"
+  systemctl daemon-reload || ccdc_die "systemd daemon-reload failed"
+  systemctl enable --now "$unit_name" || ccdc_die "could not enable/start $unit_name"
+  systemctl is-active --quiet "$unit_name" || ccdc_die "$unit_name did not remain active"
+  ccdc_info "installed and started $unit_name; terminal is free"
+}
+
+do_uninstall() {
+  validate_install_layout
+  if [ "$apply" -ne 1 ]; then
+    printf '[dry-run] would stop/remove %s and owned directory %s\n' "$unit_name" "$install_dir"
+    return 0
+  fi
+  ccdc_require_root
+  [ -f "$owner_marker" ] || ccdc_die "refusing uninstall: ownership marker missing at $owner_marker"
+  [ "$(cat "$owner_marker" 2>/dev/null)" = "$managed_name" ] \
+    || ccdc_die "refusing uninstall: ownership marker does not match $managed_name"
+  systemctl disable --now "$unit_name" >/dev/null 2>&1 || true
+  rm -f -- "$unit_path" || ccdc_die "cannot remove $unit_path"
+  rm -rf -- "$install_dir" || ccdc_die "cannot remove $install_dir"
+  systemctl daemon-reload || ccdc_die "systemd daemon-reload failed"
+  systemctl reset-failed "$unit_name" >/dev/null 2>&1 || systemctl reset-failed >/dev/null 2>&1 || true
+  ccdc_info "removed supervised sentry; evidence and approval history remain in $state_dir"
 }
 
 case "$mode" in
   status) do_status ;;
-  approve) [ "$apply" -eq 1 ] && ccdc_require_root; do_approve ;;
+  approve) do_approve ;;
+  ack) do_ack ;;
   revert) do_revert ;;
-  once) ccdc_require_root; run_pass; do_status ;;
+  once)
+    ccdc_require_root; ensure_state
+    run_pass || true
+    do_status
+    ;;
   loop)
-    ccdc_require_root
-    packet_entered || ccdc_warn "CCDC_ALLOWED_USERS / CCDC_SYSTEMD_SERVICES are not both set - sentry will detect and queue, but --approve will refuse to act until they are"
-    printf 'sentry: watching every %ss. Findings queue for your sign-off.\n' "$interval"
-    printf '  check it:   cat %s\n' "$alerts"
-    printf '  sign off:   sudo ./linux/sentry.sh --config <cfg> --approve --apply\n'
-    printf '  Ctrl-C to stop.\n\n'
+    ccdc_require_root; ensure_state
+    packet_entered || ccdc_warn "packet protection lists are incomplete; detection runs, but approval is blocked"
+    printf 'sentry: supervised loop; triage every %ss, full sweep every %ss.\n' "$interval" "$watch_interval"
     while :; do
-      run_pass
+      run_pass || true
       sleep "$interval"
-    done ;;
+    done
+    ;;
+  install) do_install ;;
+  uninstall) do_uninstall ;;
+  *) ccdc_die "internal mode error: $mode" ;;
 esac

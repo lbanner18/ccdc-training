@@ -32,18 +32,100 @@ done
 ccdc_load_config "$config"
 [ "$apply" -eq 1 ] && ccdc_require_root
 
-backup_dir=${CCDC_BACKUP_DIR:-/var/backups/ccdc}/$(ccdc_now)-$$
+validate_backup_path() {
+  local path=${1:-} label=${2:-path}
+  [ -n "$path" ] || ccdc_die "$label is empty"
+  case "$path" in
+    /*) ;;
+    *) ccdc_die "$label must be absolute: $path" ;;
+  esac
+  [ "$path" != / ] || ccdc_die "$label must not be the filesystem root"
+  case "$path" in
+    */) ccdc_die "$label must not end with a slash: $path" ;;
+    *'//'*) ccdc_die "$label contains an empty path component: $path" ;;
+    */./*|*/.|*/../*|*/..) ccdc_die "$label contains path traversal: $path" ;;
+    *'|'*|*[[:space:]]*|*[[:cntrl:]]*)
+      ccdc_die "$label contains whitespace, a control character, or a manifest delimiter: $path"
+      ;;
+  esac
+}
+
+reject_symlink_components() {
+  local path=$1 label=$2 probe=$1 parent
+  while [ "$probe" != / ]; do
+    [ ! -L "$probe" ] || ccdc_die "$label contains a symlink component: $probe"
+    parent=$(dirname -- "$probe")
+    [ "$parent" != "$probe" ] || break
+    probe=$parent
+  done
+}
+
+# The backup base is trusted to contain root restore material.  Do not use a
+# directory another account can replace or populate, and do not silently fall
+# back to a predictable path in /tmp when the requested destination is broken.
+validate_secure_backup_base() {
+  local base=$1 probe owner mode
+  reject_symlink_components "$base" "backup base"
+  probe=$base
+  while [ ! -e "$probe" ]; do
+    probe=$(dirname -- "$probe")
+  done
+  while [ "$probe" != / ]; do
+    [ -d "$probe" ] || ccdc_die "backup base component is not a directory: $probe"
+    owner=$(stat -Lc '%u' -- "$probe" 2>/dev/null) \
+      || ccdc_die "cannot inspect backup base ownership: $probe"
+    mode=$(stat -Lc '%a' -- "$probe" 2>/dev/null) \
+      || ccdc_die "cannot inspect backup base permissions: $probe"
+    [ "$owner" -eq 0 ] \
+      || ccdc_die "backup base component is not root-owned: $probe"
+    [ $((8#$mode & 0022)) -eq 0 ] \
+      || ccdc_die "backup base component is group/world writable: $probe"
+    probe=$(dirname -- "$probe")
+  done
+}
+
+backup_base=${CCDC_BACKUP_DIR:-/var/backups/ccdc}
+validate_backup_path "$backup_base" "CCDC_BACKUP_DIR"
+reject_symlink_components "$backup_base" "CCDC_BACKUP_DIR"
+backup_dir="$backup_base/ccdc-backup.$(ccdc_now).XXXXXX"
 if [ "$mode" = backup ]; then
-  if [ "$apply" -eq 1 ]; then
-    mkdir -p "$backup_dir" 2>/dev/null || backup_dir="${TMPDIR:-/tmp}/ccdc-backups/$(ccdc_now)"
-    mkdir -p "$backup_dir" || ccdc_die "cannot create backup directory"
-  fi
-  manifest="$backup_dir/MANIFEST"
-  [ "$apply" -eq 1 ] && : >"$manifest"
+  requested=0
+  copied=0
+  missing=0
   paths=${source_path:-${CCDC_BACKUP_PATHS:-}}
+
+  # Validate the entire request before creating an output tree.  A later
+  # relative/traversal entry must not leave behind an apparently valid partial
+  # backup from the entries that preceded it.
   while IFS= read -r path; do
     [ -n "$path" ] || continue
-    [ -e "$path" ] || { ccdc_warn "missing backup path: $path"; continue; }
+    validate_backup_path "$path" "backup source path"
+    reject_symlink_components "$path" "backup source path"
+    requested=$((requested + 1))
+  done <<EOF
+${paths}
+EOF
+  [ "$requested" -gt 0 ] || ccdc_die "no backup paths configured"
+
+  if [ "$apply" -eq 1 ]; then
+    validate_secure_backup_base "$backup_base"
+    mkdir -p -- "$backup_base" || ccdc_die "cannot create backup base: $backup_base"
+    reject_symlink_components "$backup_base" "backup base"
+    validate_secure_backup_base "$backup_base"
+    backup_dir=$(mktemp -d "$backup_dir") \
+      || ccdc_die "cannot create a unique backup directory below $backup_base"
+    [ -d "$backup_dir" ] && [ ! -L "$backup_dir" ] \
+      || ccdc_die "backup leaf is not a real directory: $backup_dir"
+    chown 0:0 -- "$backup_dir" && chmod 0700 -- "$backup_dir" \
+      || ccdc_die "cannot secure backup directory: $backup_dir"
+  fi
+  manifest="$backup_dir/MANIFEST"
+  [ "$apply" -eq 1 ] && : >"$manifest" \
+    || [ "$apply" -ne 1 ] \
+    || ccdc_die "cannot create backup manifest: $manifest"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ -e "$path" ] || { ccdc_warn "missing backup path: $path"; missing=$((missing + 1)); continue; }
     relative=${path#/}
     destination="$backup_dir/$relative"
     if [ "$apply" -eq 1 ]; then
@@ -53,6 +135,7 @@ if [ "$mode" = backup ]; then
         || ccdc_die "backup copy failed for $path; incomplete backup retained at $backup_dir"
       printf '%s\n' "$path" >>"$manifest" \
         || ccdc_die "cannot update backup manifest at $manifest"
+      copied=$((copied + 1))
     else
       printf '[dry-run] would copy %s -> %s\n' "$path" "$destination"
     fi
@@ -60,14 +143,21 @@ if [ "$mode" = backup ]; then
 ${paths}
 EOF
   if [ "$apply" -eq 1 ]; then
+    [ "$copied" -gt 0 ] || ccdc_die "none of the $requested configured backup paths existed; empty backup retained at $backup_dir"
     find "$backup_dir" -type f ! -name SHA256SUMS -exec sha256sum {} \; >"$backup_dir/SHA256SUMS" \
       || ccdc_die "could not hash backup; do not restore from $backup_dir"
     chmod -R go-rwx "$backup_dir" || ccdc_die "could not secure backup directory: $backup_dir"
+    [ "$missing" -eq 0 ] \
+      || ccdc_die "$missing of $requested configured paths were missing; partial backup retained at $backup_dir"
   fi
   ccdc_info "backup directory: $backup_dir"
 elif [ "$mode" = diff ]; then
   [ -n "$restore_path" ] || ccdc_die "diff requires a backup file"
   [ -n "$source_path" ] || ccdc_die "diff requires --service-path CURRENT_PATH"
+  validate_backup_path "$restore_path" "backup file"
+  validate_backup_path "$source_path" "current path"
+  reject_symlink_components "$restore_path" "backup file"
+  reject_symlink_components "$source_path" "current path"
   [ -f "$restore_path" ] || ccdc_die "backup file not found: $restore_path"
   [ -e "$source_path" ] || ccdc_die "current path not found: $source_path"
   if command -v diff >/dev/null 2>&1; then
@@ -80,10 +170,19 @@ elif [ "$mode" = diff ]; then
   fi
 elif [ "$mode" = restore ]; then
   [ -n "$restore_path" ] || ccdc_die "restore requires a backup file"
+  validate_backup_path "$restore_path" "backup file"
+  reject_symlink_components "$restore_path" "backup file"
   [ -f "$restore_path" ] || ccdc_die "backup file not found: $restore_path"
   destination=${source_path:-}
   [ -n "$destination" ] || ccdc_die "restore requires --service-path DESTINATION"
+  validate_backup_path "$destination" "restore destination"
+  reject_symlink_components "$destination" "restore destination"
   if [ "$apply" -eq 1 ]; then
+    validate_secure_backup_base "$backup_base"
+    case "$restore_path" in
+      "$backup_base"/*) ;;
+      *) ccdc_die "backup file is outside CCDC_BACKUP_DIR: $restore_path" ;;
+    esac
     [ ! -L "$destination" ] || ccdc_die "refusing to restore through destination symlink: $destination"
     [ ! -d "$destination" ] || ccdc_die "file restore does not overwrite directories: $destination"
 
@@ -108,6 +207,7 @@ elif [ "$mode" = restore ]; then
     destination_parent=$(dirname -- "$destination")
     destination_base=$(basename -- "$destination")
     mkdir -p "$destination_parent" || ccdc_die "cannot create restore destination directory"
+    reject_symlink_components "$destination_parent" "restore destination parent"
     restore_staged="$destination_parent/.${destination_base}.ccdc-restore.$$"
     [ ! -e "$restore_staged" ] && [ ! -L "$restore_staged" ] \
       || ccdc_die "restore staging path already exists: $restore_staged"

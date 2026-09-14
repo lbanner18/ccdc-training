@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 #
 # Automated regression run of playbooks/simulation-runbook.md: arm the defenses,
-# let redteam/plant.sh land, detect, eradicate, then put guardian.sh through five
+# let redteam/plant.sh land, detect, eradicate, then put guardian.sh through six
 # attacks and prove --uninstall is exact. Prints PASS/FAIL per assertion.
 #
 # LAB VM ONLY, as root. It plants real footholds and installs real persistence.
 # Snapshot first; revert after.
 #
 #   sudo bash drill.sh          (expects the kit at $KIT and a filled config at $CFG)
+#   bash drill.sh --self-test   (safe parser/process-matcher regression test)
 #
 # This does NOT replace running the runbook by hand. The hand-run is where the
 # muscle memory comes from; this is the regression test that proves the tooling
@@ -21,13 +22,198 @@ set -u
 # kit was copied. Override either with the environment.
 KIT=${CCDC_KIT_DIR:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 CFG=${CCDC_DRILL_CONFIG:-/root/ccdc-drill.env}
+
+# Resolve guardian's installed layout in a clean shell. Keep these defaults in
+# lockstep with linux/guardian.sh: the whole point of the drill is to attack the
+# payload that is actually installed, including configurations which give every
+# layer and payload an unrelated name.
+guardian_value() {
+  /bin/bash -c '
+    . "$1"
+    name=${CCDC_GUARDIAN_NAME:-node-health}
+    evidence=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
+    watch=${CCDC_GUARDIAN_WATCH_NAME:-$name-watch}
+    ticker=${CCDC_GUARDIAN_TICKER_NAME:-$name}
+    reconcile=${CCDC_GUARDIAN_RECONCILE_NAME:-$name-reconcile}
+    cron=${CCDC_GUARDIAN_CRON_NAME:-$name}
+    guardian_dir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$name}
+    state_dir=${CCDC_GUARDIAN_STATE_DIR:-$evidence}
+    watchdog_file=${CCDC_GUARDIAN_WATCHDOG_FILE:-$watch.sh}
+    tick_file=${CCDC_GUARDIAN_TICK_FILE:-$ticker.sh}
+    case "$2" in
+      evidence) printf "%s" "$evidence" ;;
+      name) printf "%s" "$name" ;;
+      interval) printf "%s" "${CCDC_GUARDIAN_INTERVAL:-60}" ;;
+      watch) printf "%s" "$watch" ;;
+      ticker) printf "%s" "$ticker" ;;
+      reconcile) printf "%s" "$reconcile" ;;
+      cron) printf "%s" "$cron" ;;
+      guardian_dir) printf "%s" "$guardian_dir" ;;
+      state_dir) printf "%s" "$state_dir" ;;
+      watchdog_file) printf "%s" "$watchdog_file" ;;
+      tick_file) printf "%s" "$tick_file" ;;
+      *) exit 2 ;;
+    esac
+  ' ccdc-drill "$1" "$2"
+}
+
+pid_has_payload() {
+  local pid=$1 payload=$2
+  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+  [ -r "/proc/$pid/cmdline" ] || return 1
+  tr '\0' '\n' <"/proc/$pid/cmdline" 2>/dev/null | grep -Fxq -- "$payload"
+}
+
+matching_payload_pids() {
+  local payload=$1 proc pid found=''
+  for proc in /proc/[0-9]*/cmdline; do
+    [ -r "$proc" ] || continue
+    tr '\0' '\n' <"$proc" 2>/dev/null | grep -Fxq -- "$payload" || continue
+    pid=${proc#/proc/}
+    pid=${pid%/cmdline}
+    found="${found}${found:+ }$pid"
+  done
+  printf '%s' "$found"
+}
+
+unit_main_pid() {
+  local pid
+  pid=$(systemctl show --property MainPID --value "$1" 2>/dev/null) || return 1
+  case "$pid" in ''|0|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$pid"
+}
+
+wait_payload_exit() {
+  local pid=$1 payload=$2 remaining=${3:-10}
+  while [ "$remaining" -gt 0 ] && pid_has_payload "$pid" "$payload"; do
+    sleep 1
+    remaining=$((remaining - 1))
+  done
+  ! pid_has_payload "$pid" "$payload"
+}
+
+systemd_runtime_knows() {
+  local wanted=$1
+  systemctl list-units --all --full --plain --no-legend "$wanted" 2>/dev/null \
+    | awk -v wanted="$wanted" '$1 == wanted { found=1 } END { exit !found }'
+}
+
+run_self_test() {
+  local tmp cfg payload pid pids failures=0
+  tmp=$(mktemp -d /tmp/ccdc-drill-selftest.XXXXXX) || return 1
+  cfg="$tmp/layout.env"
+  payload="$tmp/custom-watch.sh"
+  printf '%s\n' \
+    'CCDC_EVIDENCE_DIR=/tmp/custom-evidence' \
+    'CCDC_GUARDIAN_NAME=base-name' \
+    'CCDC_GUARDIAN_INTERVAL=41' \
+    'CCDC_GUARDIAN_WATCH_NAME=watch-layer' \
+    'CCDC_GUARDIAN_TICKER_NAME=ticker-layer' \
+    'CCDC_GUARDIAN_RECONCILE_NAME=reconcile-layer' \
+    'CCDC_GUARDIAN_CRON_NAME=cron-layer' \
+    'CCDC_GUARDIAN_DIR=/opt/custom-guardian' \
+    'CCDC_GUARDIAN_STATE_DIR=/tmp/custom-state' \
+    'CCDC_GUARDIAN_WATCHDOG_FILE=custom-watch.sh' \
+    'CCDC_GUARDIAN_TICK_FILE=custom-tick.sh' >"$cfg"
+
+  self_eq() {
+    local key=$1 expected=$2 actual
+    actual=$(guardian_value "$cfg" "$key")
+    if [ "$actual" = "$expected" ]; then
+      printf '  [PASS] layout %s = %s\n' "$key" "$expected"
+    else
+      printf '  [FAIL] layout %s: expected %s, got %s\n' "$key" "$expected" "$actual"
+      failures=$((failures + 1))
+    fi
+  }
+
+  self_eq evidence /tmp/custom-evidence
+  self_eq name base-name
+  self_eq interval 41
+  self_eq watch watch-layer
+  self_eq ticker ticker-layer
+  self_eq reconcile reconcile-layer
+  self_eq cron cron-layer
+  self_eq guardian_dir /opt/custom-guardian
+  self_eq state_dir /tmp/custom-state
+  self_eq watchdog_file custom-watch.sh
+  self_eq tick_file custom-tick.sh
+
+  # The checked-in example deliberately assigns empty strings to optional
+  # overrides. `${var:-default}` must treat those as unset, just as guardian
+  # does; `${var-default}` would silently resolve an empty unit/payload name.
+  printf '%s\n' \
+    'CCDC_EVIDENCE_DIR=/tmp/default-evidence' \
+    'CCDC_GUARDIAN_NAME=base-name' \
+    'CCDC_GUARDIAN_WATCH_NAME=""' \
+    'CCDC_GUARDIAN_TICKER_NAME=""' \
+    'CCDC_GUARDIAN_RECONCILE_NAME=""' \
+    'CCDC_GUARDIAN_CRON_NAME=""' \
+    'CCDC_GUARDIAN_DIR=""' \
+    'CCDC_GUARDIAN_STATE_DIR=""' \
+    'CCDC_GUARDIAN_WATCHDOG_FILE=""' \
+    'CCDC_GUARDIAN_TICK_FILE=""' >"$cfg"
+  self_eq watch base-name-watch
+  self_eq ticker base-name
+  self_eq reconcile base-name-reconcile
+  self_eq cron base-name
+  self_eq guardian_dir /usr/local/lib/base-name
+  self_eq state_dir /tmp/default-evidence
+  self_eq watchdog_file base-name-watch.sh
+  self_eq tick_file base-name.sh
+
+  printf '#!/bin/bash\nwhile :; do sleep 1; done\n' >"$payload"
+  /bin/bash "$payload" &
+  pid=$!
+  sleep 1
+  if pid_has_payload "$pid" "$payload"; then
+    printf '  [PASS] exact payload matcher found the intended process\n'
+  else
+    printf '  [FAIL] exact payload matcher missed the intended process\n'
+    failures=$((failures + 1))
+  fi
+  pids=$(matching_payload_pids "$payload")
+  case " $pids " in
+    *" $pid "*) printf '  [PASS] payload scan returned the intended PID\n' ;;
+    *) printf '  [FAIL] payload scan missed PID %s\n' "$pid"; failures=$((failures + 1)) ;;
+  esac
+  if pid_has_payload "$$" "$payload"; then
+    printf '  [FAIL] exact payload matcher matched the test harness\n'
+    failures=$((failures + 1))
+  else
+    printf '  [PASS] exact payload matcher rejected the test harness\n'
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  find "$tmp" -depth -delete 2>/dev/null || true
+  [ "$failures" -eq 0 ]
+}
+
+if [ "${1:-}" = '--self-test' ]; then
+  [ "$#" -eq 1 ] || { printf 'usage: %s --self-test\n' "$0" >&2; exit 2; }
+  run_self_test
+  exit $?
+fi
+[ "$#" -eq 0 ] || { printf 'usage: %s [--self-test]\n' "$0" >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || { printf 'run as root on a disposable lab VM\n' >&2; exit 1; }
 [ -r "$CFG" ] || { printf 'drill config is not readable: %s\n' "$CFG" >&2; exit 1; }
 
-EV=$(/bin/bash -c '. "$1"; printf "%s" "${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}"' ccdc-drill "$CFG")
-GUARD_NAME=$(/bin/bash -c '. "$1"; printf "%s" "${CCDC_GUARDIAN_NAME:-node-health}"' ccdc-drill "$CFG")
-GUARD_DIR=$(/bin/bash -c '. "$1"; n=${CCDC_GUARDIAN_NAME:-node-health}; printf "%s" "${CCDC_GUARDIAN_DIR:-/usr/local/lib/$n}"' ccdc-drill "$CFG")
-INT=$(/bin/bash -c '. "$1"; printf "%s" "${CCDC_GUARDIAN_INTERVAL:-60}"' ccdc-drill "$CFG")
+EV=$(guardian_value "$CFG" evidence)
+GUARD_DIR=$(guardian_value "$CFG" guardian_dir)
+GUARD_STATE_DIR=$(guardian_value "$CFG" state_dir)
+INT=$(guardian_value "$CFG" interval)
+GUARD_WATCH_NAME=$(guardian_value "$CFG" watch)
+GUARD_TICKER_NAME=$(guardian_value "$CFG" ticker)
+GUARD_RECONCILE_NAME=$(guardian_value "$CFG" reconcile)
+GUARD_CRON_NAME=$(guardian_value "$CFG" cron)
+GUARD_WATCHDOG_FILE=$(guardian_value "$CFG" watchdog_file)
+GUARD_TICK_FILE=$(guardian_value "$CFG" tick_file)
+GUARD_WATCH_UNIT="$GUARD_WATCH_NAME.service"
+GUARD_TICKER_UNIT="$GUARD_TICKER_NAME.service"
+GUARD_RECONCILE_UNIT="$GUARD_RECONCILE_NAME.service"
+GUARD_RECONCILE_TIMER="$GUARD_RECONCILE_NAME.timer"
+GUARD_WATCHDOG_PATH="$GUARD_DIR/$GUARD_WATCHDOG_FILE"
+GUARD_TICK_PATH="$GUARD_DIR/$GUARD_TICK_FILE"
 SCORE_URL=${CCDC_DRILL_SCORE_URL:-http://127.0.0.1:8080/}
 SCORED_UNIT=${CCDC_DRILL_SERVICE:-scored-web}
 RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')-$$
@@ -260,13 +446,13 @@ hdr "PHASE 4 - guardian survival (the unproven paths)"
 ./linux/guardian.sh --config "$CFG" --install --apply >"$DRILL_TMP/ginstall.out" 2>&1
 sed 's/^/      /' "$DRILL_TMP/ginstall.out" | head -20
 
-tampered_count() { find "$EV/guardian.tampered" -type f 2>/dev/null | wc -l; }
+tampered_count() { find "$GUARD_STATE_DIR/guardian.tampered" -type f 2>/dev/null | wc -l; }
 
-for u in "$GUARD_NAME-watch.service" "$GUARD_NAME.service" "$GUARD_NAME-reconcile.timer"; do
+for u in "$GUARD_WATCH_UNIT" "$GUARD_TICKER_UNIT" "$GUARD_RECONCILE_TIMER"; do
   systemctl is-active --quiet "$u" && ok "unit active: $u" || no "unit NOT active: $u"
 done
-[ -f "/etc/cron.d/$GUARD_NAME" ] && ok "layer 3 cron entry installed" || no "layer 3 cron entry missing"
-mcount=$(wc -l < "$EV/guardian.manifest" 2>/dev/null || echo 0)
+[ -f "/etc/cron.d/$GUARD_CRON_NAME" ] && ok "layer 3 cron entry installed" || no "layer 3 cron entry missing"
+mcount=$(wc -l < "$GUARD_STATE_DIR/guardian.manifest" 2>/dev/null || echo 0)
 [ "$mcount" -ge 9 ] && ok "manifest records $mcount artifacts" || no "manifest only has $mcount lines"
 # Every path the manifest claims must actually exist. A manifest that lists an
 # artifact which is not on disk is the failure mode that would let an operator
@@ -275,15 +461,41 @@ missing_manifest=0
 while IFS='|' read -r _kind mpath _hash; do
   [ -n "${mpath:-}" ] || continue
   [ -e "$mpath" ] || { missing_manifest=$((missing_manifest + 1)); note "manifest lists a missing path: $mpath"; }
-done < "$EV/guardian.manifest"
+done < "$GUARD_STATE_DIR/guardian.manifest"
 [ "$missing_manifest" -eq 0 ] && ok "every manifest entry exists on disk" \
   || no "$missing_manifest manifest entries do not exist"
 
 printf '\n  -- ATTACK 1: kill the watchdog process --\n'
-pkill -f 'watchdog.sh' ; wait_s 15
-systemctl is-active --quiet "$GUARD_NAME-watch.service" \
+watchdog_pid=''
+if watchdog_pid=$(unit_main_pid "$GUARD_WATCH_UNIT") \
+  && pid_has_payload "$watchdog_pid" "$GUARD_WATCHDOG_PATH"; then
+  ok "watchdog unit runs configured payload $GUARD_WATCHDOG_PATH (PID $watchdog_pid)"
+  if kill "$watchdog_pid" 2>/dev/null; then
+    ok "kill signal delivered to the intended watchdog process"
+  else
+    no "could not signal intended watchdog PID $watchdog_pid"
+  fi
+  wait_payload_exit "$watchdog_pid" "$GUARD_WATCHDOG_PATH" 10 \
+    && ok "attack terminated the intended watchdog process" \
+    || no "intended watchdog process ignored the attack"
+else
+  no "could not identify the configured watchdog payload before the attack"
+fi
+wait_s 15
+systemctl is-active --quiet "$GUARD_WATCH_UNIT" \
   && ok "watchdog came back (Restart=always)" || no "watchdog stayed dead"
-pgrep -f watchdog.sh >/dev/null && ok "watchdog process is running again" || no "no watchdog process"
+replacement_watchdog_pid=''
+if replacement_watchdog_pid=$(unit_main_pid "$GUARD_WATCH_UNIT") \
+  && pid_has_payload "$replacement_watchdog_pid" "$GUARD_WATCHDOG_PATH"; then
+  ok "configured watchdog payload is running again (PID $replacement_watchdog_pid)"
+  if [ -n "$watchdog_pid" ] && [ "$replacement_watchdog_pid" = "$watchdog_pid" ]; then
+    no "watchdog MainPID did not change after the kill"
+  else
+    ok "watchdog restarted under a new PID"
+  fi
+else
+  no "watchdog unit is not running configured payload $GUARD_WATCHDOG_PATH"
+fi
 
 printf '\n  -- ATTACK 2: stop the scored service --\n'
 systemctl stop "$SCORED_UNIT"; scored_up && no "service did not actually stop" || note "service stopped"
@@ -291,18 +503,18 @@ wait_s $((INT + 45))
 scored_up && ok "watchdog restarted the scored service" || no "watchdog did NOT restore the service"
 
 printf '\n  -- ATTACK 3: delete layer 2 and layer 3 --\n'
-rm -f "/etc/systemd/system/$GUARD_NAME-reconcile.timer" "/etc/cron.d/$GUARD_NAME"
-systemctl stop "$GUARD_NAME-reconcile.timer" >/dev/null 2>&1
+rm -f "/etc/systemd/system/$GUARD_RECONCILE_TIMER" "/etc/cron.d/$GUARD_CRON_NAME"
+systemctl stop "$GUARD_RECONCILE_TIMER" >/dev/null 2>&1
 note "deleted the timer unit and the cron entry"
 wait_s $((INT + 45))
-unit_file "$GUARD_NAME-reconcile.timer" && ok "layer 2 rebuilt by a surviving layer" || no "layer 2 NOT rebuilt"
-[ -f "/etc/cron.d/$GUARD_NAME" ] && ok "layer 3 rebuilt by a surviving layer" || no "layer 3 NOT rebuilt"
+unit_file "$GUARD_RECONCILE_TIMER" && ok "layer 2 rebuilt by a surviving layer" || no "layer 2 NOT rebuilt"
+[ -f "/etc/cron.d/$GUARD_CRON_NAME" ] && ok "layer 3 rebuilt by a surviving layer" || no "layer 3 NOT rebuilt"
 
 printf '\n  -- ATTACK 4: backdoor a unit file instead of deleting it --\n'
 tampered_before=$(tampered_count)
-echo "ExecStartPost=/bin/sh -c 'id > /tmp/pwned-unit'" >> "/etc/systemd/system/$GUARD_NAME.service"
+echo "ExecStartPost=/bin/sh -c 'id > /tmp/pwned-unit'" >> "/etc/systemd/system/$GUARD_TICKER_UNIT"
 wait_s $((INT + 45))
-grep -q 'pwned-unit' "/etc/systemd/system/$GUARD_NAME.service" \
+grep -q 'pwned-unit' "/etc/systemd/system/$GUARD_TICKER_UNIT" \
   && no "backdoor line still in the live unit" || ok "backdoored unit repaired from source"
 [ "$(tampered_count)" -gt "$tampered_before" ] \
   && ok "tampered unit preserved as evidence" || no "no tampered copy was preserved"
@@ -313,7 +525,7 @@ printf '\n  -- ATTACK 5: systemd drop-in override (never touches the unit file) 
 # The nastiest version of attack 4: the unit file stays byte-identical, so a
 # hash check of the fragment sees nothing wrong, while systemd merges the
 # drop-in and runs the attacker's command as root on the next start.
-dropin_dir="/etc/systemd/system/$GUARD_NAME.service.d"
+dropin_dir="/etc/systemd/system/$GUARD_TICKER_UNIT.d"
 tampered_before=$(tampered_count)
 mkdir -p "$dropin_dir"
 printf '[Service]\nExecStartPost=/bin/sh -c %s\n' "'id > /tmp/pwned-dropin'" > "$dropin_dir/override.conf"
@@ -326,20 +538,40 @@ wait_s $((INT + 45))
   && ok "drop-in preserved as evidence" || no "drop-in was not preserved as evidence"
 [ -e /tmp/pwned-dropin ] && no "the drop-in ExecStartPost RAN as root" \
                          || ok "drop-in command never executed"
-systemctl is-active --quiet "$GUARD_NAME.service" \
+systemctl is-active --quiet "$GUARD_TICKER_UNIT" \
   && ok "layer 1 still active after the drop-in was stripped" \
   || no "layer 1 is down after the drop-in repair"
 
 printf '\n  -- ATTACK 6: remove ALL THREE layers inside one interval --\n'
-systemctl disable --now "$GUARD_NAME.service" "$GUARD_NAME-reconcile.timer" >/dev/null 2>&1
-pkill -f "$GUARD_DIR/tick.sh"
-rm -f "/etc/systemd/system/$GUARD_NAME.service" \
-      "/etc/systemd/system/$GUARD_NAME-reconcile.timer" \
-      "/etc/systemd/system/$GUARD_NAME-reconcile.service" \
-      "/etc/cron.d/$GUARD_NAME"
+ticker_pid=''
+if ticker_pid=$(unit_main_pid "$GUARD_TICKER_UNIT") \
+  && pid_has_payload "$ticker_pid" "$GUARD_TICK_PATH"; then
+  ok "layer 1 runs configured tick payload $GUARD_TICK_PATH (PID $ticker_pid)"
+else
+  no "could not identify the configured tick payload before the attack"
+fi
+systemctl disable --now "$GUARD_TICKER_UNIT" "$GUARD_RECONCILE_TIMER" >/dev/null 2>&1 || true
+# A failed systemctl stop must not turn this into a partial attack. Kill only
+# the PID whose argv was verified above; never use a pattern which can match an
+# unrelated guardian chain or the drill command itself.
+if [ -n "$ticker_pid" ] && pid_has_payload "$ticker_pid" "$GUARD_TICK_PATH"; then
+  kill "$ticker_pid" 2>/dev/null || true
+fi
+if [ -n "$ticker_pid" ] && wait_payload_exit "$ticker_pid" "$GUARD_TICK_PATH" 10; then
+  ok "attack terminated the intended layer-1 tick process"
+else
+  no "intended layer-1 tick process survived the attack"
+fi
+rm -f "/etc/systemd/system/$GUARD_TICKER_UNIT" \
+      "/etc/systemd/system/$GUARD_RECONCILE_TIMER" \
+      "/etc/systemd/system/$GUARD_RECONCILE_UNIT" \
+      "/etc/cron.d/$GUARD_CRON_NAME"
 systemctl daemon-reload
 wait_s $((INT + 60))
-if unit_file "$GUARD_NAME.service" || [ -f "/etc/cron.d/$GUARD_NAME" ]; then
+if unit_file "$GUARD_TICKER_UNIT" \
+  || unit_file "$GUARD_RECONCILE_UNIT" \
+  || unit_file "$GUARD_RECONCILE_TIMER" \
+  || [ -f "/etc/cron.d/$GUARD_CRON_NAME" ]; then
   no "something rebuilt a layer after all three were removed (unexpected)"
 else
   ok "stays down once all three are gone - the documented limit holds"
@@ -348,31 +580,52 @@ fi
 # ---------------------------------------------------------------- phase 4b
 hdr "PHASE 4b - reinstall, then prove --uninstall is exact"
 ./linux/guardian.sh --config "$CFG" --install --apply >"$DRILL_TMP/greinstall.out" 2>&1
-systemctl is-active --quiet "$GUARD_NAME.service" && ok "reinstall from scratch works" || no "reinstall failed"
+systemctl is-active --quiet "$GUARD_TICKER_UNIT" && ok "reinstall from scratch works" || no "reinstall failed"
 
 ./linux/guardian.sh --config "$CFG" --uninstall --apply >"$DRILL_TMP/guninstall.out" 2>&1
 sed 's/^/      /' "$DRILL_TMP/guninstall.out" | tail -5
 leftover=0
-for p in "/etc/systemd/system/$GUARD_NAME-watch.service" "/etc/systemd/system/$GUARD_NAME.service" \
-         "/etc/systemd/system/$GUARD_NAME-reconcile.service" "/etc/systemd/system/$GUARD_NAME-reconcile.timer" \
-         "/etc/systemd/system/$GUARD_NAME.service.d" "/etc/systemd/system/$GUARD_NAME-watch.service.d" \
-         "/etc/cron.d/$GUARD_NAME" "$GUARD_DIR"; do
+for p in "/etc/systemd/system/$GUARD_WATCH_UNIT" "/etc/systemd/system/$GUARD_TICKER_UNIT" \
+         "/etc/systemd/system/$GUARD_RECONCILE_UNIT" "/etc/systemd/system/$GUARD_RECONCILE_TIMER" \
+         "/etc/systemd/system/$GUARD_TICKER_UNIT.d" "/etc/systemd/system/$GUARD_WATCH_UNIT.d" \
+         "/etc/systemd/system/$GUARD_RECONCILE_UNIT.d" "/etc/systemd/system/$GUARD_RECONCILE_TIMER.d" \
+         "/etc/cron.d/$GUARD_CRON_NAME" "$GUARD_DIR"; do
   [ -e "$p" ] && { leftover=$((leftover+1)); note "LEFT BEHIND: $p"; }
 done
 [ "$leftover" -eq 0 ] && ok "uninstall left zero artifacts" || no "$leftover artifacts survived uninstall"
 # The repair tree is the copy an operator is least likely to remember exists.
 [ -e "$GUARD_DIR/.repair" ] && no "the .repair source tree survived uninstall" \
                             || ok "repair tree removed with the payload"
-pgrep -f watchdog.sh >/dev/null && no "a watchdog process is still running after uninstall" \
-                                || ok "no stray watchdog process"
-pgrep -f "$GUARD_DIR/tick.sh" >/dev/null && no "a layer-1 tick loop is still running after uninstall" \
-                                         || ok "no stray tick loop"
-systemctl list-units --all 2>/dev/null | grep -q "$GUARD_NAME" \
-  && no "systemd still knows about a $GUARD_NAME unit" || ok "systemd has no $GUARD_NAME units left"
+watchdog_leaks=$(matching_payload_pids "$GUARD_WATCHDOG_PATH")
+if [ -n "$watchdog_leaks" ]; then
+  no "configured watchdog payload is still running after uninstall (PID(s): $watchdog_leaks)"
+else
+  ok "no stray configured watchdog process"
+fi
+tick_leaks=$(matching_payload_pids "$GUARD_TICK_PATH")
+if [ -n "$tick_leaks" ]; then
+  no "configured layer-1 tick payload is still running after uninstall (PID(s): $tick_leaks)"
+else
+  ok "no stray configured tick process"
+fi
+known_units=''
+for u in "$GUARD_WATCH_UNIT" "$GUARD_TICKER_UNIT" "$GUARD_RECONCILE_UNIT" "$GUARD_RECONCILE_TIMER"; do
+  systemd_runtime_knows "$u" || continue
+  known_units="${known_units}${known_units:+ }$u"
+done
+if [ -n "$known_units" ]; then
+  no "systemd still knows guardian unit(s): $known_units"
+else
+  ok "systemd has none of the configured guardian units left"
+fi
 scored_up && ok "scored service is still up at the end of the drill" \
           || no "scored service is down at the end of the drill"
 
 hdr "RESULT"
 printf '  passed: %s\n  failed: %s\n' "$pass" "$fail"
-[ "$fail" -eq 0 ] && printf '  ALL ASSERTIONS PASSED\n' || printf '  %s ASSERTION(S) FAILED - see above\n' "$fail"
-exit 0
+if [ "$fail" -eq 0 ]; then
+  printf '  ALL ASSERTIONS PASSED\n'
+  exit 0
+fi
+printf '  %s ASSERTION(S) FAILED - see above\n' "$fail"
+exit 1

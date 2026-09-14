@@ -22,6 +22,7 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 ccdc_load_config "$config"
+if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of seconds" ;; esac
 # Floor of 2s, and it must stay in step with guardian.sh's CCDC_WATCHDOG_INTERVAL
 # floor -- guardian writes this value straight into the unit's ExecStart, so a
@@ -34,17 +35,21 @@ case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of 
 [ "$interval" -ge 2 ] || ccdc_die "--interval below 2s leaves no room for a check to finish: $interval"
 
 log_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
-if ! mkdir -p "$log_dir" 2>/dev/null || [ ! -w "$log_dir" ]; then
-  log_dir="${TMPDIR:-/tmp}/ccdc-evidence"
-fi
-mkdir -p "$log_dir" || ccdc_die "cannot create watchdog state directory: $log_dir"
+ccdc_validate_state_dir "$log_dir" "CCDC_EVIDENCE_DIR"
 if [ "$apply" -eq 1 ]; then
-  chmod 0700 "$log_dir" 2>/dev/null || ccdc_die "cannot secure watchdog state directory: $log_dir"
+  ccdc_secure_state_dir "$log_dir" "watchdog state directory"
 else
-  chmod 0700 "$log_dir" 2>/dev/null || true
+  # A dry run probes and prints through existing helpers, but writes no log,
+  # hash state, or singleton lock. An endless dry-run loop would be misleading.
+  [ "$once" -eq 1 ] || ccdc_die "--dry-run requires --once; the supervised guardian launches the real loop with --apply"
 fi
-log="$log_dir/watchdog.log"
-hash_state="$log_dir/watchdog.sha256"
+if [ "$apply" -eq 1 ]; then
+  log="$log_dir/watchdog.log"
+  hash_state="$log_dir/watchdog.sha256"
+else
+  log=/dev/null
+  hash_state=/dev/null
+fi
 watchdog_lock="$log_dir/watchdog.lock"
 watchdog_lock_owner="$watchdog_lock/owner"
 watchdog_lock_token=''
@@ -116,12 +121,11 @@ check_tcp() {
   local name=$1 host=$2 port=$3
   if ccdc_have nc; then
     nc -z -w 3 "$host" "$port" >/dev/null 2>&1
-  elif (exec 3<>"/dev/tcp/$host/$port") 2>/dev/null; then
-    exec 3>&-
-    exec 3<&-
-    return 0
+  elif ccdc_have timeout; then
+    # Pass host/port positionally; never interpolate config into shell source.
+    timeout 4 bash -c 'exec 3<>"/dev/tcp/$1/$2"' bash "$host" "$port" 2>/dev/null
   else
-    return 1
+    return 2
   fi
 }
 
@@ -139,10 +143,57 @@ check_http() {
 check_service() {
   local service=$1
   if ccdc_have systemctl; then
-    systemctl is-active --quiet "$service"
+    systemctl is-active --quiet -- "$service"
   else
     service "$service" status >/dev/null 2>&1
   fi
+}
+
+valid_service_name() {
+  case "$1" in ''|[-.]*|*[!A-Za-z0-9_.@:-]*) return 1 ;; *) return 0 ;; esac
+}
+
+validate_checks() {
+  local name host port service url path extra
+  while IFS='|' read -r name host port service extra; do
+    [ -n "${name:-}${host:-}${port:-}${service:-}${extra:-}" ] || continue
+    [ -z "${extra:-}" ] || ccdc_die "TCP check has too many fields: $name"
+    case "$name" in ''|*[!A-Za-z0-9_.-]*) ccdc_die "invalid TCP check name: $name" ;; esac
+    case "$host" in ''|*[!A-Za-z0-9_.:-]*) ccdc_die "invalid TCP check host: $host" ;; esac
+    case "$port" in ''|*[!0-9]*) ccdc_die "invalid TCP check port for $name: $port" ;; esac
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || ccdc_die "TCP check port out of range for $name: $port"
+    [ -z "${service:-}" ] || valid_service_name "$service" \
+      || ccdc_die "invalid TCP recovery service for $name: $service"
+  done <<EOF
+${CCDC_TCP_CHECKS:-}
+EOF
+  while IFS='|' read -r name url service extra; do
+    [ -n "${name:-}${url:-}${service:-}${extra:-}" ] || continue
+    [ -z "${extra:-}" ] || ccdc_die "HTTP check has too many fields: $name"
+    case "$name" in ''|*[!A-Za-z0-9_.-]*) ccdc_die "invalid HTTP check name: $name" ;; esac
+    case "$url" in http://*|https://*) ;; *) ccdc_die "HTTP check URL must start with http:// or https://: $url" ;; esac
+    case "$url" in *[[:space:]'|']*) ccdc_die "HTTP check URL contains whitespace or a delimiter: $url" ;; esac
+    [ -z "${service:-}" ] || valid_service_name "$service" \
+      || ccdc_die "invalid HTTP recovery service for $name: $service"
+  done <<EOF
+${CCDC_HTTP_CHECKS:-}
+EOF
+  for service in ${CCDC_SYSTEMD_SERVICES:-}; do
+    valid_service_name "$service" || ccdc_die "invalid systemd service name: $service"
+  done
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    case "$path" in /*) ;; *) ccdc_die "hash check path must be absolute: $path" ;; esac
+    case "$path" in
+      *'|'*|*[[:space:]]*|*[[:cntrl:]]*)
+        ccdc_die "hash check path contains whitespace, a control character, or a state-file delimiter: $path"
+        ;;
+      *'//'*) ccdc_die "hash check path contains an empty component: $path" ;;
+      */./*|*/.|*/../*|*/..) ccdc_die "hash check path contains traversal: $path" ;;
+    esac
+  done <<EOF
+${CCDC_HASH_FILES:-}
+EOF
 }
 
 # Services already restarted during the current pass. Two different checks
@@ -157,6 +208,7 @@ restarted_this_pass=''
 # scorer would use, and escalate in the log when recovery never happens.
 verify_recovery() {
   local service=$1 kind=$2 arg=$3
+  local tcp_host tcp_port
   local limit=${CCDC_RESTART_SETTLE_SECONDS:-15}
   case "$limit" in ''|*[!0-9]*) ccdc_append_log "$log" "invalid_restart_settle_seconds value=$limit"; return 1 ;; esac
   [ "$limit" -ge 2 ] || { ccdc_append_log "$log" "invalid_restart_settle_seconds value=$limit"; return 1; }
@@ -177,7 +229,12 @@ verify_recovery() {
         fi
         ;;
       tcp)
-        if check_tcp "$service" "${arg%%:*}" "${arg##*:}"; then
+        # TCP recovery arguments are field-delimited, not host:port.  Colons
+        # are data inside an IPv6 address, so host:port parsing turns ::1 and
+        # 2001:db8::1 into the wrong endpoint after a restart.
+        tcp_host=${arg%%|*}
+        tcp_port=${arg#*|}
+        if [ "$tcp_host" != "$arg" ] && check_tcp "$service" "$tcp_host" "$tcp_port"; then
           ccdc_append_log "$log" "restart_recovered service=$service check=tcp after=${waited}s"
           return 0
         fi
@@ -216,7 +273,7 @@ restart_service() {
   fi
   ccdc_append_log "$log" "restarting unhealthy service=$service"
   if ccdc_have systemctl; then
-    systemctl restart "$service" >>"$log" 2>&1 || ccdc_append_log "$log" "restart_failed service=$service"
+    systemctl restart -- "$service" >>"$log" 2>&1 || ccdc_append_log "$log" "restart_failed service=$service"
   else
     service "$service" restart >>"$log" 2>&1 || ccdc_append_log "$log" "restart_failed service=$service"
   fi
@@ -225,6 +282,7 @@ restart_service() {
 
 check_hashes() {
   local path current previous
+  [ "$apply" -eq 1 ] || return 0
   local next_state="${hash_state}.next.$$"
   watchdog_staged=$next_state
   : >"$next_state" || { ccdc_append_log "$log" "hash_state_write_failed path=$next_state"; return 1; }
@@ -300,6 +358,10 @@ declare -A ccdc_state=() 2>/dev/null \
   || ccdc_die "this watchdog needs bash 4+ for state-change logging (found ${BASH_VERSION:-unknown})"
 last_heartbeat=0
 heartbeat_every=${CCDC_WATCHDOG_HEARTBEAT_SECONDS:-300}
+case "$heartbeat_every" in
+  ''|*[!0-9]*) ccdc_die "CCDC_WATCHDOG_HEARTBEAT_SECONDS must be a whole number of seconds: $heartbeat_every" ;;
+esac
+[ "$heartbeat_every" -ge 1 ] || ccdc_die "CCDC_WATCHDOG_HEARTBEAT_SECONDS must be at least 1"
 
 log_state() {
   local key=$1 state=$2 message=$3 previous
@@ -333,12 +395,17 @@ run_once() {
   restarted_this_pass=''
   # check_start/check_end per pass was two lines every interval and told you
   # nothing; the heartbeat below carries "still running" instead.
-  while IFS='|' read -r name host port; do
+  while IFS='|' read -r name host port service; do
     [ -n "${name:-}" ] || continue
-    if check_tcp "$name" "$host" "$port"; then
+    status=0
+    check_tcp "$name" "$host" "$port" || status=$?
+    if [ "$status" -eq 0 ]; then
       log_state "tcp:$name" ok "tcp_ok name=$name host=$host port=$port"
+    elif [ "$status" -eq 2 ]; then
+      log_state "tcp:$name" skip "tcp_skipped reason=no-bounded-probe name=$name host=$host port=$port"
     else
       log_state "tcp:$name" bad "tcp_unhealthy name=$name host=$host port=$port"
+      [ -n "${service:-}" ] && restart_service "$service" tcp "$host|$port"
     fi
   done <<EOF
 ${CCDC_TCP_CHECKS:-}
@@ -374,7 +441,9 @@ EOF
   heartbeat
 }
 
-[ "$apply" -eq 1 ] && ccdc_require_root
+[ -n "${CCDC_TCP_CHECKS:-}${CCDC_HTTP_CHECKS:-}${CCDC_SYSTEMD_SERVICES:-}${CCDC_HASH_FILES:-}" ] \
+  || ccdc_die "watchdog has no TCP, HTTP, systemd, or hash checks configured"
+validate_checks
 
 # Do we still hold the lock we think we hold?
 #
@@ -389,7 +458,9 @@ holds_watchdog_lock() {
 }
 
 if [ "$once" -eq 1 ]; then
-  acquire_watchdog_lock || ccdc_die "watchdog singleton lock is unavailable; refusing a duplicate recovery loop"
+  if [ "$apply" -eq 1 ]; then
+    acquire_watchdog_lock || ccdc_die "watchdog singleton lock is unavailable; refusing a duplicate recovery loop"
+  fi
   run_once
   exit 0
 fi

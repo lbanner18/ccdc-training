@@ -26,6 +26,7 @@ apply=0
 skip_guardian=0
 skip_backup=0
 skip_canary=0
+skip_sentry=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
@@ -34,14 +35,16 @@ while [ "$#" -gt 0 ]; do
     --skip-guardian) skip_guardian=1; shift ;;
     --skip-backup) skip_backup=1; shift ;;
     --skip-canary) skip_canary=1; shift ;;
+    --skip-sentry) skip_sentry=1; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--apply|--dry-run] [--skip-backup] [--skip-canary] [--skip-guardian]\n' "$0"
+      printf 'usage: %s --config FILE [--apply|--dry-run] [--skip-backup] [--skip-canary] [--skip-guardian] [--skip-sentry]\n' "$0"
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 
 step=0
 failed=0
@@ -55,6 +58,7 @@ bad()  { printf '    PROBLEM: %s\n' "$1"; failed=$((failed + 1)); }
 note "preflight"
 
 evidence_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
+ccdc_validate_state_dir "$evidence_dir" "CCDC_EVIDENCE_DIR"
 if [ -e "$evidence_dir" ] && [ ! -w "$evidence_dir" ]; then
   bad "evidence dir not writable by $(id -un): $evidence_dir"
   printf '    fix: sudo chown -R %s %s\n' "$(id -un)" "$evidence_dir"
@@ -90,6 +94,11 @@ esac
 if [ "$failed" -gt 0 ] && [ "$apply" -eq 1 ]; then
   ccdc_die "preflight found $failed problem(s); nothing was armed"
 fi
+if [ "$apply" -eq 1 ]; then
+  # Recon may have created this as the operator. Claim it before any root
+  # service trusts predictable state filenames inside it.
+  ccdc_secure_state_dir "$evidence_dir" "CCDC_EVIDENCE_DIR"
+fi
 
 # --- 1. restore point --------------------------------------------------------
 
@@ -110,7 +119,9 @@ if [ "$skip_canary" -eq 0 ]; then
   note "tripwires (canary.sh --deploy)"
   if [ "$apply" -eq 1 ]; then
     if "$SCRIPT_DIR/canary.sh" --config "$config" --deploy --apply >/dev/null 2>&1; then
-      good "decoys laid ($(wc -l <"$evidence_dir/canary.manifest" 2>/dev/null || echo 0))"
+      canary_count=$(wc -l <"$evidence_dir/canary.manifest" 2>/dev/null || true)
+      [ -n "$canary_count" ] || canary_count=0
+      good "decoys laid ($canary_count)"
     else
       bad "canary deploy failed (already deployed? run --status, or --remove first)"
     fi
@@ -137,6 +148,23 @@ if [ "$skip_guardian" -eq 0 ]; then
   fi
 fi
 
+# --- 4. supervised detection -------------------------------------------------
+# sentry includes the watch/canary sweep and runs under systemd, so it neither
+# dies with SSH nor occupies the operator's only terminal.
+
+if [ "$skip_sentry" -eq 0 ]; then
+  note "supervised detection (sentry.sh --install)"
+  if [ "$apply" -eq 1 ]; then
+    if "$SCRIPT_DIR/sentry.sh" --config "$config" --install --apply >/dev/null 2>&1; then
+      good "sentry installed; triage and change detection now run unattended"
+    else
+      bad "sentry install failed — run it directly to see why"
+    fi
+  else
+    printf '    [dry-run] would install/start sentry as a supervised systemd service\n'
+  fi
+fi
+
 # --- verify ------------------------------------------------------------------
 
 note "verify what is actually running"
@@ -156,10 +184,19 @@ if [ "$apply" -eq 1 ]; then
   # The installed copy is named after the chain's watch layer, so "watchdog.sh"
   # is not what is in `ps`. Look for the payload directory instead, which every
   # layer of this chain names and no other chain does.
-  gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/${CCDC_GUARDIAN_NAME:-node-health}}
-  pgrep -f "$gdir" >/dev/null 2>&1 && good "watchdog process running" || bad "no watchdog process"
-  [ "$skip_canary" -eq 1 ] || [ -f "$evidence_dir/canary.manifest" ] \
-    && good "canary manifest present" || bad "no canary manifest"
+  if [ "$skip_guardian" -eq 0 ]; then
+    gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/${CCDC_GUARDIAN_NAME:-node-health}}
+    pgrep -f "$gdir" >/dev/null 2>&1 && good "watchdog process running" || bad "no watchdog process"
+  fi
+  if [ "$skip_sentry" -eq 0 ] && ccdc_have systemctl; then
+    sname=${CCDC_SENTRY_NAME:-ccdc-sentry}
+    systemctl is-active --quiet "$sname.service" 2>/dev/null \
+      && good "active: $sname.service" || bad "NOT active: $sname.service"
+  fi
+  if [ "$skip_canary" -eq 0 ]; then
+    [ -f "$evidence_dir/canary.manifest" ] \
+      && good "canary manifest present" || bad "no canary manifest"
+  fi
 else
   printf '    [dry-run] nothing armed, so nothing to verify\n'
 fi
@@ -181,11 +218,13 @@ cat <<'NEXT'
   What is now running without you:
     - watchdog: restarts a dead scored service and verifies it recovered
     - guardian: keeps that watchdog alive against someone with root
-    - canary:   decoys are laid (but NOTHING alerts you - see below)
+    - sentry:   triage + change/canary sweeps; current queue is in ALERTS
+    - canary:   decoys are laid and their trips feed sentry
 
-  What still needs you, on a loop:
-    ./linux/watch.sh --config <cfg>     change-detection loop (read-only)
-    and check the scored service FROM OFF THE BOX, which no tool here can do
+  Your short check-in loop (the terminal stays free):
+    sudo ./linux/sentry.sh --config <cfg> --status
+    sudo ./linux/sentry.sh --config <cfg> --approve --apply
+    and verify the scored service FROM OFF THE BOX, which no on-box tool can do
 
   What still needs you, once, as a judgement call:
     ./linux/services.sh --config <cfg> --review    what should not be running
@@ -195,6 +234,9 @@ cat <<'NEXT'
   not something a setup script does on your behalf.
 
   Disarm everything:
+    sudo ./linux/sentry.sh  --config <cfg> --uninstall --apply
     sudo ./linux/guardian.sh --config <cfg> --uninstall --apply
     sudo ./linux/canary.sh   --config <cfg> --remove    --apply
 NEXT
+[ "$failed" -eq 0 ] || exit 1
+exit 0

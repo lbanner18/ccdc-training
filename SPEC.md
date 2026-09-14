@@ -20,6 +20,8 @@ framework.
 - `linux/hunt.sh`: read-only persistence and tamper sweep.
 - `linux/watchdog.sh`: configurable service checks; restart only a configured
   service that is actually unhealthy.
+- `linux/sentry.sh`: supervised ranked detection plus a current, structured
+  approval queue; every action is revalidated and evidence-backed at sign-off.
 - `linux/users.sh`: access audit by default; mutations require `--apply` and
   use an explicit allowlist.
 - `linux/backup.sh`: explicit-path backups with checksums and guarded restore.
@@ -34,12 +36,17 @@ framework.
 
 ## Safety constraints
 
-- Every mutating script supports `--dry-run`; mutating scripts default to dry
-  run unless `--apply` is present.
+- Every destructive script supports `--dry-run`; destructive scripts default
+  to dry run unless `--apply` is present. Detection may write private evidence
+  and bounded state, but must not change system configuration.
 - Real box-specific values belong in an untracked config file copied from
   `config/example.env`. No credentials, backup-admin names, IPs, or keys are
   committed.
 - Evidence is written before a mutation whenever practical.
+- Findings and approval queues are data, never shell source. An approval must
+  refresh detection and protection policy immediately before acting.
+- Root-run tools validate dedicated state/install paths before mkdir/chmod/rm,
+  and status or dry-run modes must not change ownership or permissions.
 - SSH/firewall changes must have a rollback path and must be tested in a lab
   snapshot before competition use.
 - Scripts use POSIX-ish shell commands and fallbacks because the target may be
@@ -51,4 +58,3 @@ framework.
 - unattended remote execution across multiple boxes;
 - claiming a Windows implementation has been tested on this Linux workstation;
 - provisioning or changing the host hypervisor.
-

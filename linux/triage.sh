@@ -15,6 +15,8 @@ set -u
 #
 #   ./triage.sh --config FILE           everything below, ranked
 #   ./triage.sh --config FILE --quiet   findings only, no "clean" lines
+#   ./triage.sh --config FILE --findings-file ABS_PATH
+#                                      atomically write this pass there
 #
 # READ-ONLY. Safe to run first, safe to run often, safe to run while panicking.
 #
@@ -30,20 +32,34 @@ umask 077
 
 config=''
 quiet=0
+__ccdc_triage_cli_findings=''
+__ccdc_triage_cli_findings_set=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
+    --findings-file)
+      [ "$__ccdc_triage_cli_findings_set" -eq 0 ] || ccdc_die "--findings-file may be supplied only once"
+      __ccdc_triage_cli_findings=${2:?missing findings path}
+      __ccdc_triage_cli_findings_set=1
+      shift 2
+      ;;
     --quiet) quiet=1; shift ;;
-    -h|--help) printf 'usage: %s --config FILE [--quiet]\n' "$0"; exit 0 ;;
+    -h|--help) printf 'usage: %s --config FILE [--quiet] [--findings-file ABS_PATH]\n' "$0"; exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done
 [ -n "$config" ] || ccdc_die "--config is required"
+# Preserve command-line precedence even though the selected config is sourced.
+readonly __ccdc_triage_cli_findings __ccdc_triage_cli_findings_set
 ccdc_load_config "$config"
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
-mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence-$(id -un)"
-mkdir -p "$state_dir" 2>/dev/null || true
+ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
+case "$state_dir" in */) state_dir=${state_dir%/} ;; esac
+mkdir -p "$state_dir" 2>/dev/null \
+  || ccdc_die "cannot create triage state directory: $state_dir (run with sudo or fix its ownership)"
+[ -w "$state_dir" ] \
+  || ccdc_die "triage state is not writable by $(id -un): $state_dir (run with sudo; refusing to split findings)"
 
 findings=0
 checks=0
@@ -87,10 +103,71 @@ fix() { printf '           %s\n' "$1"; }
 #
 #   SEVERITY|CHECK|SUBJECT|DESCRIPTION
 #
-# SUBJECT is the thing to act on: a username, a path, a unit, a "unit:target"
-# pair. It is the only field sentry parses for an argument.
-findings_file="${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}"
-emit() { printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$findings_file.$$" 2>/dev/null || true; }
+# SUBJECT is the thing to act on: a username, a path, or a documented compound
+# value. It is the only field sentry parses for an argument.
+if [ "$__ccdc_triage_cli_findings_set" -eq 1 ]; then
+  findings_file=$__ccdc_triage_cli_findings
+else
+  findings_file=${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}
+fi
+
+validate_findings_file() {
+  local path=$1 parent base
+  case "$path" in /*) ;; *) ccdc_die "findings file must be absolute: $path" ;; esac
+  case "$path" in
+    *'//'*) ccdc_die "findings file contains an empty path component: $path" ;;
+    */./*|*/.|*/../*|*/..) ccdc_die "findings file contains path traversal: $path" ;;
+    *[!A-Za-z0-9_./@+-]*) ccdc_die "findings file contains unsupported whitespace, delimiter, or control characters: $path" ;;
+  esac
+  parent=$(dirname -- "$path")
+  base=${path##*/}
+  [ "$parent" = "$state_dir" ] \
+    || ccdc_die "findings file must be a direct child of CCDC_EVIDENCE_DIR ($state_dir): $path"
+  case "$base" in ''|.|..) ccdc_die "findings file has an invalid basename: $path" ;; esac
+  [ ! -d "$path" ] || ccdc_die "findings file is a directory: $path"
+}
+
+validate_findings_file "$findings_file"
+findings_tmp="$state_dir/.triage-findings-write.$$"
+if ! (umask 077; set -o noclobber; : >"$findings_tmp") 2>/dev/null; then
+  ccdc_die "cannot create a private findings staging file in $state_dir"
+fi
+cleanup_findings_tmp() {
+  [ -z "${findings_tmp:-}" ] || rm -f -- "$findings_tmp" 2>/dev/null || true
+}
+trap cleanup_findings_tmp EXIT INT TERM HUP
+
+machine_field_safe() {
+  # The findings file is deliberately a tiny, dependency-free wire format.
+  # Never let an attacker-chosen filename add a field or a second record.
+  case "$1" in
+    *'|'*|*$'\n'*|*$'\r'*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+machine_pair_safe() {
+  # A few checks use SUBJECT=source::target. Keep that inner delimiter just as
+  # unambiguous as the outer pipe-separated format.
+  machine_field_safe "$1" && machine_field_safe "$2" || return 1
+  case "$1"$'\n'"$2" in *'::'*) return 1 ;; esac
+  return 0
+}
+machine_triple_safe() {
+  machine_field_safe "$1" && machine_field_safe "$2" && machine_field_safe "$3" || return 1
+  case "$1"$'\n'"$2"$'\n'"$3" in *'::'*) return 1 ;; esac
+  return 0
+}
+emit() {
+  if machine_field_safe "$1" && machine_field_safe "$2" &&
+     machine_field_safe "$3" && machine_field_safe "$4"; then
+    printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$findings_tmp" \
+      || ccdc_die "cannot append to findings staging file: $findings_tmp"
+  else
+    # Keep the human finding visible, but do not hand an ambiguous subject to
+    # sentry for root execution.
+    ccdc_warn "omitted a delimiter-unsafe $2 finding from the machine queue; inspect the human triage output"
+  fi
+}
 fixhdr(){ printf '         ---- run this ----------------------------------------\n'; }
 clean() { [ "$quiet" -eq 1 ] || printf '  ok     %s\n' "$1"; }
 begin() { checks=$((checks + 1)); }
@@ -150,21 +227,52 @@ fi
 # The operator who found this one in the drill found it because he opened the
 # file. This makes opening the file unnecessary.
 begin
-keyfiles=$(find /root /home -maxdepth 3 -name authorized_keys -type f 2>/dev/null)
-if [ -n "$keyfiles" ]; then
+keyfiles=()
+add_keyfile() {
+  local candidate=$1 existing
+  [ -f "$candidate" ] || return 0
+  for existing in "${keyfiles[@]}"; do
+    [ "$existing" = "$candidate" ] && return 0
+  done
+  keyfiles+=("$candidate")
+}
+passwd_records() {
+  if ccdc_have getent && getent passwd 2>/dev/null; then
+    return 0
+  fi
+  cat /etc/passwd 2>/dev/null
+}
+
+# Account homes are not confined to /home. Service identities commonly live
+# below /var/lib, and a key there grants the same access as one in /root. Use
+# the system account database so LDAP/NSS-backed accounts are covered too.
+while IFS=: read -r _ _ _ _ _ home _; do
+  case "$home" in /*) add_keyfile "$home/.ssh/authorized_keys" ;; esac
+done < <(passwd_records)
+
+# Retain the old filesystem sweep as well: it catches orphaned /home trees
+# that no longer have a passwd entry but still contain a usable key.
+while IFS= read -r -d '' f; do add_keyfile "$f"; done \
+  < <(find /root /home -maxdepth 3 -name authorized_keys -type f -print0 2>/dev/null)
+
+if [ "${#keyfiles[@]}" -gt 0 ]; then
   total=0
-  for f in $keyfiles; do
+  for f in "${keyfiles[@]}"; do
     # `grep -c` PRINTS 0 and EXITS 1 when there are no matches, so a
     # `|| printf 0` fallback appends a second 0 and the test below then dies
     # with "integer expression expected". Check for empty instead.
-    n=$(grep -c '^[^#]' "$f" 2>/dev/null)
+    n=$(grep -c '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null)
     [ -n "$n" ] || n=0
     [ "$n" -gt 0 ] && total=$((total + n))
   done
   if [ "$total" -gt 0 ]; then
     amber "$total SSH key(s) grant login. Recognise EVERY one or remove it   [CARD 2]"
-    for f in $keyfiles; do emit AMBER sshkey "$f" "SSH keys grant login here"; done
-    for f in $keyfiles; do
+    for f in "${keyfiles[@]}"; do
+      n=$(grep -c '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null)
+      [ -n "$n" ] || n=0
+      [ "$n" -gt 0 ] && emit AMBER sshkey "$f" "SSH keys grant login here"
+    done
+    for f in "${keyfiles[@]}"; do
       while IFS= read -r k; do
         [ -n "$k" ] || continue
         detail "$(printf '%s' "$f"): ...$(printf '%s' "$k" | tail -c 45)"
@@ -180,10 +288,19 @@ if [ -n "$keyfiles" ]; then
         # The | delimiter is also deliberate: base64 contains / and would
         # terminate a /.../ expression early.
         slice=$(printf '%s' "$k" | awk '{print $2}' | tail -c 25 | tr -d '\n')
-        [ -n "$slice" ] && fix "sudo cp $f $f.bak && sudo sed -i '\\|$slice|d' $f"
-      done <<EOF
-$(grep '^[^#]' "$f" 2>/dev/null)
-EOF
+        if [ -n "$slice" ]; then
+          case "$slice" in
+            *[!A-Za-z0-9+/=]*)
+              detail "key line is malformed; edit this file manually (no generated delete command)"
+              continue
+              ;;
+          esac
+          printf -v qf '%q' "$f"
+          printf -v qbak '%q' "$f.bak"
+          printf -v qsed '%q' "\\|$slice|d"
+          fix "sudo cp -- $qf $qbak && sudo sed -i $qsed $qf"
+        fi
+      done < <(grep '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null)
     done
     detail "delete ONLY the lines you do not recognise - never truncate the file,"
     detail "your own key is probably in it. Keep this session open, then verify:"
@@ -201,6 +318,26 @@ fi
 # the shapes that only ever mean a shell.
 begin
 shells='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
+
+# Print conservative, delimiter-safe absolute-path tokens from a command line.
+# This intentionally declines paths containing whitespace or shell metacharacters
+# instead of trying to emulate either cron's or systemd's command parser.
+absolute_tokens() {
+  LC_ALL=C grep -oE '/[A-Za-z0-9._+@%~-]+(/[A-Za-z0-9._+@%~-]+)*' 2>/dev/null || true
+}
+
+# Commands that launch another command/script rather than being the payload
+# themselves. For these, inspect absolute regular-file arguments as well as the
+# first executable. No command text is ever evaluated.
+is_launch_wrapper() {
+  case "${1##*/}" in
+    sh|bash|dash|zsh|ksh|python|python[0-9]*|perl|ruby|php|node|env|nohup|setsid|\
+    timeout|nice|ionice|chrt|stdbuf|flock|sudo|su|runuser|busybox|daemonize|\
+    start-stop-daemon) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 cronhits=$(grep -rIlE "$shells" /etc/cron.d /etc/cron.daily /etc/cron.hourly \
   /etc/cron.weekly /etc/cron.monthly /etc/crontab /var/spool/cron 2>/dev/null)
 if [ -n "$cronhits" ]; then
@@ -221,6 +358,97 @@ EOF
   fix "sudo ss -tnp | grep -v 127.0.0.1        # is it connected right now?"
 else
   clean "no scheduled job matches a reverse-shell pattern"
+fi
+
+# The cron entry can be clean while the executable it names contains the
+# payload. Follow one hop through absolute targets, including a non-executable
+# script passed to a known interpreter/wrapper. This catches, for example,
+# `root /usr/local/bin/net-check` and `/bin/bash /opt/check.sh` without sourcing
+# or executing attacker-controlled text.
+begin
+cron_sources=()
+add_cron_source() {
+  local candidate=$1 existing
+  [ -f "$candidate" ] || return 0
+  for existing in "${cron_sources[@]}"; do
+    [ "$existing" = "$candidate" ] && return 0
+  done
+  cron_sources+=("$candidate")
+}
+add_cron_source /etc/crontab
+for cron_root in /etc/cron.d /etc/cron.daily /etc/cron.hourly /etc/cron.weekly \
+                 /etc/cron.monthly /var/spool/cron; do
+  [ -d "$cron_root" ] || continue
+  while IFS= read -r -d '' f; do add_cron_source "$f"; done \
+    < <(find "$cron_root" -type f -print0 2>/dev/null)
+done
+
+crondeep=()
+for source in "${cron_sources[@]}"; do
+  while IFS= read -r line || [ -n "$line" ]; do
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    case "$trimmed" in ''|'#'*) continue ;; esac
+    # Cron environment assignments are data, not launch commands. Ignoring
+    # them avoids following PATH/SHELL values as if cron executed each path.
+    printf '%s\n' "$trimmed" | grep -qE '^[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' && continue
+
+    targets=()
+    while IFS= read -r target; do
+      [ -n "$target" ] && targets+=("$target")
+    done < <(printf '%s\n' "$trimmed" | absolute_tokens)
+    [ "${#targets[@]}" -gt 0 ] || continue
+    # A stepped cron field such as */5 looks like the absolute token `/5`.
+    # Anchor wrapper/direct-target decisions to the first token that is an
+    # actual regular file, not merely the first slash-shaped substring.
+    primary=''
+    for target in "${targets[@]}"; do
+      if [ -f "$target" ]; then primary=$target; break; fi
+    done
+    [ -n "$primary" ] || continue
+
+    for target in "${targets[@]}"; do
+      [ -f "$target" ] || continue
+      # A direct executable is a launch target. A known wrapper/interpreter
+      # also makes its regular-file arguments launch targets.
+      if [ "$target" != "$primary" ] && [ ! -x "$target" ] && ! is_launch_wrapper "$primary"; then
+        continue
+      fi
+      grep -qIE "$shells" "$target" 2>/dev/null || continue
+      hit="$source::$target"
+      duplicate=0
+      for existing in "${crondeep[@]}"; do
+        [ "$existing" = "$hit" ] && duplicate=1 && break
+      done
+      [ "$duplicate" -eq 1 ] || crondeep+=("$hit")
+    done
+  done <"$source"
+done
+
+if [ "${#crondeep[@]}" -gt 0 ]; then
+  red "scheduled job(s) launching a file that contains a reverse shell   [CARD 3]"
+  detail "the schedule looks clean - the payload is one level down"
+  for e in "${crondeep[@]}"; do
+    source=${e%%::*}; target=${e#*::}
+    detail "$source -> $target"
+    if machine_pair_safe "$source" "$target"; then
+      emit RED crondeep "$e" "scheduled job launching a file containing a reverse shell"
+    else
+      ccdc_warn "omitted an ambiguous crondeep subject from the machine queue; inspect the human triage output"
+    fi
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-88)"; done \
+      < <(grep -IhE "$shells" "$target" 2>/dev/null | head -2)
+    printf -v qsource '%q' "$source"
+    printf -v qtarget '%q' "$target"
+    printf -v qsource_evidence '%q' "/var/tmp/evidence-cron-$(basename "$source")"
+    printf -v qtarget_evidence '%q' "/var/tmp/evidence-payload-$(basename "$target")"
+    fixhdr
+    fix "sudo cp -- $qsource $qsource_evidence"
+    fix "sudo cp -- $qtarget $qtarget_evidence"
+    fix "sudo nano $qsource      # delete only the schedule line that names $qtarget"
+    fix "sudo rm -f -- $qtarget"
+  done
+else
+  clean "no scheduled job launches a file containing a reverse shell"
 fi
 
 # --- 5. systemd units that call home -----------------------------------------
@@ -370,32 +598,64 @@ fi
 
 # --- 9c. Who can become root -------------------------------------------------
 begin
-admins=''
 # sudo/wheel/admin grant ROOT. `adm` is deliberately not here: it grants log
 # file read access, and `syslog` is in it on every stock Ubuntu, so including it
 # made this check fire on a clean box - the exact "cries wolf" failure this
 # tool is supposed to avoid.
-for g in sudo wheel admin; do
-  m=$(getent group "$g" 2>/dev/null | cut -d: -f4)
-  [ -n "$m" ] && admins="$admins $g:$m"
-done
-suspect=''
-for entry in $admins; do
-  g=${entry%%:*}
-  for m in $(printf '%s' "${entry#*:}" | tr ',' ' '); do
-    uid=$(id -u "$m" 2>/dev/null || printf '99999')
-    # A SYSTEM account in an admin group is the tell. Human accounts belong
-    # there and would only be noise.
-    if [ "$uid" -lt 1000 ] 2>/dev/null; then suspect="$suspect $m/$g"; fi
+suspect=()
+consider_admin_member() {
+  local member=$1 group=$2 uid entry existing duplicate
+  [ -n "$member" ] || return 0
+  [ "$member" = root ] && return 0
+  uid=$(id -u "$member" 2>/dev/null) || return 0
+
+  # A system identity in a root-capable group is always anomalous, even when
+  # it is a scored account and therefore protected from automatic action. A
+  # human identity is actionable only when the operator supplied an account
+  # allow-list and omitted it. Restricting this to root-capable groups and an
+  # explicit allow-list keeps ordinary `adm`/log-reader membership quiet.
+  if [ "$uid" -ge 1000 ] 2>/dev/null; then
+    [ -n "${CCDC_ALLOWED_USERS:-}" ] || return 0
+    ccdc_list_contains "$member" "${CCDC_ALLOWED_USERS:-}" && return 0
+  fi
+
+  entry="$member/$group"
+  duplicate=0
+  for existing in "${suspect[@]}"; do
+    [ "$existing" = "$entry" ] && duplicate=1 && break
   done
+  [ "$duplicate" -eq 1 ] || suspect+=("$entry")
+}
+
+for g in sudo wheel admin; do
+  group_entry=$(getent group "$g" 2>/dev/null) || continue
+  IFS=: read -r _ _ group_gid members <<<"$group_entry"
+  IFS=, read -r -a group_members <<<"$members"
+  for m in "${group_members[@]}"; do
+    consider_admin_member "$m" "$g"
+  done
+
+  # NSS group member lists normally contain supplemental members only. A user
+  # whose primary GID is sudo/wheel/admin is just as root-capable and must not
+  # bypass the check by being absent from the comma-separated member field.
+  while IFS=: read -r m _ _ primary_gid _ _ _; do
+    [ "$primary_gid" = "$group_gid" ] && consider_admin_member "$m" "$g"
+  done < <(passwd_records)
 done
-if [ -n "$suspect" ]; then
-  red "system account(s) in an admin group:$suspect   [CARD 10]"
-  for e in $suspect; do emit RED admingroup "$e" "system account in an admin group"; done
+if [ "${#suspect[@]}" -gt 0 ]; then
+  red "account(s) have unapproved root-capable group membership   [CARD 10]"
+  for e in "${suspect[@]}"; do
+    emit RED admingroup "$e" "account has unapproved root-capable group membership"
+  done
+  detail "system accounts are always shown; human accounts are shown when absent from CCDC_ALLOWED_USERS"
   fixhdr
-  for e in $suspect; do fix "sudo gpasswd -d ${e%%/*} ${e#*/}"; done
+  for e in "${suspect[@]}"; do
+    printf -v quser '%q' "${e%%/*}"
+    printf -v qgroup '%q' "${e#*/}"
+    fix "sudo gpasswd -d $quser $qgroup"
+  done
 else
-  clean "no system account is in sudo/wheel/admin"
+  clean "no unapproved account is in sudo/wheel/admin"
 fi
 
 # --- 9d. Shell start-up files ------------------------------------------------
@@ -472,28 +732,90 @@ fi
 # path in an ordinary directory - and the reverse shell was inside the file.
 # Following the path IS the check.
 begin
-deephits=''
+unit_exec_commands() {
+  # Join systemd continuation lines, then print every ExecStart command. This
+  # is a parser, never an evaluator: specifiers and variables remain literal
+  # and therefore cannot make this tool execute attacker-controlled content.
+  awk '
+    {
+      part=$0
+      if (part ~ /\\$/) {
+        sub(/\\$/, "", part)
+        joined=joined part " "
+        next
+      }
+      joined=joined part
+      if (joined ~ /^[[:space:]]*ExecStart=/) {
+        sub(/^[[:space:]]*ExecStart=/, "", joined)
+        print joined
+      }
+      joined=""
+    }
+    END {
+      if (joined ~ /^[[:space:]]*ExecStart=/) {
+        sub(/^[[:space:]]*ExecStart=/, "", joined)
+        print joined
+      }
+    }
+  ' "$1" 2>/dev/null
+}
+
+deephits=()
 for unit in /etc/systemd/system/*.service /run/systemd/system/*.service; do
   [ -f "$unit" ] || continue
-  target=$(awk -F= '/^ExecStart=/ {print $2; exit}' "$unit" 2>/dev/null | awk '{print $1}' | sed 's/^[-@+!]*//')
-  case "$target" in /*) ;; *) continue ;; esac
-  [ -f "$target" ] || continue
-  grep -qIE "$shells" "$target" 2>/dev/null && deephits="$deephits $unit::$target"
+  while IFS= read -r command || [ -n "$command" ]; do
+    targets=()
+    while IFS= read -r target; do
+      [ -n "$target" ] && targets+=("$target")
+    done < <(printf '%s\n' "$command" | absolute_tokens)
+    [ "${#targets[@]}" -gt 0 ] || continue
+
+    primary=${targets[0]}
+    follow_args=0
+    for target in "${targets[@]}"; do
+      is_launch_wrapper "$target" && follow_args=1
+    done
+    # Also recognise a relative interpreter following /usr/bin/env or another
+    # wrapper. Word boundaries keep names such as `node_exporter` from turning
+    # an unrelated argument into a launch target.
+    printf '%s\n' "$command" | grep -qE "(^|[[:space:]\"'])(sh|bash|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|node)([[:space:]\"']|$)" && follow_args=1
+
+    for target in "${targets[@]}"; do
+      [ -f "$target" ] || continue
+      [ "$target" = "$primary" ] || [ "$follow_args" -eq 1 ] || continue
+      grep -qIE "$shells" "$target" 2>/dev/null || continue
+      hit="$unit::$target"
+      duplicate=0
+      for existing in "${deephits[@]}"; do
+        [ "$existing" = "$hit" ] && duplicate=1 && break
+      done
+      [ "$duplicate" -eq 1 ] || deephits+=("$hit")
+    done
+  done < <(unit_exec_commands "$unit")
 done
-if [ -n "$deephits" ]; then
+if [ "${#deephits[@]}" -gt 0 ]; then
   red "unit(s) whose ExecStart script contains a reverse shell   [CARD 4]"
-  for e in $deephits; do emit RED unitdeep "$e" "unit whose ExecStart script contains a reverse shell"; done
   detail "the unit itself looks clean - the payload is one level down"
-  for e in $deephits; do
+  for e in "${deephits[@]}"; do
     unit=${e%%::*}; target=${e#*::}; u=$(basename "$unit"); base=${u%.service}
     detail "$u -> $target"
-    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done <<EOF
-$(grep -IhE "$shells" "$target" 2>/dev/null | head -2)
-EOF
+    if machine_pair_safe "$unit" "$target"; then
+      emit RED unitdeep "$e" "unit whose ExecStart script contains a reverse shell"
+    else
+      ccdc_warn "omitted an ambiguous unitdeep subject from the machine queue; inspect the human triage output"
+    fi
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done \
+      < <(grep -IhE "$shells" "$target" 2>/dev/null | head -2)
+    printf -v qunit '%q' "$unit"
+    printf -v qtarget '%q' "$target"
+    printf -v qevidence '%q' "/var/tmp/evidence-$(basename "$target")"
+    printf -v qtimer '%q' "/etc/systemd/system/$base.timer"
+    printf -v qunit_name '%q' "$u"
+    printf -v qtimer_name '%q' "$base.timer"
     fixhdr
-    fix "sudo systemctl disable --now $base.timer $u"
-    fix "sudo cp $target /var/tmp/evidence-$(basename "$target")"
-    fix "sudo rm -f $unit /etc/systemd/system/$base.timer $target"
+    fix "sudo systemctl disable --now $qtimer_name $qunit_name"
+    fix "sudo cp -- $qtarget $qevidence"
+    fix "sudo rm -f -- $qunit $qtimer $qtarget"
     fix "sudo systemctl daemon-reload && sudo systemctl reset-failed"
   done
 else
@@ -535,12 +857,13 @@ else
   printf '  cat or paste playbooks/remediation-cards.md - it is markdown, and bash\n'
   printf '  will try to execute the prose.\n'
 fi
-# Write-then-rename so a reader never sees a half-written findings file.
-if [ -f "$findings_file.$$" ]; then
-  mv "$findings_file.$$" "$findings_file" 2>/dev/null || rm -f "$findings_file.$$"
-else
-  : >"$findings_file" 2>/dev/null || true
+# The staging file was created before any checks and every append was checked.
+# A same-directory rename is the only publication step, so sentry sees either
+# the complete previous pass or this complete pass, never a partial record set.
+if ! mv -f -- "$findings_tmp" "$findings_file"; then
+  ccdc_die "cannot atomically finalize findings file: $findings_file"
 fi
+findings_tmp=''
 
 printf '\n  Full detail, if you want it: ./linux/hunt.sh and ./linux/recon.sh\n'
 [ "$findings" -gt 0 ] && exit 3

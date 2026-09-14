@@ -35,9 +35,9 @@ memory. Do it under a timer — the tryout clock is the real adversary.
 [ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline BEFORE plant
 [ ] Note the evidence path. This is your known-good picture.
 [ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
-    # backup + canaries + guardian; guardian starts the watchdog as a unit.
-    # Do NOT run watchdog.sh by hand with `&` - it dies with your shell, and
-    # it will not be supervised, which is the whole point of guardian.
+    # backup + canaries + guardian/watchdog + supervised sentry/change sweep.
+    # Do NOT run either loop by hand with `&`; systemd owns their lifetime.
+[ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
 [ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --status   # decoys + audit rules laid
 [ ] (optional) sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --apply then --confirm
 ```
@@ -132,7 +132,9 @@ handling is not. Expect to find something here.
 ```
 [ ] sudo ./linux/guardian.sh --config /tmp/ccdc-linux.env --install --apply
 [ ] sudo ./linux/guardian.sh --config /tmp/ccdc-linux.env --status  # 3 layers live
-[ ] ATTACK 1 — kill the watchdog process:   sudo pkill -f watchdog.sh
+[ ] ATTACK 1 — kill the configured watchdog payload by exact process argv.
+    Use redteam/drill.sh rather than `pkill -f watchdog.sh`: installed payloads
+    are named per chain, and a broad pattern can kill the test harness itself.
     -> within one interval it is running again. Confirm with --status.
 [ ] ATTACK 2 — stop the service:            sudo systemctl stop <name>
     -> a tick (timer or cron) restarts it within the interval.
@@ -186,6 +188,8 @@ Already proven with two real lockout tests, but worth one rep so it is reflex:
 
 ```
 [ ] sudo ./redteam/plant.sh --clean       # authoritative removal of any plants
+[ ] sudo ./linux/sentry.sh --config ... --uninstall --apply
+[ ] sudo ./linux/guardian.sh --config ... --uninstall --apply
 [ ] sudo ./linux/canary.sh --config ... --remove --apply
 [ ] Revert the VM to clean-baseline.
 ```

@@ -52,11 +52,16 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 ccdc_have systemctl || ccdc_die "this box does not use systemd; disable services by hand"
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
-mkdir -p "$state_dir" 2>/dev/null || state_dir="${TMPDIR:-/tmp}/ccdc-evidence-$(id -un)"
-mkdir -p "$state_dir" || ccdc_die "cannot create state directory"
+ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
+if [ "$apply" -eq 1 ]; then
+  ccdc_secure_state_dir "$state_dir" "services state directory"
+elif [ -e "$state_dir" ] && [ ! -x "$state_dir" ]; then
+  ccdc_die "state directory cannot be searched by $(id -un): $state_dir (run with sudo)"
+fi
 record="$state_dir/services.disabled"    # unit|was-enabled|was-active|was-masked
 log="$state_dir/services.log"
 
@@ -145,6 +150,17 @@ in_list() {
   return 1
 }
 
+in_unit_list() {
+  local needle
+  needle=$(base_name "$1")
+  shift
+  local item
+  for item in $*; do
+    [ "$(base_name "$item")" = "$needle" ] && return 0
+  done
+  return 1
+}
+
 # Guardian installs units under names you chose, and they are supposed to look
 # unremarkable -- which means a hardening pass is exactly the thing most likely
 # to switch off your own keep-alive by mistake. Derive them from the same
@@ -159,17 +175,18 @@ guardian_units() {
 }
 
 protected_list() {
-  printf '%s %s %s %s\n' \
+  printf '%s %s %s %s %s\n' \
     "$never_touch" \
     "${CCDC_SYSTEMD_SERVICES:-}" \
     "${CCDC_PROTECT_SERVICES:-}" \
-    "$(guardian_units)"
+    "$(guardian_units)" \
+    "${CCDC_SENTRY_NAME:-ccdc-sentry}"
 }
 
 classify() {
   local unit=$1 base
   base=$(base_name "$unit")
-  if in_list "$base" "$(protected_list)"; then printf 'PROTECTED'; return; fi
+  if in_unit_list "$base" "$(protected_list)"; then printf 'PROTECTED'; return; fi
   if in_list "$base" "$likely_scored"; then printf 'SCORED?'; return; fi
   if [ -n "${candidate_reason[$base]:-}" ]; then printf 'CANDIDATE'; return; fi
   printf 'REVIEW'
@@ -292,7 +309,7 @@ NEXT
 # --- disable -----------------------------------------------------------------
 
 do_disable() {
-  local unit base was_enabled was_active was_masked count=0 refused=0
+  local unit base was_enabled was_active was_masked count=0 refused=0 errors=0
   [ -n "${CCDC_DISABLE_SERVICES:-}" ] \
     || ccdc_die "CCDC_DISABLE_SERVICES is empty. Run --review first and choose deliberately; this tool will not pick for you."
 
@@ -301,15 +318,17 @@ do_disable() {
 
     # The guard that matters. A typo, a stale config copied from another box, or
     # a packet you misread all end here rather than on the scoreboard.
-    if in_list "$base" "$(protected_list)"; then
+    if in_unit_list "$base" "$(protected_list)"; then
       ccdc_warn "REFUSING $base: it is scored, is part of this kit, or would cut your access"
       refused=$((refused + 1))
       continue
     fi
     if in_list "$base" "$likely_scored"; then
-      ccdc_warn "REFUSING $base: it looks like a scored service. If the packet says otherwise, add it to CCDC_PROTECT_SERVICES to acknowledge, or disable it by hand."
-      refused=$((refused + 1))
-      continue
+      if ! in_list "$base" "${CCDC_ACK_DISABLE_LIKELY_SCORED:-}"; then
+        ccdc_warn "REFUSING $base: it looks scored. If the packet proves otherwise, add it to CCDC_ACK_DISABLE_LIKELY_SCORED (not the protect list)."
+        refused=$((refused + 1))
+        continue
+      fi
     fi
     if ! systemctl cat "$base.service" >/dev/null 2>&1; then
       ccdc_warn "skipping $base: no such unit on this box"
@@ -338,9 +357,16 @@ do_disable() {
           || ccdc_die "cannot write the revert record at $record; refusing to disable anything"
       fi
 
-      ccdc_action systemctl disable --now "$target" >/dev/null 2>&1 \
-        || ccdc_warn "could not fully disable $target"
-      [ "$mask" -eq 1 ] && ccdc_action systemctl mask "$target" >/dev/null 2>&1
+      if ! ccdc_action systemctl disable --now "$target" >/dev/null 2>&1; then
+        ccdc_warn "could not fully disable $target; revert record retained"
+        errors=$((errors + 1))
+        continue
+      fi
+      if [ "$mask" -eq 1 ] && ! ccdc_action systemctl mask "$target" >/dev/null 2>&1; then
+        ccdc_warn "disabled but could not mask $target; revert record retained"
+        errors=$((errors + 1))
+        continue
+      fi
       ccdc_is_dry_run || ccdc_append_log "$log" "disabled unit=$target was_enabled=$was_enabled was_active=$was_active masked=$mask"
       printf '    disabled: %-28s %s\n' "$target" "${candidate_reason[$base]:-}"
       acted=1
@@ -358,7 +384,7 @@ do_disable() {
     ccdc_info "dry run: $count unit(s) would be disabled, $refused refused. Re-run with --apply."
     return 0
   fi
-  ccdc_info "$count unit(s) disabled, $refused refused. Revert record: $record"
+  ccdc_info "$count unit(s) disabled, $refused refused, $errors failed. Revert record: $record"
   cat <<'AFTER'
 
   NOW GO CHECK YOUR SCORED SERVICES FROM OFF THE BOX.
@@ -367,12 +393,16 @@ do_disable() {
 
       sudo ./linux/services.sh --config <cfg> --revert --apply
 AFTER
+  if [ "$errors" -gt 0 ] || [ "$refused" -gt 0 ]; then
+    ccdc_warn "requested service changes were incomplete; inspect warnings and keep the revert record"
+    return 1
+  fi
 }
 
 # --- revert ------------------------------------------------------------------
 
 do_revert() {
-  local line base was_enabled was_active was_masked count=0
+  local line base was_enabled was_active was_masked count=0 errors=0 unit_error
   [ -f "$record" ] || ccdc_die "no revert record at $record; nothing was disabled by this tool"
 
   # Reverse order, so units restored last were disabled first. Matters whenever
@@ -381,21 +411,33 @@ do_revert() {
     [ -n "${base:-}" ] || continue
     # The record stores the full unit id, suffix included, because a socket and
     # its service are two separate things to put back.
-    [ "$was_masked" = 0 ] && ccdc_action systemctl unmask "$base" >/dev/null 2>&1
-    [ "$was_enabled" = 1 ] && ccdc_action systemctl enable "$base" >/dev/null 2>&1
-    [ "$was_active" = 1 ] && ccdc_action systemctl start "$base" >/dev/null 2>&1
-    printf '    restored: %s (enabled=%s active=%s)\n' "$base" "$was_enabled" "$was_active"
-    ccdc_is_dry_run || ccdc_append_log "$log" "reverted unit=$base"
-    count=$((count + 1))
+    unit_error=0
+    if [ "$was_masked" = 0 ] && ! ccdc_action systemctl unmask "$base" >/dev/null 2>&1; then unit_error=1; fi
+    if [ "$was_enabled" = 1 ] && ! ccdc_action systemctl enable "$base" >/dev/null 2>&1; then unit_error=1; fi
+    if [ "$was_active" = 1 ] && ! ccdc_action systemctl start "$base" >/dev/null 2>&1; then unit_error=1; fi
+    if [ "$unit_error" -eq 0 ]; then
+      printf '    restored: %s (enabled=%s active=%s)\n' "$base" "$was_enabled" "$was_active"
+      ccdc_is_dry_run || ccdc_append_log "$log" "reverted unit=$base"
+      count=$((count + 1))
+    else
+      printf '    FAILED:   %s (revert record retained)\n' "$base"
+      ccdc_is_dry_run || ccdc_append_log "$log" "revert_failed unit=$base"
+      errors=$((errors + 1))
+    fi
   done <<EOF
 $(tac "$record" 2>/dev/null || tail -r "$record" 2>/dev/null || cat "$record")
 EOF
 
   if ccdc_is_dry_run; then
-    ccdc_info "dry run: $count unit(s) would be restored. Re-run with --apply."
+    ccdc_info "dry run: $count unit(s) would be restored, $errors command(s) failed. Re-run with --apply."
     return 0
   fi
-  ccdc_action mv "$record" "$record.reverted.$(ccdc_now)"
+  if [ "$errors" -gt 0 ]; then
+    ccdc_warn "$errors unit(s) did not restore; record retained at $record"
+    return 1
+  fi
+  mv "$record" "$record.reverted.$(ccdc_now)" \
+    || ccdc_die "services restored but the evidence record could not be archived: $record"
   ccdc_info "$count unit(s) restored; the record was kept as evidence, not deleted"
 }
 

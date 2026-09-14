@@ -155,7 +155,8 @@ target and a place to hide persistence.
 It refuses anything scored, anything of yours (sshd, cron, DNS, logging, the
 firewall, this kit's own units) and anything that merely looks scored - web,
 database, FTP, Samba, mail, DNS. If the packet says one of those really is
-disposable, disable it by hand; the refusal is deliberate.
+disposable, name it in `CCDC_ACK_DISABLE_LIKELY_SCORED`; that second explicit
+acknowledgement is different from protecting it.
 
 ### 2e. Then, only the exploitable
 
@@ -167,17 +168,19 @@ things. Patch what has a public exploit and is reachable.
 ## 3. Arm the standing defence — one command
 
 This is the machinery that works while your attention is on injects. One
-command takes a restore point, lays the tripwires, and starts the keep-alive:
+command takes a restore point, lays tripwires, starts the guardian/watchdog,
+and installs the combined sentry/change detector as a supervised service:
 
 ```
 [ ] ./linux/arm.sh --config /tmp/ccdc-linux.env               # dry run first
 [ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
 ```
 
-That runs `backup.sh`, `canary.sh --deploy`, and `guardian.sh --install` — and
-guardian is what starts the watchdog, as a supervised unit. **Do not run
-`watchdog.sh` by hand**: started from your shell it dies when your SSH session
-drops, which is exactly when you need it.
+That runs `backup.sh`, `canary.sh --deploy`, `guardian.sh --install`, and
+`sentry.sh --install`. Guardian starts the watchdog; sentry runs ranked triage
+plus the broader canary/hunt/recon sweep. Both are supervised. **Do not run
+either loop by hand**: a foreground loop consumes your only terminal and dies
+when your SSH session drops, which is exactly when you need it.
 
 It deliberately does NOT touch the firewall (§2b) or services (§2d). Both need
 a human confirming against the packet.
@@ -222,23 +225,29 @@ seconds of scored downtime, because chain B was still there.
 
 ---
 
-## 4. The sentry — it hunts so you can write injects
+## 4. The sentry — check in, do not babysit it
 
-Start this and stop hunting. It runs `triage.sh` every pass, reports only what
-is NEW, works out the exact fix, and queues it for you.
+`arm.sh` already started this under systemd. It refreshes ranked findings every
+minute, performs the larger change sweep every two minutes, and queues only
+actions justified by what is wrong **now**.
 
 ```
-[ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --interval 60
+[ ] systemctl is-active ccdc-sentry.service
 ```
 
 Then, between injects — this is your whole monitoring loop:
 
 ```
-[ ] cat /var/tmp/ccdc-evidence/ALERTS
+[ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply
+[ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --ack   # after reviewing change events
 ```
 
-It rings the terminal bell on a new RED and never acts without `--approve`.
+It never acts without `--approve`. Approval is not a replay of an old command:
+it takes the lock, re-runs triage, rebuilds the queue, and re-checks the current
+packet protection lists immediately before calling a fixed remediation. Queue
+records contain data, not shell text. Everything removed is preserved in a
+unique evidence directory first.
 Two things it deliberately leaves to you, because only the packet can settle
 them: which SSH keys are legitimate, and which `NOPASSWD` sudo rules are yours.
 They appear in ALERTS under "needs your judgement".
@@ -254,20 +263,21 @@ touches, never what it tells you.
 
 ---
 
-## 4b. The change-detection loop — what you watch
+## 4b. The change-detection sweep — already part of sentry
 
 The kit collects well and alerts not at all: canary trips go to a log nobody
 reads and `hunt.sh` writes a 124K report you cannot re-read every few minutes.
-`watch.sh` closes that gap. It runs canary + hunt + recon and prints **only
-what changed since the last pass**.
+`watch.sh` closes that gap. It runs canary + hunt + recon and reports **only
+what changed since the last pass**. Sentry invokes it automatically and keeps
+events in `ALERTS` until you acknowledge them.
 
 ```
-[ ] ./linux/watch.sh --config /tmp/ccdc-linux.env --interval 120
+[ ] sudo ./linux/watch.sh --config /tmp/ccdc-linux.env --once   # diagnostic on demand only
 ```
 
-Read-only, so it is safe to leave running and safe to start when you are
-already panicking. A quiet pass prints one line. A new user, a new cron entry,
-a new listener or a canary trip prints a diff — that is your §7 trigger.
+It changes no system configuration, but it writes/rotates evidence snapshots.
+A quiet pass prints one line. A new user, cron entry, listener, or canary trip
+is retained by sentry — that is your §7 trigger.
 
 What it **cannot** see: whether the scorer can reach your service. Nothing on
 the box can. Check that from off the box yourself.
@@ -365,21 +375,21 @@ it.
 BEFORE : packet -> config -> snapshot -> access confirmed
 SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; who ; ss -tulpn ; keys
 HARDEN : creds -> fw.sh(+confirm) -> ssh -> services.sh   [verify each]
-ARM    : sudo arm.sh --apply      (backup + canaries + guardian + watchdog)
-SENTRY : sudo sentry.sh --interval 60   (detects + queues fixes)
-SIGNOFF: cat ALERTS ; sentry.sh --approve --apply
+ARM    : sudo arm.sh --apply      (backup + canary + guardian/watchdog + sentry)
+STATUS : sudo sentry.sh --status  (current triage + retained change events)
+SIGNOFF: sudo sentry.sh --approve --apply ; --ack reviewed change events
 INJECT : triage deadline+deliverables ; use responses/ ; screenshot as you go
 HIT?   : identify -> contain(snapshot!) -> eradicate(+way back in) -> recover
 ALWAYS : verify the scored service FROM THE NETWORK after every change
 ```
 
-Three commands are the whole standing defence. If you remember nothing else:
+Four returning commands are the whole operating loop. If you remember nothing else:
 
 ```
 sudo ./linux/triage.sh   --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh      --config /tmp/ccdc-linux.env --apply
      ./linux/services.sh --config /tmp/ccdc-linux.env --review
-sudo ./linux/sentry.sh  --config /tmp/ccdc-linux.env --interval 60
+sudo ./linux/sentry.sh   --config /tmp/ccdc-linux.env --status
 ```
 
 Two things no tool here can do for you: check the scored service from off the

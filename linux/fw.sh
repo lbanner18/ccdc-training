@@ -24,25 +24,76 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 ccdc_load_config "$config"
+if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 if [ "$apply" -eq 1 ] || [ "$confirm" -eq 1 ] || [ "$rollback" -eq 1 ]; then
   ccdc_require_root
 fi
 
-if [ "$(id -u)" -eq 0 ]; then
-  state_dir=/run/ccdc-firewall
-else
-  state_dir="${TMPDIR:-/tmp}/ccdc-firewall"
-fi
+# One state location for every caller. A non-root --status must not silently
+# inspect /tmp while the real root apply has a rollback armed under /run.
+state_dir=/run/ccdc-firewall
 snapshot="$state_dir/rules.snapshot"
 pid_file="$state_dir/rollback.handle"
 rollback_script="$state_dir/rollback.sh"
 rollback_unit=ccdc-fw-rollback
-mkdir -p "$state_dir" || ccdc_die "cannot create firewall state directory: $state_dir"
-chmod 0700 "$state_dir" 2>/dev/null || ccdc_die "cannot secure firewall state directory: $state_dir"
+ccdc_validate_state_dir "$state_dir" "firewall state directory"
+if [ "$apply" -eq 1 ]; then
+  mkdir -p "$state_dir" || ccdc_die "cannot create firewall state directory: $state_dir"
+  chmod 0700 "$state_dir" 2>/dev/null || ccdc_die "cannot secure firewall state directory: $state_dir"
+elif [ "$confirm" -eq 1 ] || [ "$rollback" -eq 1 ]; then
+  [ -d "$state_dir" ] || ccdc_die "no firewall state at $state_dir; nothing is pending"
+fi
 
 backend=${CCDC_FIREWALL_BACKEND:-auto}
 if [ "$backend" = auto ]; then
   if ccdc_have nft; then backend=nft; elif ccdc_have iptables-save; then backend=iptables; else ccdc_die "no supported firewall backend"; fi
+fi
+case "$backend" in nft|iptables) ;; *) ccdc_die "CCDC_FIREWALL_BACKEND must be auto, nft, or iptables" ;; esac
+
+allow_outbound=${CCDC_ALLOW_OUTBOUND:-1}
+case "$allow_outbound" in 0|1) ;; *) ccdc_die "CCDC_ALLOW_OUTBOUND must be 0 or 1" ;; esac
+ack_managed=${CCDC_ACK_REPLACE_MANAGED_FIREWALL:-0}
+case "$ack_managed" in 0|1) ;; *) ccdc_die "CCDC_ACK_REPLACE_MANAGED_FIREWALL must be 0 or 1" ;; esac
+ack_unmanaged_ipv6=${CCDC_ACK_IPTABLES_WITHOUT_IPV6:-0}
+case "$ack_unmanaged_ipv6" in 0|1) ;; *) ccdc_die "CCDC_ACK_IPTABLES_WITHOUT_IPV6 must be 0 or 1" ;; esac
+for port in ${CCDC_ALLOWED_TCP_PORTS:-} ${CCDC_ALLOWED_UDP_PORTS:-}; do
+  case "$port" in ''|*[!0-9]*) ccdc_die "firewall port must be an integer: $port" ;; esac
+  [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || ccdc_die "firewall port out of range: $port"
+done
+
+# iptables-restore only manages the IPv4 ruleset.  Treating that as a complete
+# firewall while the IPv6 stack is present leaves a second, unchanged ingress
+# path.  nft is the safe default; an operator can explicitly accept the gap on
+# a legacy target after checking that IPv6 is not reachable.
+ipv6_active=0
+if [ -r /proc/net/if_inet6 ] && grep -q '[^[:space:]]' /proc/net/if_inet6 2>/dev/null; then
+  ipv6_active=1
+fi
+if [ "$backend" = iptables ] && [ "$ipv6_active" -eq 1 ]; then
+  ccdc_warn "IPv6 is active, but the iptables backend only replaces IPv4 rules"
+  if [ "$apply" -eq 1 ] && [ "$ack_unmanaged_ipv6" -ne 1 ]; then
+    ccdc_die "use nft, disable IPv6 deliberately, or set CCDC_ACK_IPTABLES_WITHOUT_IPV6=1 after accepting unmanaged IPv6"
+  fi
+fi
+for source in ${CCDC_ALLOWED_SOURCES:-}; do
+  case "$source" in *[!0-9A-Fa-f:./]*) ccdc_die "allowed source contains unsupported characters: $source" ;; esac
+  if [ "$backend" = iptables ]; then
+    case "$source" in *:*) ccdc_die "iptables backend does not manage IPv6 source $source; use nft or separate ip6tables rules" ;; esac
+  fi
+done
+
+managed_services=''
+if ccdc_have systemctl; then
+  for managed_service in firewalld ufw docker; do
+    systemctl is-active --quiet "$managed_service.service" 2>/dev/null \
+      && managed_services="$managed_services $managed_service"
+  done
+fi
+if [ -n "$managed_services" ]; then
+  ccdc_warn "active firewall/container manager(s):$managed_services; replacing rules can erase their policy/NAT state"
+  if [ "$apply" -eq 1 ] && [ "$ack_managed" -ne 1 ]; then
+    ccdc_die "set CCDC_ACK_REPLACE_MANAGED_FIREWALL=1 only after deciding to replace those managed rules"
+  fi
 fi
 
 # Capture the current rules in a form that can actually be restored.
@@ -121,6 +172,9 @@ rollback_armed() {
 }
 
 if [ "$status" -eq 1 ]; then
+  if [ -d "$state_dir" ] && [ ! -x "$state_dir" ]; then
+    ccdc_die "firewall state is root-private at $state_dir; re-run --status with sudo"
+  fi
   if [ -f "$pid_file" ]; then
     if rollback_armed; then
       printf 'rollback PENDING via %s\n' "$(cat "$pid_file")"
@@ -164,15 +218,20 @@ table inet ccdc {
   for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules="$rules
     udp dport $port accept"; done
   for source in ${CCDC_ALLOWED_SOURCES:-}; do
+    case "$source" in *:*) family=ip6 ;; *) family=ip ;; esac
     for port in ${CCDC_ALLOWED_TCP_PORTS:-}; do rules="$rules
-    ip saddr $source tcp dport $port accept"; done
+    $family saddr $source tcp dport $port accept"; done
     for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules="$rules
-    ip saddr $source udp dport $port accept"; done
+    $family saddr $source udp dport $port accept"; done
   done
+  # Keep IPv6 neighbor discovery and essential control errors alive. An inet
+  # table with policy drop otherwise breaks IPv6 before any scored TCP rule can
+  # help it.
   rules="$rules
+    meta nfproto ipv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
   }
   chain forward { type filter hook forward priority 0; policy drop; }"
-  if [ "${CCDC_ALLOW_OUTBOUND:-1}" -eq 0 ]; then
+  if [ "$allow_outbound" -eq 0 ]; then
     rules="$rules
   chain output { type filter hook output priority 0; policy drop;
     oifname \"lo\" accept
@@ -185,10 +244,15 @@ table inet ccdc {
   rules="$rules
 }"
 else
+  if [ "$allow_outbound" -eq 0 ]; then
+    output_policy=DROP
+  else
+    output_policy=ACCEPT
+  fi
   rules='*filter
 :INPUT DROP [0:0]
 :FORWARD DROP [0:0]
-:OUTPUT ACCEPT [0:0]
+:OUTPUT '"$output_policy"' [0:0]
 -A INPUT -i lo -j ACCEPT
 -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT'
   for port in ${CCDC_ALLOWED_TCP_PORTS:-}; do rules="$rules
@@ -201,6 +265,11 @@ else
     for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules="$rules
 -A INPUT -s $source -p udp --dport $port -j ACCEPT"; done
   done
+  if [ "$allow_outbound" -eq 0 ]; then
+    rules="$rules
+-A OUTPUT -o lo -j ACCEPT
+-A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT"
+  fi
   rules="$rules
 COMMIT"
 fi
@@ -219,6 +288,29 @@ case "$seconds" in ''|*[!0-9]*) ccdc_die "CCDC_FIREWALL_ROLLBACK_SECONDS must be
 # change. The operator must make an explicit keep/revert decision first.
 [ ! -f "$pid_file" ] \
   || ccdc_die "a firewall rollback is already pending; use --confirm or --rollback first"
+
+validate_generated_rules() {
+  case "$backend" in
+    nft)
+      printf '%s\n' "$rules" | nft --check --file - >/dev/null \
+        || return 1
+      ;;
+    iptables)
+      if iptables-restore --help 2>&1 | grep -q -- '--test'; then
+        printf '%s\n' "$rules" | iptables-restore --test >/dev/null \
+          || return 1
+      else
+        ccdc_warn "iptables-restore has no --test support; relying on the armed rollback for apply-time validation"
+      fi
+      ;;
+  esac
+}
+
+# Parse-check before snapshotting or arming a timer.  The real apply can still
+# fail because the kernel state changes, so the dead-man rollback remains
+# mandatory even after this succeeds.
+validate_generated_rules \
+  || ccdc_die "generated firewall rules failed backend validation; rules were not changed"
 
 take_snapshot || ccdc_die "could not capture a valid firewall snapshot; rules were not changed"
 

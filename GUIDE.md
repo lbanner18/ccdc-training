@@ -34,10 +34,11 @@ governs when this repo may go public) are in
 
 These are consistent across the Linux tools; a reviewer can assume them.
 
-1. **Read-only until told otherwise.** `CCDC_DRY_RUN` defaults to on. A script
-   mutates only with `--apply`, and prints what it *would* do otherwise. The
-   shared helper `ccdc_action` in [`linux/lib/common.sh`](linux/lib/common.sh)
-   enforces this.
+1. **No system mutation until told otherwise.** `CCDC_DRY_RUN` defaults to on.
+   A destructive script mutates only with `--apply`, and prints what it *would*
+   do otherwise. Detection commands do write private evidence/state, but do not
+   alter system configuration. The shared helper `ccdc_action` in
+   [`linux/lib/common.sh`](linux/lib/common.sh) enforces the apply boundary.
 2. **Config-driven, nothing box-specific committed.** All box specifics live in
    a config file (`config/example.env` is the template) kept *outside* the
    repo. `*.env` and `evidence/` are gitignored. The repo goes public on
@@ -68,8 +69,9 @@ These are consistent across the Linux tools; a reviewer can assume them.
 
 | Script | Mutates? | What it does |
 |---|---|---|
-| `arm.sh` | `--apply` only | The tier-1 sequence in one command: preflight, `backup.sh`, `canary.sh --deploy`, `guardian.sh --install` (which starts the watchdog). Deliberately does NOT touch the firewall or services — both need a human confirming against the packet. Preflight catches a non-writable evidence dir, a scored service already down before you arm on top of it, and `CCDC_HTTP_CHECKS` pointing at localhost. |
-| `watch.sh` | no | The detection loop, and the answer to "the kit collects well and alerts not at all". Runs `canary --check` + `hunt.sh` + `recon.sh` each pass and prints **only what changed** since the last one. Normalises away its own evidence, its own processes, and systemd's relative timer times, all of which otherwise bury the one line that matters. |
+| `arm.sh` | `--apply` only | The tier-1 sequence in one command: preflight, backup, canaries, guardian/watchdog, and supervised sentry. It exits non-zero if any layer fails. Deliberately does NOT touch the firewall or services — both need a human confirming against the packet. |
+| `sentry.sh` | install/uninstall and approved actions only | Installs as a root systemd service, refreshes triage every minute, invokes the broader change sweep every two minutes, and maintains `ALERTS`. Its queue is structured data, rebuilt from current findings; approval re-runs detection and protection checks rather than replaying stored shell. Evidence is captured before each action. |
+| `watch.sh` | evidence only | The broader sweep behind sentry. Runs `canary --check` + `hunt.sh` + `recon.sh` and reports only changes. It writes/rotates evidence, returns 3 for an alert and 4 for detector failure, and can still run once for diagnosis. |
 | `services.sh` | `--disable`/`--revert` only | Attack-surface reduction. `--review` (default, read-only) sorts everything enabled or running into PROTECTED / LIKELY SCORED / CANDIDATES / UNCLASSIFIED with listening ports attached; `--disable` acts **only** on `CCDC_DISABLE_SERVICES`, which you write yourself. PROTECTED is computed from your config, so it covers this kit's own units, cron, auditd and logging. Handles socket activation (disabling `cups.service` while `cups.socket` lives is not disabling cups). Every change recorded and reversible. |
 | `recon.sh` | no | Baseline evidence snapshot: system, accounts, UID-0, sudoers, SSH config + authorized_keys, cron/timers, listeners, SUID/caps, recent /etc changes, firewall. Writes a hashed evidence dir. |
 | `hunt.sh` | no | Persistence sweep: cron/at, systemd units+timers, startup files, temp-dir executables, deleted-exe mappings, web shells, dpkg/rpm integrity, SUID/caps, and (new) per-user rc files, user-level systemd units, LD_PRELOAD injection, kernel modules, immutable-flag backdoors. |
@@ -80,18 +82,41 @@ These are consistent across the Linux tools; a reviewer can assume them.
 | `backup.sh` | `--apply` only | Explicit-path backup, checksum, diff, and guarded restore. |
 | `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. Manifest-tracked; repairs tampered artifacts and systemd drop-in overrides from an independent `.repair` source tree; disarm sentinel makes `--uninstall` exact. Each layer can be named independently, and `CCDC_GUARDIAN_STATE_DIR` lets N fully independent chains run side by side. |
 
-`recon.sh`, `hunt.sh` and `watch.sh` are safe to run any time. Everything else
-is dry-run first, `--apply` second, verify third.
+`recon.sh`, `hunt.sh`, triage, and watch change no system configuration, but
+they write evidence. Everything destructive is dry-run first, `--apply`
+second, off-box verification third.
 
 **Start here, in this order:** `recon.sh` and `hunt.sh` to see the box, then
-`arm.sh --apply` to arm the standing defence, then `watch.sh` running in a
-window. `services.sh --review` and `fw.sh` are the two deliberate judgement
-calls you make with the packet in front of you.
+`arm.sh --apply` to arm the standing defence. Sentry and watch now run under
+systemd, so the only recurring operator command is `sentry.sh --status`, plus
+approval when warranted. `services.sh --review` and `fw.sh` remain deliberate
+packet-driven judgement calls.
 
 **Do not run `watchdog.sh` by hand.** `guardian.sh` installs it as a supervised
 unit; started from a shell it dies with your SSH session. The one knob worth
 setting before anything else is `CCDC_WATCHDOG_INTERVAL="5"` — your mean outage
 is roughly half of it, measured at 57s of scored downtime at 60 versus 6s at 5.
+
+### sentry.sh in more detail
+
+`arm.sh` installs a private copy of the Linux tools and config under
+`CCDC_SENTRY_DIR`, then starts `CCDC_SENTRY_NAME.service`. The queue contains
+only `severity|check|subject`; it never contains a command to feed to `sh -c`.
+On approval, sentry takes a singleton lock, generates a fresh findings file,
+rebuilds the queue, and checks the current allow/protect lists again. A finding
+that disappeared, or a service newly added to the protect list, cannot be acted
+on from stale state. Fixed action functions pass every subject as a quoted
+argument and refuse ambiguous machine records.
+
+The larger canary/hunt/recon sweep feeds the same `ALERTS` file. Change events
+stay there until `sentry.sh --ack`; underlying evidence is retained. A triage
+failure clears the actionable queue and produces a loud monitor-health entry
+instead of silently accepting an old findings file.
+
+Edit the external source config, then rerun `arm.sh --apply` to deploy changes.
+Never hand-edit either installed config copy: guardian is intentionally
+hash-pinned and fails closed, while independently edited copies can leave two
+defensive layers using different packet assumptions.
 
 ### canary.sh in more detail
 
@@ -131,7 +156,7 @@ sure the watchdog is running and recreates any layer that has gone missing.
 Killing one is pointless; killing two is temporary. Removing all three inside
 one interval works — that is the documented limit, not a bug.
 
-Four design points worth understanding:
+Five design points worth understanding:
 
 1. **The payload is copied twice, and that matters.** `--install` puts
    `guardian.sh`, `watchdog.sh`, `lib/common.sh` and your config in
@@ -170,10 +195,10 @@ Four design points worth understanding:
    leaves the unit file byte-identical, so any hash check of the fragment sees
    nothing wrong while systemd merges the override and runs the attacker's
    command as root on the next start. The guardian checks the *effective* unit
-   (`systemctl show -p DropInPaths`), quarantines any override under
-   `/etc/systemd/system`, `/run/systemd/system`, the `.control` variants and
-   `/run/systemd/transient`, and restarts the affected unit afterwards. Drill
-   ATTACK 5 exercises exactly this and asserts the injected command never ran.
+   (`systemctl show -p DropInPaths`), quarantines overrides from the standard
+   administrator, runtime, generator, transient, `/usr/local`, vendor, and
+   dynamically reported paths, and restarts the affected unit afterwards.
+   Drill ATTACK 5 exercises this and asserts the injected command never ran.
 4. **The disarm sentinel makes removal stick.** `--uninstall` writes the
    sentinel *first*, then tears down; any tick that fires mid-teardown sees it
    and removes its own layer instead of helpfully rebuilding everything. Same
@@ -225,7 +250,8 @@ how the defensive tools get scored against ground truth.
 |---|---|
 | `plant.sh` | Plants 11 realistic footholds on a **lab VM you own**, every one tagged `RT_LAB_PLANT`, and prints the ground-truth list. `--clean` removes exactly what it planted. Standard CCDC red-team moves, nothing novel or weaponized. |
 | `score.sh` | Greps the newest evidence directory for each planted artifact's signature and prints CAUGHT/MISSED per technique. |
-| `drill.sh` | The full automated loop, as root: arm → plant → detect → eradicate → five guardian attacks → uninstall, with a PASS/FAIL assertion at every step. |
+| `drill.sh` | The full destructive loop, as root: arm → plant → detect → eradicate → six guardian attacks → uninstall, with a PASS/FAIL assertion at every step. It exits non-zero on any failed assertion and has a safe `--self-test`. |
+| `self-test.sh` | Fast non-root entry point: syntax-checks every shell script, tests guardian name/layout resolution and exact process matching, then runs sentry queue/stale-approval/injection regressions in a user-namespace sandbox. |
 
 ### What plant.sh lands
 
@@ -236,8 +262,8 @@ A rogue user (`rtsvc`), a sudoers `NOPASSWD` backdoor, an extra root SSH key, an
 
 ### What drill.sh asserts
 
-Read [`redteam/drill.sh`](redteam/drill.sh) — it is ~200 lines and the
-assertions are the interesting part, not the plumbing.
+Read [`redteam/drill.sh`](redteam/drill.sh). The assertions are the interesting
+part, not the plumbing.
 
 | Phase | Assertions |
 |---|---|
@@ -250,7 +276,9 @@ assertions are the interesting part, not the plumbing.
 
 The six attacks, which are the part worth reviewing hardest:
 
-1. **`pkill -f watchdog.sh`** → comes back via `Restart=always`.
+1. **Kill the configured watchdog payload by exact argv match** → it comes back
+   via `Restart=always` under a new PID. The assertion first proves the intended
+   process was actually found and killed.
 2. **`systemctl stop scored-web`** → the watchdog restores it within an interval.
 3. **Delete layer 2 and layer 3** → a surviving layer rebuilds both.
 4. **Backdoor a unit** (append `ExecStartPost=`) → next tick quarantines a copy
@@ -355,8 +383,9 @@ what keeps even a hidden guardian legible to its owner.
 | `guardian.sh` file reconciliation (install → delete layers → tick rebuilds → tamper → quarantine+repair → sentinel → uninstall leaves zero artifacts) | run against a sandbox with `/etc` redirected and `systemctl` stubbed; all passed |
 | Generated systemd units | validated by the real `systemd-analyze verify` (4/4 clean) |
 | `guardian.sh` degradation (no systemd → cron-only; no systemd *and* no cron.d → refuses) | run, warns correctly |
-| `guardian.sh` against real systemd units as root | **run on the lab VM** via `redteam/drill.sh` — currently **57/57**, including the drop-in attack |
-| Full automated drill (plant → detect → eradicate → 6 guardian attacks → uninstall) | run end to end on the lab VM as root; VM reverted to snapshot afterwards |
+| Prior guardian version against real systemd units as root | **57/57 on the lab VM**, including the drop-in attack; VM reverted afterwards |
+| Current full destructive drill after manifest/collision/process-identity hardening | **needs one fresh root lab run**. The harness now exits non-zero on failure and derives every configured payload/unit name; do not inherit the old 57/57 claim for changed code. |
+| Fast non-root regression suite | `redteam/self-test.sh`: syntax clean; guardian helper tests **22/22**; sentry structured-queue/stale-approval tests **13/13** |
 | `fw.sh` dead man's switch, **rewritten** arm-before-apply path | **retested on the lab VM 2026-09-13**, five cases: dry-run changes nothing; safe apply arms a real systemd timer; `--status` distinguishes armed from broken; a second apply while one is pending is refused; `--confirm` keeps rules and disarms |
 | `fw.sh` **real lockout** (port 22 removed from the allow list) | **passed** — a new SSH connection was refused, the switch fired unattended, and access was restored ~60s later with the baseline ruleset intact and the scored service still up |
 | `watchdog.sh` state-change logging | **lab VM** — 60s quiet went from ~84 log lines to 6, and an incident is 4 lines. Four defects found and fixed doing it, listed in the commit |
@@ -440,6 +469,24 @@ the unit file is gone and the daemon is reloaded. Disk was clean; systemd was
 not — a ghost of your own tooling in the first place you look during an
 incident. Fixed with an explicit `reset-failed` pass after removal.
 
+### Automation hardening pass (2026-09-14)
+
+The next review found two more classes of false assurance. Guardian manifest
+records are `kind|path|hash`, but uninstall read only two fields, appending the
+hash to the removal path; the expected-name fallback happened to hide that bug
+in the original drill. It now parses all three fields, allowlists every removal
+against the installed layout, and refuses install/uninstall when a changed
+name or directory would orphan the old layout. Fresh installation also refuses
+unit collisions found anywhere in systemd's load path, not just `/etc`.
+
+The same pass replaced foreground sentry with a supervised service and removed
+its `sh -c` approval path. The safe regression suite specifically proves that
+a cron filename containing shell metacharacters is removed as one literal path,
+that a newly protected unit is not acted on from an old queue, that disappeared
+findings can alert again, and that triage failure clears the queue loudly.
+These paths have sandbox coverage; the changed root/systemd lifecycle still
+needs the fresh VM drill listed in the test table.
+
 ---
 
 ## What to review
@@ -519,10 +566,9 @@ about. In rough order of how much a wrong answer would cost:
    Ubuntu VM, in one configuration, with one name. Try a different
    `CCDC_GUARDIAN_NAME`, an interrupted uninstall, or a box where
    `/usr/local/lib` is not writable.
-2. **"Tampering is repaired, not just detected."** True for artifacts in the
-   manifest. An attacker who adds a *new* file the guardian never wrote — a
-   drop-in at `/etc/systemd/system/<name>.service.d/override.conf`, for
-   instance — is not covered at all. Is that the right call, or a hole?
+2. **"Tampering is repaired, not just detected."** Unit fragments and newly
+   introduced effective drop-ins are covered, including vendor/dynamic paths.
+   Try a generator-created override or a load path this implementation omitted.
 3. **"The layers rebuild each other."** Proven on systemd. The cron-only path
    (no systemd) has never run anywhere.
 4. **"Verify from the scorer's position."** The drill checks

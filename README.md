@@ -16,34 +16,46 @@ cp config/example.env /tmp/ccdc-linux.env
 ./linux/recon.sh --config /tmp/ccdc-linux.env
 ./linux/hunt.sh  --config /tmp/ccdc-linux.env
 
-# 2. Arm the standing defence: backup + canaries + guardian, and guardian
-#    starts the watchdog as a supervised unit. Dry run first, as always.
+# 2. Arm everything persistent: backup + canaries + guardian/watchdog + sentry.
+#    Both monitoring loops become supervised services; your terminal stays free.
 ./linux/arm.sh      --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
 
-# 3. Start the sentry. It hunts so you can write injects.
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --interval 60
+# 3. Check in between injects (both commands return immediately).
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply
 ```
 
-The sentry runs triage on a loop, notices only what is NEW, and works out the
-exact remediation. It never acts on its own — findings queue for your sign-off:
+The supervised sentry keeps a current ranked queue, folds in canary and broader
+host-change events, and works out the exact remediation. It never acts on its
+own — findings queue for your sign-off:
 
 ```bash
-cat /var/tmp/ccdc-evidence/ALERTS                                  # what is waiting
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply   # do it
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status             # what is waiting
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply    # do it
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --ack                # reviewed change events
 ```
 
-That split is the point: detection and diagnosis are automatic, the decision is
-yours, and the typing is not. It **refuses to act at all** until
+That split is the point: detection, diagnosis, evidence capture, and typing are
+automatic; the destructive decision is yours. Approval first re-runs triage and
+re-evaluates the current protection lists, so a stale queue cannot act after the
+box or config changes. It **refuses to act at all** until
 `CCDC_ALLOWED_USERS` and `CCDC_SYSTEMD_SERVICES` are filled in from the packet —
 an empty protect list does not mean nothing is protected, it means nobody has
 told the tool what is scored.
 
-Every mutating tool is dry-run by default and needs `--apply`.
+Every destructive tool is dry-run by default and needs `--apply`. Detection
+tools write evidence but do not change system configuration.
 
 Do not start `watchdog.sh` by hand — `guardian.sh` (via `arm.sh`) installs it
 as a supervised unit. Launched from a shell it dies with your SSH session,
 which is the moment you need it most.
+
+Treat the config outside the repo as the source of truth. After changing users,
+services, or checks, re-run `sudo ./linux/arm.sh --config <cfg> --apply` (or the
+individual sentry/guardian `--install --apply` commands). Never hand-edit the
+root-owned installed copies: the guardian intentionally rejects an unpinned
+config, and a manual edit can leave monitoring on different assumptions.
 
 `arm.sh` deliberately leaves two things to you, because both can take a scored
 service off the board if you get them wrong:
@@ -68,10 +80,10 @@ config/example.env       safe template; real config stays outside the repo
 linux/                    Bash tools for Linux boxes:
   arm.sh                  one command to arm the standing defence
   recon.sh hunt.sh        read-only baseline and persistence sweeps
-  sentry.sh               always-on: detect, diagnose, queue for sign-off
+  sentry.sh               supervised: detect, diagnose, current sign-off queue
   triage.sh               one-shot ranked view of what is wrong NOW
   card.sh                 read one remediation card in the terminal
-  watch.sh                detection loop; reports only what changed
+  watch.sh                detection sweep; folded into sentry, also runnable alone
   canary.sh               decoy files + auditd tripwires
   watchdog.sh             restarts a dead scored service (run via guardian)
   guardian.sh             keeps the watchdog alive against an attacker w/ root
@@ -80,6 +92,7 @@ linux/                    Bash tools for Linux boxes:
   users.sh backup.sh      accounts; restore points
   diff-evidence.sh        compare two evidence snapshots
 windows/                  PowerShell first-pass tools
+redteam/self-test.sh      fast non-root regression suite
 splunk/                   starter searches and field notes
 injects/                  memo and incident-report templates
 injects/responses/        pre-written drafts for the known injects

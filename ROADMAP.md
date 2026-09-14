@@ -23,8 +23,11 @@
   plant → detect → eradicate → guardian-survival drill.
 - Reconciling watchdog keep-alive (`linux/guardian.sh`): three layers that
   rebuild each other, manifest-tracked, tamper-repairing, disarm sentinel.
-- Automated regression drill (`redteam/drill.sh`, 57 assertions) and a scorer
-  that fails honestly (`redteam/score.sh`).
+- Automated destructive regression drill (`redteam/drill.sh`) that exits
+  non-zero on any failed assertion, plus a fast non-root `redteam/self-test.sh`.
+- Supervised sentry installed by `arm.sh`: current structured approval queue,
+  approval-time revalidation, unique pre-removal evidence, and integrated
+  canary/hunt/recon change events without occupying the operator terminal.
 - External agent review of the whole kit, plus the hardening pass it produced:
   arm-before-apply in `fw.sh`, an independent `.repair` source tree and drop-in
   defence in `guardian.sh`, collision/interruption handling in `canary.sh`,
@@ -37,18 +40,20 @@
 2. Copy `config/example.env` outside the repo and fill in only the packet's
    scored users, services, ports, and addresses.
 3. Run recon and hunt; review the evidence manually.
-4. Create a harmless local test service and verify watchdog behavior in dry-run
-   mode, then in apply mode.
-5. Test a firewall change with a short rollback window from a second SSH
+4. Run the **current** full root `redteam/drill.sh`. The prior guardian version
+   passed 57/57; manifest, collision, payload-name, and sentry changes since
+   then require a fresh result rather than inheriting that claim.
+5. Verify sentry install/restart/status/uninstall and an approved disposable
+   cron/unit action on the snapshot.
+6. Test a firewall change with a short rollback window from a second SSH
    connection. Do not use the competition box for the first test.
-6. Confirm backups can be read and restored on a disposable copy.
+7. Confirm backups can be read and restored on a disposable copy.
 
 ## Raised by the training material (2026-09-11)
 
-- **fw.sh's rollback does not work on Ubuntu 24.04.** `nft list ruleset` on a
-  clean box is empty, so the snapshot is a zero-byte file, `restore_snapshot`'s
-  `[ -s ]` test fails, and the dead man's switch never fires. Fix and then
-  deliberately lock yourself out of the lab VM to prove it.
+- ~~**fw.sh rollback on an empty Ubuntu nft ruleset.**~~ Fixed and proven with
+  a deliberate lockout; the snapshot now includes `flush ruleset` even when
+  the original ruleset is otherwise empty.
 - **Run every script under `busybox sh`.** Alpine appears in the real
   environment and has no bash.
 - **Add `firewalld` and SELinux handling.** Rocky, CentOS, and Fedora are all
@@ -74,17 +79,16 @@
   Recorded here because the pattern will recur: resilient defensive tooling and
   malware look identical to a classifier, and the operator's approval is the
   thing that separates them.
-- ~~**guardian.sh's mutating paths have never run as root**~~ — **done.**
-  `redteam/drill.sh` runs the full loop on the lab VM and is at **57/57**,
-  including a systemd drop-in attack. See the GUIDE for what the two VM rounds
-  and the external review found.
+- ~~**guardian.sh's original mutating paths had never run as root**~~ — the
+  prior version passed **57/57**, including a systemd drop-in attack. The
+  current hardening pass needs the fresh root rerun listed above.
 - ~~**fw.sh's rewritten dead man's switch is untested**~~ — **done 2026-09-13.**
   Retested on the lab VM including a real lockout: port 22 removed from the
   allow list, a new SSH connection refused, the switch fired unattended, access
   restored with the baseline ruleset intact and the scored service still up.
 - **The inject drafts have not been re-checked since the external review.**
-  Everything in `linux/` and `redteam/` has been reviewed and re-tested; the
-  review's third priority — whether each draft in `injects/responses/` actually
+  The shell code has had another review and non-root regression pass; the
+  review priority — whether each draft in `injects/responses/` actually
   answers its inject's numbered asks and cites its source honestly — was never
   reached. That is half the score and it is the least-examined part of the kit.
 
@@ -108,4 +112,3 @@
 - Print the playbook and memo template.
 - Verify every scored service from the network, not just from local service
   state.
-
