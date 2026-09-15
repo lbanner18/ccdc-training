@@ -41,6 +41,9 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== log forwarding health ==\n'
+bash "$ROOT/redteam/splunk-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== live reverse-shell detection ==\n'
 rc=0
 bash "$ROOT/redteam/triage-net-self-test.sh" || rc=$?
