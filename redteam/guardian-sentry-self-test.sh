@@ -156,6 +156,25 @@ cmp -s "$live/triage.sh" "$repair/tree/triage.sh" \
   && ok 'private sentry repair copy is independent and identical' \
   || bad 'private sentry repair copy is independent and identical'
 
+# The audit repair tool travels with the payload, so that the thing which puts
+# the audit rules back does not depend on a checkout a red team can delete.
+audit_live=/usr/local/lib/node-health/node-health-reconcile-audit.sh
+audit_repair=/usr/local/lib/node-health/.repair/node-health-reconcile-audit.sh
+[ -f "$audit_live" ] && [ -f "$audit_repair" ] \
+  && ok 'guardian installed the audit repair payload and its private copy' \
+  || bad 'guardian installed the audit repair payload and its private copy'
+grep -q "^payload|$audit_live|" "$state/guardian.manifest" \
+  && ok 'audit payload is hash-pinned in the manifest' \
+  || bad 'audit payload is hash-pinned in the manifest'
+
+# Delete it the way an attacker who found the payload directory would, and
+# confirm the next reconcile pass rebuilds it from the independent source.
+rm -f "$audit_live"
+"$guardian" --config "$config" --tick --apply >/dev/null 2>&1
+[ -f "$audit_live" ] && cmp -s "$audit_live" "$audit_repair" \
+  && ok 'a deleted audit payload is rebuilt from the private repair copy' \
+  || bad 'a deleted audit payload is rebuilt from the private repair copy'
+
 printf '#!/usr/bin/env bash\nexit 9\n' >"$live/triage.sh"
 printf '# attacker config\n' >>"$live/sentry.env"
 printf '# attacker unit\n' >>"$unit"

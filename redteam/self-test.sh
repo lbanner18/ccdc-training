@@ -32,6 +32,15 @@ fi
 printf '\n== canary and change watch ==\n'
 bash "$ROOT/redteam/canary-watch-self-test.sh" || failed=$((failed + 1))
 
+printf '\n== persistent audit rules ==\n'
+rc=0
+bash "$ROOT/redteam/audit-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - audit self-test (bwrap unavailable)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
 printf '\n== live reverse-shell detection ==\n'
 rc=0
 bash "$ROOT/redteam/triage-net-self-test.sh" || rc=$?

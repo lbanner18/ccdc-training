@@ -391,14 +391,42 @@ case "$tick_basename" in
 esac
 tick_script="$guardian_dir/$tick_basename"
 
-# These three share a directory, so identical names would silently overwrite one
+# The audit repair tool travels with the payload for the same reason watchdog.sh
+# does: the thing that restores our detection cannot depend on a checkout that a
+# red team can delete, or on a config in /tmp that a reboot clears.
+audit_basename=${CCDC_GUARDIAN_AUDIT_FILE:-$reconcile_name-audit.sh}
+case "$audit_basename" in
+  */*) ccdc_die "CCDC_GUARDIAN_AUDIT_FILE is a filename, not a path: $audit_basename" ;;
+esac
+
+# These four share a directory, so identical names would silently overwrite one
 # another and the chain would execute the wrong script. Easy to do by hand when
 # the layer names are chosen to look plausible rather than to be distinct.
 if [ "$tick_basename" = "$watchdog_basename" ] \
   || [ "$tick_basename" = "$self_basename" ] \
-  || [ "$watchdog_basename" = "$self_basename" ]; then
-  ccdc_die "payload filenames collide in $guardian_dir: $self_basename / $watchdog_basename / $tick_basename (give the watch, ticker and reconcile layers different names)"
+  || [ "$watchdog_basename" = "$self_basename" ] \
+  || [ "$audit_basename" = "$tick_basename" ] \
+  || [ "$audit_basename" = "$watchdog_basename" ] \
+  || [ "$audit_basename" = "$self_basename" ]; then
+  ccdc_die "payload filenames collide in $guardian_dir: $self_basename / $watchdog_basename / $tick_basename / $audit_basename (give the watch, ticker, reconcile and audit payloads different names)"
 fi
+
+# Whether this chain also repairs the persistent audit rules.
+#
+#   auto  repair when audit.sh is available to install (the default)
+#   1     require it; refuse to install without it
+#   0     leave audit rules alone entirely
+#
+# This is guardian's job rather than sentry's for one reason: restoring OUR OWN
+# detection to its declared state is not a change to the box's security posture,
+# so it does not need an operator's sign-off - it is the same category as
+# guardian rebuilding a deleted unit of its own. Anything that changes the
+# BOX's configuration still goes through sentry and a human.
+repair_audit_setting=${CCDC_GUARDIAN_REPAIR_AUDIT:-auto}
+case "$repair_audit_setting" in
+  0|1|auto) ;;
+  *) ccdc_die "CCDC_GUARDIAN_REPAIR_AUDIT must be 0, 1, or auto: $repair_audit_setting" ;;
+esac
 
 # Reconciliation must copy from an independent source. The files in .repair
 # are never referenced by a service ExecStart; they are the clean source used
@@ -411,6 +439,20 @@ repair_watchdog="$repair_dir/$watchdog_basename"
 repair_common="$repair_dir/lib/common.sh"
 repair_env="$repair_dir/guardian.env"
 repair_sentry_root="$repair_dir/sentry"
+audit_copy="$guardian_dir/$audit_basename"
+repair_audit_copy="$repair_dir/$audit_basename"
+
+# Resolved once, here, so install and tick answer the question the same way:
+# install asks whether audit.sh is in the checkout, a tick asks whether it made
+# it into the payload.
+audit_source="$SCRIPT_DIR/audit.sh"
+repair_audit=0
+case "$repair_audit_setting" in
+  1) repair_audit=1 ;;
+  auto)
+    if [ -f "$audit_source" ] || [ -f "$audit_copy" ]; then repair_audit=1; fi
+    ;;
+esac
 
 unit_dir=/etc/systemd/system
 svc_watch="$unit_dir/$unit_watch"
@@ -836,6 +878,10 @@ expected_artifacts() {
   printf 'repair|%s\n' "$repair_watchdog"
   printf 'repair|%s\n' "$repair_common"
   printf 'repair|%s\n' "$repair_env"
+  if [ "$repair_audit" -eq 1 ]; then
+    printf 'payload|%s\n' "$audit_copy"
+    printf 'repair|%s\n' "$repair_audit_copy"
+  fi
   if have_systemd; then
     printf 'payload|%s\n' "$tick_script"
     printf 'target|%s\n' "$svc_watch"
@@ -862,6 +908,10 @@ removal_artifacts() {
   printf 'repair|%s\n' "$repair_common"
   printf 'repair|%s\n' "$repair_env"
   printf 'repair|%s\n' "$manifest_repair"
+  # Unconditional, unlike the expected list: if the setting was turned off after
+  # an install, uninstall must still remove what the install actually put there.
+  printf 'payload|%s\n' "$audit_copy"
+  printf 'repair|%s\n' "$repair_audit_copy"
   printf 'payload|%s\n' "$tick_script"
   printf 'target|%s\n' "$svc_watch"
   printf 'layer1|%s\n' "$svc_ticker"
@@ -1376,6 +1426,18 @@ write_payload() {
     [ -n "$config" ] || { ccdc_warn "no configuration source for repair payload"; return 1; }
     copy_payload_file "$config" "$repair_env" 0600 || return 1
 
+    if [ "$repair_audit" -eq 1 ]; then
+      if [ -f "$audit_source" ]; then
+        copy_payload_file "$audit_source" "$repair_audit_copy" 0700 || return 1
+        copy_payload_file "$repair_audit_copy" "$audit_copy" 0700 || return 1
+      elif [ "$repair_audit_setting" = 1 ]; then
+        ccdc_warn "CCDC_GUARDIAN_REPAIR_AUDIT=1 but $audit_source is missing"
+        return 1
+      else
+        repair_audit=0
+      fi
+    fi
+
     copy_payload_file "$repair_guardian" "$guardian_copy" 0700 || return 1
     copy_payload_file "$repair_watchdog" "$watchdog_copy" 0700 || return 1
     copy_payload_file "$repair_common" "$common_copy" 0600 || return 1
@@ -1390,6 +1452,11 @@ write_payload() {
   repair_pair "$watchdog_copy" "$repair_watchdog" 0700 || return 1
   repair_pair "$common_copy" "$repair_common" 0600 || return 1
   repair_pair "$env_copy" "$repair_env" 0600 || return 1
+  # Only once it exists: a chain installed before audit repair was added has
+  # neither copy, and a reconcile pass must not start failing because of it.
+  if [ "$repair_audit" -eq 1 ] && { [ -f "$audit_copy" ] || [ -f "$repair_audit_copy" ]; }; then
+    repair_pair "$audit_copy" "$repair_audit_copy" 0700 || return 1
+  fi
   pinned_env_hash=$(file_hash "$repair_env")
   [ -n "$pinned_env_hash" ] || return 1
   return 0
@@ -1977,6 +2044,34 @@ do_tick() {
     || { glog "reconcile_failed phase=manifest"; return 1; }
   restart_repaired_units 0 \
     || { glog "reconcile_failed phase=effective_restart"; return 1; }
+  # Last, and deliberately unable to fail the pass. Keeping services alive is
+  # this chain's first duty; restoring audit rules is worth doing every tick but
+  # never worth aborting a reconcile over.
+  ensure_audit_rules
+  return 0
+}
+
+# Put the persistent audit rules back if they were deleted, edited, or dropped
+# from the kernel by an auditd restart.
+#
+# The work is all in audit.sh - this only decides whether to call it, and makes
+# sure a failure there stays there. It is a no-op on a box with no auditd, and
+# silent when there is nothing to repair, so it is safe on a 60-second timer.
+ensure_audit_rules() {
+  local rc=0
+  [ "$repair_audit" -eq 1 ] || return 0
+  [ -f "$audit_copy" ] || return 0
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would run %s --repair against %s\n' "$audit_copy" "$env_copy"
+    return 0
+  fi
+  /bin/bash "$audit_copy" --config "$env_copy" --repair --apply >>"$log" 2>&1 || rc=$?
+  # Exit 3 is "found something it could not fix" - reported, not a failure.
+  case "$rc" in
+    0|3) ;;
+    *) glog "audit_repair_failed rc=$rc" ;;
+  esac
+  return 0
 }
 
 layer_line() {
@@ -2015,6 +2110,13 @@ do_status() {
     printf 'sentry:   available but NOT ENROLLED (run guardian --install)\n'
   else
     printf 'sentry:   not enrolled for guardian repair\n'
+  fi
+  if [ "$repair_audit" -eq 1 ] && [ -f "$audit_copy" ]; then
+    printf 'audit:    repaired every tick (%s)\n' "$audit_copy"
+  elif [ "$repair_audit" -eq 1 ]; then
+    printf 'audit:    enabled but NOT INSTALLED (re-run guardian --install)\n'
+  else
+    printf 'audit:    not repaired by this chain\n'
   fi
   if [ -f "$sentinel" ]; then
     printf 'state:    DISARMED (sentinel present: %s)\n' "$sentinel"

@@ -38,9 +38,9 @@ decoy="$test_root/decoy"
 sensitive="$test_root/sensitive"
 config="$test_root/test.env"
 mkdir -p "$suite/lib" "$state" "$bin"
-cp -- "$ROOT/linux/canary.sh" "$ROOT/linux/watch.sh" "$suite/"
+cp -- "$ROOT/linux/canary.sh" "$ROOT/linux/watch.sh" "$ROOT/linux/audit.sh" "$suite/"
 cp -- "$ROOT/linux/lib/common.sh" "$suite/lib/common.sh"
-chmod 0755 "$suite/canary.sh" "$suite/watch.sh"
+chmod 0755 "$suite/canary.sh" "$suite/watch.sh" "$suite/audit.sh"
 printf 'decoy contents\n' >"$decoy"
 printf 'sensitive contents\n' >"$sensitive"
 
@@ -177,7 +177,11 @@ chmod 0755 "$suite/canary.sh" "$suite/hunt.sh" "$suite/recon.sh"
 printf '\tcounter packets 1 bytes 20 accept\n' >"$test_root/firewall-source"
 printf '\nCCDC_TEST_FIREWALL="%s"\n' "$test_root/firewall-source" >>"$config"
 rm -rf -- "$state/watch"
-"$suite/watch.sh" --config "$config" --once >/dev/null 2>&1
+# The baseline pass is allowed to be noisy and its exit code is not what this
+# section asserts. Wiping the watch state also wipes the audit fingerprint, so
+# the first pass afterwards reports the box's audit posture once - by design,
+# since a first-ever pass finding "no persistent audit rules" should say so.
+"$suite/watch.sh" --config "$config" --once >/dev/null 2>&1 || true
 printf '\tcounter packets 99 bytes 2048 accept\n' >"$test_root/firewall-source"
 set +e
 "$suite/watch.sh" --config "$config" --once >"$test_root/counter-only.out" 2>&1
@@ -191,6 +195,30 @@ rc=$?
 set -e
 expect_rc 3 "$rc" 'firewall policy drift raises a watch alert'
 expect_text 'recon/firewall.txt' "$test_root/firewall-drift.out" 'firewall alert names the changed evidence'
+
+# Audit health is a state, not an event. The sandbox has no auditd, so every
+# pass finds the same thing forever - which is exactly the condition that would
+# put a permanent block of red in front of the one line that means something
+# just happened.
+rm -f "$state/watch/audit.state"
+set +e
+"$suite/watch.sh" --config "$config" --once >"$test_root/audit1.out" 2>&1
+rc=$?
+set -e
+expect_rc 3 "$rc" 'audit posture is reported on the pass that first finds it'
+expect_text 'AUDIT' "$test_root/audit1.out" 'the audit alert names itself'
+set +e
+"$suite/watch.sh" --config "$config" --once >"$test_root/audit2.out" 2>&1
+rc=$?
+set -e
+expect_rc 0 "$rc" 'an unchanged audit posture is not re-reported every pass'
+if grep -q 'AUDIT/LOGGING DEGRADED' "$test_root/audit2.out"; then
+  fail=$((fail + 1))
+  printf 'not ok %s - %s\n' "$((pass + fail))" 'the second pass repeated the audit alert'
+else
+  pass=$((pass + 1))
+  printf 'ok %s - %s\n' "$((pass + fail))" 'the second pass stayed quiet about unchanged audit state'
+fi
 
 printf 'canary/watch self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

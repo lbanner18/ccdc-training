@@ -106,6 +106,29 @@ alert() {
 }
 quiet() { printf '%s  %s\n' "$(stamp)" "$1"; }
 
+# Audit health is a STATE, not an event, and this loop reports changes.
+#
+# "auditd is not installed" is true on some boxes forever. Alerting on it every
+# pass would put a permanent block of red in front of the one line that means
+# something happened, and the operator would start skipping the section that
+# also contains "the rules were just dropped from the kernel". So the finding
+# text is fingerprinted, and only a DIFFERENT set of findings is an alert.
+#
+# Returns 0 when it alerted (the caller then prints the detail), 1 when this is
+# the same condition as last pass and was deliberately kept quiet.
+audit_state="$watch_dir/audit.state"
+audit_report() {
+  local headline=$1 body=$2 signature previous=''
+  signature=$(printf '%s' "$body" | cksum | awk '{print $1":"$2}')
+  [ -f "$audit_state" ] && read -r previous <"$audit_state" 2>/dev/null
+  if [ "$signature" = "$previous" ]; then
+    return 1
+  fi
+  printf '%s\n' "$signature" >"$audit_state" 2>/dev/null || true
+  alert "$headline"
+  return 0
+}
+
 # Pick up the newest previous pass from disk, not just from this process. Without
 # this, every `--once` invocation would report "baseline captured" and never
 # diff anything -- which is exactly how you would use it from cron or between
@@ -114,6 +137,7 @@ prev_dir=$(ls -dt "$watch_dir"/pass-* 2>/dev/null | head -1 || true)
 
 one_pass() {
   local changed=0 trips=0 failed=0 rc=0 f added removed this_dir prior_dir d canary_out
+  local audit_rc=0 audit_out degraded=0
 
   # 1. canary first: it is instant and it is the highest-confidence signal on
   # the box. A moved decoy is not an anomaly to weigh, it is someone in.
@@ -126,6 +150,44 @@ one_pass() {
     failed=1
     alert "canary.sh failed this pass (exit $rc)"
     printf '%s\n' "$canary_out" | tail -n 8 | sed 's/^/      /'
+  fi
+
+  # 1b. Can this box still prove what happened to it?
+  #
+  # Every check in this loop is downstream of the box still recording events. An
+  # attacker who restarts auditd drops every runtime watch, and an attacker who
+  # truncates the logs removes the record of everything before now - and both
+  # leave a box that passes every other check in this file.
+  #
+  # Read-only here, deliberately: watch.sh never changes system configuration.
+  # Repairing the rules is guardian's job, because guardian is the layer that is
+  # allowed to restore our own tooling without asking. This one only tells you.
+  if [ ! -x "$SCRIPT_DIR/audit.sh" ]; then
+    # Worth saying out loud - a missing audit.sh means nothing is putting the
+    # watches back - but not worth declaring the whole detector unhealthy over.
+    # The distinction matters: exit 4 says "this loop cannot be trusted", and a
+    # kit deployed without one optional tool is not that.
+    audit_report "AUDIT check unavailable: $SCRIPT_DIR/audit.sh is missing" "missing" \
+      && degraded=1
+  else
+    audit_out=$("$SCRIPT_DIR/audit.sh" --config "$config" --check 2>&1) || audit_rc=$?
+    if [ "$audit_rc" -eq 3 ]; then
+      if audit_report "AUDIT/LOGGING DEGRADED" "$(printf '%s\n' "$audit_out" | grep -E '^  AUDIT')"; then
+        degraded=1
+        printf '%s\n' "$audit_out" | grep -E 'AUDIT|SHRANK|REPLACED|NOT LOADED' | sed 's/^/      /'
+      fi
+    elif [ "$audit_rc" -ne 0 ]; then
+      failed=1
+      alert "audit.sh failed this pass (exit $audit_rc)"
+      printf '%s\n' "$audit_out" | tail -n 8 | sed 's/^/      /'
+    else
+      # Recovery is a change too, and it is the one that tells you a repair
+      # worked without going to look.
+      if [ -s "$audit_state" ]; then
+        alert "AUDIT/LOGGING RECOVERED - the previous finding is gone"
+        : >"$audit_state"
+      fi
+    fi
   fi
 
   # 2. full sweep into its own directory, then diff against the last one.
@@ -177,20 +239,20 @@ EOF
     [ -n "$old" ] && rm -rf -- "$old"
   done
 
-  if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$failed" -eq 0 ]; then
-    quiet "quiet - no persistence/privilege changes, no canary trips"
+  if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$degraded" -eq 0 ]; then
+    quiet "quiet - no persistence/privilege changes, no canary trips, audit intact"
   else
     printf '\n    evidence: %s\n' "$this_dir"
     [ -n "$prior_dir" ] && printf '    compare:  ./linux/diff-evidence.sh %s %s\n' "$prior_dir" "$this_dir"
     printf '\n'
   fi
   [ "$failed" -eq 0 ] || return 4
-  [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] || return 3
+  [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$degraded" -eq 0 ] || return 3
   return 0
 }
 
 printf 'watch.sh: detection-only loop, every %ss. Ctrl-C to stop.\n' "$interval"
-printf '  watching: canary trips + persistence/privilege changes\n'
+printf '  watching: canary trips + persistence/privilege changes + audit/log health\n'
 printf '  NOT watching: whether the scorer can reach your service. Check that\n'
 printf '  from OFF the box yourself - nothing here can see it.\n\n'
 
