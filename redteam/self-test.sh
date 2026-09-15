@@ -32,6 +32,15 @@ fi
 printf '\n== canary and change watch ==\n'
 bash "$ROOT/redteam/canary-watch-self-test.sh" || failed=$((failed + 1))
 
+printf '\n== live reverse-shell detection ==\n'
+rc=0
+bash "$ROOT/redteam/triage-net-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - network detection test (no python3, ss, or non-loopback address)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
 printf '\n== sentry queue ==\n'
 rc=0
 bash "$ROOT/redteam/sentry-self-test.sh" || rc=$?

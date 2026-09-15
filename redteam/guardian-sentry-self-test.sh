@@ -19,7 +19,7 @@ cleanup() { rm -rf -- "$test_root"; }
 trap cleanup EXIT INT TERM HUP
 
 mkdir -p "$test_root/suite/lib" "$test_root/state" "$test_root/systemd" \
-  "$test_root/local-lib/ccdc-sentry/lib" "$test_root/bin"
+  "$test_root/cron" "$test_root/local-lib/ccdc-sentry/lib" "$test_root/bin"
 : >"$test_root/null"
 chmod 0666 "$test_root/null"
 cp -a -- "$ROOT/linux/." "$test_root/suite/"
@@ -226,6 +226,7 @@ if ! bwrap --die-with-parent --unshare-user --uid 0 --gid 0 --unshare-pid \
     --bind "$test_root" "$test_root" \
     --bind "$test_root/null" /dev/null \
     --bind "$test_root/systemd" /etc/systemd/system \
+    --bind "$test_root/cron" /etc/cron.d \
     --bind "$test_root/local-lib" /usr/local/lib \
     /bin/bash "$test_root/runner.sh" "$test_root"; then
   printf 'guardian/sentry self-test failed\n' >&2

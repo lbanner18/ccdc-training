@@ -644,6 +644,71 @@ kill anything it started — check `ps -ef` for the child it spawned.
 
 ---
 
+## CARD 12 — a shell or interpreter is holding a network connection
+
+`RED  process(es) on the network that should not be on the network`
+
+This is the card for the payload that never touched the disk. Every other card
+starts from a file; this one starts from a socket, because that is the only
+place a memory-only reverse shell exists.
+
+### Find it yourself
+
+```bash
+# who is holding a connection OUT of this box? (root, for the process column)
+sudo ss -tunapH | grep ESTAB
+
+# the same question, narrowed to the shape that is almost never innocent
+sudo ss -tunap | grep -E 'bash|sh,|python|perl|nc|ncat|socat'
+
+# for any PID it names: what IS it?
+sudo ls -l /proc/<PID>/exe          # "(deleted)" here is its own answer
+```
+
+The port is not the finding. `443` is allowed on almost every box, which is
+exactly why the payload uses it. **The finding is who is on the end of it.**
+
+```bash
+P=1234                             # <- the PID triage printed
+
+# 1. FREEZE IT. Not kill - freeze. A stopped process keeps its memory, its
+#    sockets and its file descriptors, and stops taking orders at the same time.
+sudo kill -STOP $P
+
+# 2. Now take everything, while it still exists.
+sudo mkdir -p /var/tmp/case-$P
+sudo cp "/proc/$P/exe" "/var/tmp/case-$P/exe"     # works even when deleted
+sudo tr '\0' ' ' < /proc/$P/cmdline > /var/tmp/case-$P/cmdline; echo
+sudo ls -l /proc/$P/cwd /proc/$P/fd > /var/tmp/case-$P/fds
+sudo ss -tunap | grep "pid=$P"    > /var/tmp/case-$P/sockets
+sudo cat /proc/$P/status          > /var/tmp/case-$P/status
+
+# 3. THE WAY BACK IN — do this BEFORE you kill it. The parent is the answer.
+ps -o pid,ppid,user,lstart,cmd -p $P $(ps -o ppid= -p $P)
+#    ppid 1 means its real parent already exited: something SCHEDULED it.
+#    Work CARD 3 (cron) and CARD 4 (units) before you kill this.
+
+# 4. Kill it only once you know what starts it.
+sudo kill -9 $P
+
+# 5. Verify the channel is actually gone, not just this one process.
+sudo ss -tunap | grep -v 127.0.0.1
+```
+
+**Trap:** killing the shell and not the scheduler is the most common way to
+spend an event fighting the same implant. If it returns, you did step 3 too
+late — the parent is gone with it, and you are back to searching files.
+
+**Trap:** `AMBER interpreter(s) serving a port the packet DOES account for` is
+a different thing. A scored web app really can be Python or PHP, and killing it
+is downtime you caused. Confirm it against the packet; do not reflex-kill it.
+
+**If the peer address is one you do not recognise,** write it down with the
+timestamp before you clean up. The address and the time are what the
+incident-report inject is asking for, and they are gone the moment you kill it.
+
+---
+
 ## After any remediation — the loop that closes it
 
 ```bash

@@ -480,6 +480,12 @@ write_alerts() {
             printf '                 held: protected/invalid account or unsafe subject.\n' ;;
           unit|unittmp|unitdeep)
             printf '                 held: protected unit or unsafe/non-current path.\n' ;;
+          netproc)
+            # Never automated, and not because it is hard to automate. The
+            # subject is a live process: its evidence lives only in memory, a
+            # PID is reused the moment it exits, and killing the shell before
+            # finding its parent loses the way back in. CARD 12 is the order.
+            printf '                 held: a LIVE process - freeze and capture it before killing it (CARD 12).\n' ;;
           *) printf '                 held: this finding needs judgement or is not safely automatable.\n' ;;
         esac
         printf '\n'
