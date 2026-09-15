@@ -41,6 +41,15 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== ssh policy and rollback ==\n'
+rc=0
+bash "$ROOT/redteam/sshd-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - sshd self-test (bwrap unavailable)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
 printf '\n== log forwarding health ==\n'
 bash "$ROOT/redteam/splunk-self-test.sh" || failed=$((failed + 1))
 
