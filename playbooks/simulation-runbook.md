@@ -35,7 +35,8 @@ memory. Do it under a timer — the tryout clock is the real adversary.
 [ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline BEFORE plant
 [ ] Note the evidence path. This is your known-good picture.
 [ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
-    # backup + canaries + guardian/watchdog + supervised sentry/change sweep.
+    # backup + canaries + sentry, then guardian/watchdog so guardian can enroll
+    # a fresh independent repair authority for sentry.
     # Do NOT run either loop by hand with `&`; systemd owns their lifetime.
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
 [ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --status   # decoys + audit rules laid
@@ -153,14 +154,25 @@ handling is not. Expect to find something here.
     -> next tick quarantines the whole .d directory and restarts the unit.
        The unit file's hash never changed, so this is the attack a
        fragment-only check cannot see. Confirm /tmp/pwned was never created.
-[ ] ATTACK 6 — remove ALL THREE layers in the same interval:
+[ ] ATTACK 6 — alter sentry's installed triage.sh, sentry.env and unit while
+    keeping sentry.last-pass fresh:
+    -> guardian restores all three from .repair/sentry, preserves evidence,
+       and restarts sentry onto the repaired files.
+[ ] ATTACK 7 — add a drop-in to the sentry unit itself:
+    -> guardian quarantines it, reloads systemd and restarts sentry before the
+       injected command runs.
+[ ] ATTACK 8 — run redteam/drill.sh's disposable-unit drop-in section:
+    -> exact reviewed unitdropin removes only the fragment; unitdropindeep also
+       removes its launched payload; both preserve and restart the base unit.
+[ ] ATTACK 9 — remove ALL THREE guardian layers in the same interval:
     -> only now does it stay down. This is the documented limit, not a bug.
 [ ] CLEAN: sudo ./linux/guardian.sh --config ... --uninstall --apply
     -> the disarm sentinel stops the rebuild; --status shows nothing left.
     -> confirm removal is exact against the manifest (no stray footholds).
 ```
 
-**Pass:** attacks 1–5 self-heal within the interval; attack 6 stays down;
+**Pass:** attacks 1–7 self-heal within the interval; attack 8 removes exactly
+the reviewed artifacts; attack 9 stays down;
 `--uninstall` leaves zero artifacts (verify against the manifest — your own
 footholds must be as removable as the red team's should have been).
 
@@ -189,8 +201,8 @@ Already proven with two real lockout tests, but worth one rep so it is reflex:
 
 ```
 [ ] sudo ./redteam/plant.sh --clean       # authoritative removal of any plants
-[ ] sudo ./linux/sentry.sh --config ... --uninstall --apply
 [ ] sudo ./linux/guardian.sh --config ... --uninstall --apply
+[ ] sudo ./linux/sentry.sh --config ... --uninstall --apply
 [ ] sudo ./linux/canary.sh --config ... --remove --apply
 [ ] Revert the VM to clean-baseline.
 ```

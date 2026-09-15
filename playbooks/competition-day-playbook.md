@@ -382,7 +382,7 @@ it.
 BEFORE : packet -> config -> snapshot -> access confirmed
 SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; who ; ss -tulpn ; keys
 HARDEN : creds -> fw.sh(+confirm) -> ssh -> services.sh   [verify each]
-ARM    : sudo arm.sh --apply      (backup + canary + guardian/watchdog + sentry)
+ARM    : sudo arm.sh --apply      (backup + canary + sentry + guardian/watchdog)
 STATUS : sudo sentry.sh --status  (current triage + retained change events)
 SIGNOFF: sudo sentry.sh --approve --apply ; --ack reviewed change events
 INJECT : triage deadline+deliverables ; use responses/ ; screenshot as you go

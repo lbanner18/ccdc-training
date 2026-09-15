@@ -53,8 +53,9 @@ set -u
 #
 # All three layers run the identical reconcile pass (--tick), which:
 #   1. self-removes if the disarm sentinel is present (see below),
-#   2. makes sure the watchdog is running, and
-#   3. recreates any of the three layers that has gone missing.
+#   2. repairs the independently enrolled sentry unit/config/tree,
+#   3. makes sure sentry and the watchdog are running, and
+#   4. recreates any of the three layers that has gone missing.
 #
 # Because every layer rebuilds every other layer, killing one is pointless and
 # killing two is temporary. Removing all three inside one interval works, and
@@ -81,8 +82,9 @@ set -u
 # --- scope -------------------------------------------------------------------
 #
 # Defensive only, and local only: no network callbacks, no beacons, no remote
-# anything (NCCDC rule 5.6 bars external callbacks in team tooling). Everything
-# it writes is listed in the manifest and removable with --uninstall. Run it on
+# anything (NCCDC rule 5.6 bars external callbacks in team tooling). Every
+# guardian-owned file is listed in the manifest and removable with --uninstall;
+# sentry-owned entries are explicitly marked protected and retained. Run it on
 # boxes you are authorized to defend.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -144,6 +146,7 @@ fi
 name=${CCDC_GUARDIAN_NAME:-node-health}
 interval=${CCDC_GUARDIAN_INTERVAL:-60}
 guardian_dir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$name}
+protect_sentry_setting=${CCDC_GUARDIAN_PROTECT_SENTRY:-auto}
 
 # The name becomes a systemd unit name and a cron.d filename. cron ignores any
 # file in /etc/cron.d whose name has a character outside [A-Za-z0-9_-], which
@@ -180,6 +183,10 @@ case "$guardian_dir" in
 esac
 case "$guardian_dir" in
   *[!A-Za-z0-9_./-]*) ccdc_die "CCDC_GUARDIAN_DIR contains unsupported whitespace/shell characters: $guardian_dir" ;;
+esac
+case "$protect_sentry_setting" in
+  0|1|auto) ;;
+  *) ccdc_die "CCDC_GUARDIAN_PROTECT_SENTRY must be 0, 1, or auto: $protect_sentry_setting" ;;
 esac
 
 # Per-layer names. CCDC_GUARDIAN_NAME stays the base and every layer derives
@@ -294,6 +301,60 @@ lock_owner="$lock_dir/owner"
 lock_token=''
 staged_paths=''
 
+# Sentry is deliberately a separate installation with separate ownership.
+# Guardian only owns the private repair copies below; it must never remove the
+# live sentry tree or unit during --uninstall.
+sentry_name=${CCDC_SENTRY_NAME:-ccdc-sentry}
+sentry_dir=${CCDC_SENTRY_DIR:-/usr/local/lib/$sentry_name}
+sentry_unit="$sentry_name.service"
+sentry_unit_path="/etc/systemd/system/$sentry_unit"
+sentry_config="$sentry_dir/sentry.env"
+sentry_owner_marker="$sentry_dir/.ccdc-sentry-owned"
+manifest_repair="$guardian_dir/.repair/guardian.manifest"
+sentry_interval=${CCDC_SENTRY_INTERVAL:-60}
+sentry_watch_interval=${CCDC_WATCH_INTERVAL:-120}
+sentry_triage_timeout=${CCDC_TRIAGE_TIMEOUT:-45}
+sentry_watch_timeout=${CCDC_WATCH_TIMEOUT:-90}
+
+case "$sentry_name" in
+  ''|*[!A-Za-z0-9_-]*) ccdc_die "CCDC_SENTRY_NAME must be [A-Za-z0-9_-] only: $sentry_name" ;;
+esac
+case "$sentry_dir" in
+  /*) ;;
+  *) ccdc_die "CCDC_SENTRY_DIR must be an absolute path: $sentry_dir" ;;
+esac
+case "$sentry_dir" in
+  *[!A-Za-z0-9_./-]*|*//*|*/./*|*/../*|*/.|*/..|/)
+    ccdc_die "CCDC_SENTRY_DIR must be a dedicated path without traversal or shell characters: $sentry_dir" ;;
+esac
+case "$sentry_dir/" in
+  "$guardian_dir/"*|"$guardian_dir/" )
+    ccdc_die "CCDC_SENTRY_DIR must not be inside CCDC_GUARDIAN_DIR" ;;
+esac
+case "$guardian_dir/" in
+  "$sentry_dir/"*|"$sentry_dir/" )
+    ccdc_die "CCDC_GUARDIAN_DIR must not be inside CCDC_SENTRY_DIR" ;;
+esac
+
+sentry_manifest_enrolled=0
+if [ -f "$manifest" ] \
+  && awk -F'|' '$1 == "protected" { found=1 } END { exit !found }' "$manifest" 2>/dev/null; then
+  sentry_manifest_enrolled=1
+fi
+protect_sentry=0
+case "$protect_sentry_setting" in
+  1) protect_sentry=1 ;;
+  auto)
+    # Once enrolled, a deleted marker is itself damage and must not silently
+    # disable protection on the next tick. Before enrollment, auto keeps a
+    # guardian-only deployment (including arm.sh --skip-sentry) working.
+    if [ "$sentry_manifest_enrolled" -eq 1 ] \
+      || { [ -f "$sentry_owner_marker" ] && [ -f "$sentry_unit_path" ]; }; then
+      protect_sentry=1
+    fi
+    ;;
+esac
+
 # Payload copies (what the layers actually execute).
 #
 # Named after this chain's own layers, NOT after the kit. The unit names, the
@@ -349,6 +410,7 @@ repair_guardian="$repair_dir/$self_basename"
 repair_watchdog="$repair_dir/$watchdog_basename"
 repair_common="$repair_dir/lib/common.sh"
 repair_env="$repair_dir/guardian.env"
+repair_sentry_root="$repair_dir/sentry"
 
 unit_dir=/etc/systemd/system
 svc_watch="$unit_dir/$unit_watch"
@@ -361,6 +423,7 @@ created=''          # paths written during this run (their hashes get refreshed)
 need_daemon_reload=0
 pinned_env_hash=''
 units_needing_restart=''
+enrolling_sentry=0
 
 # --- capability detection ----------------------------------------------------
 # Degrade honestly. A box with no systemd gets the cron layer only, and says so;
@@ -469,13 +532,16 @@ quarantine() {
   mkdir -p "$dest" 2>/dev/null || { ccdc_warn "cannot create $dest"; return 0; }
   cp -f "$path" "$dest/$(basename -- "$path").$(ccdc_now)" 2>/dev/null \
     || ccdc_warn "could not preserve tampered $path"
-  ccdc_warn "TAMPERED: $path does not match the manifest; copy kept in $dest, rewriting from source"
+  if [ "$path" = "$manifest" ]; then
+    ccdc_warn "TAMPERED: live guardian manifest differs from its private authority; copy kept in $dest, rewriting"
+  else
+    ccdc_warn "TAMPERED: $path does not match the manifest; copy kept in $dest, rewriting from source"
+  fi
   glog "TAMPER path=$path action=quarantined_and_rewritten"
 }
 
-unit_override_paths() {
-  local unit dropins path
-  for unit in "$unit_watch" "$unit_ticker" "$unit_reconcile" "$unit_timer"; do
+unit_override_paths_for() {
+  local unit=$1 dropins path
     printf '%s\n' \
       "/etc/systemd/system/$unit.d" \
       "/run/systemd/system/$unit.d" \
@@ -500,7 +566,23 @@ unit_override_paths() {
         esac
       done
     fi
+}
+
+guardian_unit_override_paths() {
+  local unit
+  for unit in "$unit_watch" "$unit_ticker" "$unit_reconcile" "$unit_timer"; do
+    unit_override_paths_for "$unit"
   done
+}
+
+sentry_unit_override_paths() {
+  [ "$protect_sentry" -eq 1 ] || return 0
+  unit_override_paths_for "$sentry_unit"
+}
+
+unit_override_paths() {
+  guardian_unit_override_paths
+  sentry_unit_override_paths
 }
 
 # Unit files can be supplied by the administrator, the runtime, generators, or
@@ -550,6 +632,7 @@ override_unit_for_path() {
     */"$unit_ticker"|*/"$unit_ticker.d"|*/"$unit_ticker.d"/*) printf '%s\n' "$unit_ticker" ;;
     */"$unit_reconcile"|*/"$unit_reconcile.d"|*/"$unit_reconcile.d"/*) printf '%s\n' "$unit_reconcile" ;;
     */"$unit_timer"|*/"$unit_timer.d"|*/"$unit_timer.d"/*) printf '%s\n' "$unit_timer" ;;
+    */"$sentry_unit"|*/"$sentry_unit.d"|*/"$sentry_unit.d"/*) printf '%s\n' "$sentry_unit" ;;
   esac
 }
 
@@ -602,7 +685,7 @@ new_install_has_override() {
       return 0
     fi
   done <<EOF
-$(unit_override_paths)
+$(guardian_unit_override_paths)
 EOF
   return 1
 }
@@ -666,6 +749,83 @@ needs_rebuild() {
   return 0
 }
 
+sentry_backup_for() {
+  local live=$1 relative
+  if [ "$live" = "$sentry_unit_path" ]; then
+    printf '%s/unit/%s\n' "$repair_sentry_root" "$sentry_unit"
+    return 0
+  fi
+  case "$live" in
+    "$sentry_dir"/*)
+      relative=${live#"$sentry_dir"/}
+      printf '%s/tree/%s\n' "$repair_sentry_root" "$relative"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+enumerate_sentry_artifacts() {
+  local source live backup relative
+  if [ "$enrolling_sentry" -eq 1 ]; then
+    while IFS= read -r source; do
+      [ -n "$source" ] || continue
+      relative=${source#"$SCRIPT_DIR"/}
+      live="$sentry_dir/$relative"
+      backup=$(sentry_backup_for "$live") || continue
+      printf 'protected|%s\nprotected-repair|%s\n' "$live" "$backup"
+    done < <(find "$SCRIPT_DIR" -type f -print 2>/dev/null | LC_ALL=C sort)
+    for live in "$sentry_config" "$sentry_owner_marker"; do
+      backup=$(sentry_backup_for "$live") || continue
+      printf 'protected|%s\nprotected-repair|%s\n' "$live" "$backup"
+    done
+  elif [ -d "$sentry_dir" ]; then
+    while IFS= read -r live; do
+      [ -n "$live" ] || continue
+      backup=$(sentry_backup_for "$live") || continue
+      printf 'protected|%s\nprotected-repair|%s\n' "$live" "$backup"
+    done < <(find "$sentry_dir" -type f -print 2>/dev/null | LC_ALL=C sort)
+  fi
+  backup=$(sentry_backup_for "$sentry_unit_path") || return 1
+  printf 'protected|%s\nprotected-repair|%s\n' "$sentry_unit_path" "$backup"
+}
+
+sentry_live_is_manifested() {
+  local candidate=$1 kind path hash extra
+  [ -f "$manifest" ] || return 1
+  while IFS='|' read -r kind path hash extra; do
+    [ "$kind" = protected ] && [ "$path" = "$candidate" ] && return 0
+  done <"$manifest"
+  return 1
+}
+
+quarantine_untracked_sentry_files() {
+  local mode=$1 live relative
+  [ -d "$sentry_dir" ] || return 0
+  while IFS= read -r live; do
+    [ -n "$live" ] || continue
+    if [ "$mode" = source ]; then
+      case "$live" in
+        "$sentry_config"|"$sentry_owner_marker") continue ;;
+      esac
+      relative=${live#"$sentry_dir"/}
+      [ -f "$SCRIPT_DIR/$relative" ] && continue
+    elif sentry_live_is_manifested "$live"; then
+      continue
+    fi
+    quarantine_tree_object "$live" || return 1
+  done < <(find "$sentry_dir" -type f -print 2>/dev/null)
+}
+
+sentry_artifacts() {
+  [ "$protect_sentry" -eq 1 ] || return 0
+  if [ "$enrolling_sentry" -eq 1 ] \
+    || ! { [ -f "$manifest" ] && awk -F'|' '$1 == "protected" { found=1 } END { exit !found }' "$manifest" 2>/dev/null; }; then
+    enumerate_sentry_artifacts
+  else
+    awk -F'|' '$1 == "protected" || $1 == "protected-repair" { print $1 "|" $2 }' "$manifest"
+  fi
+}
+
 # Every artifact this box should have, given what it can actually run.
 expected_artifacts() {
   printf 'payload|%s\n' "$guardian_copy"
@@ -684,6 +844,9 @@ expected_artifacts() {
     printf 'layer2|%s\n' "$tmr_reconcile"
   fi
   have_crond && printf 'layer3|%s\n' "$cron_file"
+  if have_systemd; then
+    sentry_artifacts
+  fi
 }
 
 # Removal cannot depend on what init system happens to be running now. A rescue
@@ -698,12 +861,16 @@ removal_artifacts() {
   printf 'repair|%s\n' "$repair_watchdog"
   printf 'repair|%s\n' "$repair_common"
   printf 'repair|%s\n' "$repair_env"
+  printf 'repair|%s\n' "$manifest_repair"
   printf 'payload|%s\n' "$tick_script"
   printf 'target|%s\n' "$svc_watch"
   printf 'layer1|%s\n' "$svc_ticker"
   printf 'layer2|%s\n' "$svc_reconcile"
   printf 'layer2|%s\n' "$tmr_reconcile"
   printf 'layer3|%s\n' "$cron_file"
+  # These are guardian-owned private copies. The corresponding "protected"
+  # entries are sentry-owned and intentionally excluded from removal.
+  sentry_artifacts | awk -F'|' '$1 == "protected-repair" { print }'
 }
 
 current_artifact_path() {
@@ -713,6 +880,11 @@ current_artifact_path() {
   done <<EOF
 $(removal_artifacts)
 EOF
+  if [ "$protect_sentry" -eq 1 ] && [ "$sentry_manifest_enrolled" -eq 1 ]; then
+    case "$candidate" in
+      "$sentry_unit_path"|"$sentry_dir"/*|"$repair_sentry_root"/*) return 0 ;;
+    esac
+  fi
   return 1
 }
 
@@ -724,13 +896,48 @@ manifest_contains_path() {
   return 1
 }
 
+manifest_pair_matches() {
+  [ -f "$manifest" ] && [ -f "$manifest_repair" ] \
+    && cmp -s -- "$manifest" "$manifest_repair"
+}
+
+ensure_manifest_integrity() {
+  if [ ! -e "$manifest" ] && [ ! -L "$manifest" ] \
+    && [ ! -e "$manifest_repair" ] && [ ! -L "$manifest_repair" ]; then
+    return 0
+  fi
+  if ccdc_is_dry_run; then
+    manifest_pair_matches \
+      || printf '[dry-run] guardian manifest/repair copy would be reconciled before use\n'
+    return 0
+  fi
+  if [ -f "$manifest_repair" ] && [ ! -L "$manifest_repair" ]; then
+    if ! cmp -s -- "$manifest" "$manifest_repair"; then
+      if [ -e "$manifest" ] || [ -L "$manifest" ]; then quarantine "$manifest"; fi
+      copy_payload_file "$manifest_repair" "$manifest" 0600 || return 1
+      glog "manifest_repaired live=$manifest source=$manifest_repair"
+    fi
+    return 0
+  fi
+  if [ -f "$manifest" ] && [ ! -L "$manifest" ]; then
+    if [ -e "$manifest_repair" ] || [ -L "$manifest_repair" ]; then
+      quarantine_tree_object "$manifest_repair" || return 1
+    fi
+    copy_payload_file "$manifest" "$manifest_repair" 0600 || return 1
+    glog "manifest_repair_source_created source=$manifest"
+    return 0
+  fi
+  ccdc_warn "neither guardian manifest copy is a trusted regular file"
+  return 1
+}
+
 # A manifest is also the installation's layout identity.  Reusing its state
 # directory with different unit names, payload filenames, cron name or payload
 # directory used to rewrite the manifest around the new layout and strand the
 # old root services.  Refuse that in-place migration; the safe sequence is to
 # uninstall with the previous config and then install the new one.
 manifest_layout_matches_config() {
-  local kind path hash extra required
+  local kind path hash extra required repair
   [ -f "$manifest" ] || return 1
   while IFS='|' read -r kind path hash extra; do
     if [ -z "${kind:-}" ] || [ -z "${path:-}" ] || [ -z "${hash:-}" ] || [ -n "${extra:-}" ]; then
@@ -738,7 +945,7 @@ manifest_layout_matches_config() {
       return 1
     fi
     case "$kind" in
-      payload|repair|target|layer1|layer2|layer3) ;;
+      payload|repair|target|layer1|layer2|layer3|protected|protected-repair) ;;
       *) ccdc_warn "unknown guardian manifest artifact kind: $kind"; return 1 ;;
     esac
     if ! current_artifact_path "$path"; then
@@ -759,6 +966,19 @@ manifest_layout_matches_config() {
       return 1
     fi
   done
+  if [ "$protect_sentry" -eq 1 ] && [ "$sentry_manifest_enrolled" -eq 1 ]; then
+    for required in "$sentry_unit_path" "$sentry_config" "$sentry_owner_marker" "$sentry_dir/sentry.sh"; do
+      if ! manifest_contains_path "$required"; then
+        ccdc_warn "guardian manifest is missing a required sentry path: $required"
+        return 1
+      fi
+      repair=$(sentry_backup_for "$required") || return 1
+      if ! manifest_contains_path "$repair"; then
+        ccdc_warn "guardian manifest is missing a sentry repair source: $repair"
+        return 1
+      fi
+    done
+  fi
   return 0
 }
 
@@ -795,7 +1015,14 @@ record_manifest() {
   done <<EOF
 $(expected_artifacts)
 EOF
+  # Commit the private authority first. If power/process death lands between
+  # these two renames, the next pass restores the live manifest from this copy
+  # instead of accepting a partially updated authority.
+  copy_payload_file "$tmp" "$manifest_repair" 0600 \
+    || { ccdc_warn "cannot install repair manifest"; return 1; }
   mv "$tmp" "$manifest" || { ccdc_warn "cannot install manifest"; return 1; }
+  chmod 0600 "$manifest" 2>/dev/null || return 1
+  [ "$enrolling_sentry" -eq 0 ] || sentry_manifest_enrolled=1
 }
 
 # One tick at a time. Two schedulers firing in the same second would otherwise
@@ -919,6 +1146,202 @@ repair_pair() {
   ccdc_warn "neither payload copy matches the manifest: $live and $repair"
   glog "payload_unrecoverable live=$live repair=$repair"
   return 1
+}
+
+sentry_mode_for() {
+  case "$1" in
+    "$sentry_unit_path") printf '0644\n' ;;
+    *.sh) printf '0700\n' ;;
+    *) printf '0600\n' ;;
+  esac
+}
+
+path_parents_are_real() {
+  local probe
+  probe=$(dirname -- "$1")
+  while [ "$probe" != / ]; do
+    [ ! -L "$probe" ] || return 1
+    probe=${probe%/*}
+    [ -n "$probe" ] || probe=/
+  done
+}
+
+quarantine_tree_object() {
+  local path=$1 dest label
+  label=$(printf '%s' "$path" | tr '/' '_')
+  dest="$state_dir/guardian.tampered/${label}.$(ccdc_now).$$"
+  mkdir -p "$state_dir/guardian.tampered" 2>/dev/null || return 1
+  mv -- "$path" "$dest" 2>/dev/null \
+    || { ccdc_warn "cannot quarantine unsafe sentry object: $path"; return 1; }
+  ccdc_warn "TAMPERED: quarantined unsafe sentry object $path"
+  glog "TAMPER path=$path action=unsafe_object_quarantined evidence=$dest"
+}
+
+secure_sentry_directories() {
+  local root directory
+  for root in "$sentry_dir" "$repair_sentry_root"; do
+    [ -d "$root" ] || continue
+    while IFS= read -r directory; do
+      chown 0:0 -- "$directory" 2>/dev/null && chmod 0700 -- "$directory" 2>/dev/null \
+        || { ccdc_warn "cannot secure sentry directory: $directory"; return 1; }
+    done < <(find "$root" -type d -print 2>/dev/null)
+  done
+}
+
+prepare_sentry_reconcile_paths() {
+  local root bad
+  for root in "$sentry_dir" "$repair_sentry_root"; do
+    path_parents_are_real "$root" \
+      || { ccdc_warn "refusing sentry repair through a symlinked parent: $root"; return 1; }
+    if [ -L "$root" ]; then
+      quarantine_tree_object "$root" || return 1
+    elif [ -e "$root" ] && [ ! -d "$root" ]; then
+      quarantine_tree_object "$root" || return 1
+    fi
+    [ -d "$root" ] || continue
+    while IFS= read -r bad; do
+      [ -n "$bad" ] || continue
+      quarantine_tree_object "$bad" || return 1
+    done < <(find "$root" \( -type l -o ! -type f ! -type d \) -print 2>/dev/null)
+  done
+  if [ -L "$sentry_unit_path" ]; then
+    quarantine_tree_object "$sentry_unit_path" || return 1
+  fi
+  secure_sentry_directories || return 1
+}
+
+validate_sentry_enrollment() {
+  local path bad=''
+  have_systemd || { ccdc_warn "sentry protection requires systemd"; return 1; }
+  path_parents_are_real "$sentry_dir" \
+    || { ccdc_warn "refusing sentry tree beneath a symlinked parent: $sentry_dir"; return 1; }
+  path_parents_are_real "$sentry_unit_path" \
+    || { ccdc_warn "refusing sentry unit beneath a symlinked parent: $sentry_unit_path"; return 1; }
+  [ -d "$sentry_dir" ] || { ccdc_warn "sentry install tree is missing: $sentry_dir"; return 1; }
+  [ ! -L "$sentry_dir" ] || { ccdc_warn "refusing symlinked sentry install tree: $sentry_dir"; return 1; }
+  [ -f "$sentry_unit_path" ] && [ ! -L "$sentry_unit_path" ] \
+    || { ccdc_warn "sentry unit is missing or symlinked: $sentry_unit_path"; return 1; }
+  [ -f "$sentry_config" ] && [ -f "$sentry_dir/sentry.sh" ] \
+    || { ccdc_warn "sentry config or entrypoint is missing from $sentry_dir"; return 1; }
+  [ "$(cat "$sentry_owner_marker" 2>/dev/null || printf '')" = "$sentry_name" ] \
+    || { ccdc_warn "sentry ownership marker is absent or does not match $sentry_name"; return 1; }
+  bad=$(find "$sentry_dir" \( -type l -o ! -type f ! -type d \) -print -quit 2>/dev/null)
+  [ -z "$bad" ] || { ccdc_warn "refusing unsupported object in sentry tree: $bad"; return 1; }
+  while IFS= read -r path; do
+    case "$path" in
+      *[!A-Za-z0-9_./-]*) ccdc_warn "refusing sentry path with unsupported characters: $path"; return 1 ;;
+    esac
+  done < <(find "$sentry_dir" -type f -print 2>/dev/null)
+  reload_if_needed || return 1
+  unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_dir/sentry.sh" \
+    || { ccdc_warn "effective sentry unit differs from $sentry_unit_path"; return 1; }
+}
+
+validate_sentry_matches_checkout() {
+  local source relative live expected_unit actual_unit
+  [ "$SCRIPT_DIR" != "$sentry_dir" ] \
+    || { ccdc_warn "run guardian --install from the kit checkout, not the sentry install tree"; return 1; }
+  while IFS= read -r source; do
+    [ -n "$source" ] || continue
+    relative=${source#"$SCRIPT_DIR"/}
+    live="$sentry_dir/$relative"
+    cmp -s -- "$source" "$live" \
+      || { ccdc_warn "installed sentry payload differs from this checkout: $live (reinstall sentry first)"; return 1; }
+  done < <(find "$SCRIPT_DIR" -type f -print 2>/dev/null | LC_ALL=C sort)
+  cmp -s -- "$config" "$sentry_config" \
+    || { ccdc_warn "installed sentry config differs from $config (reinstall sentry first)"; return 1; }
+  expected_unit=$(printf '%s\n' \
+    '[Unit]' \
+    'Description=CCDC supervised detection and approval queue' \
+    'After=local-fs.target' \
+    '' \
+    '[Service]' \
+    'Type=simple' \
+    "ExecStart=$sentry_dir/sentry.sh --config $sentry_config --interval $sentry_interval --watch-interval $sentry_watch_interval --triage-timeout $sentry_triage_timeout --watch-timeout $sentry_watch_timeout --loop --no-bell" \
+    'Restart=always' \
+    'RestartSec=5s' \
+    'Nice=10' \
+    'IOSchedulingClass=idle' \
+    'UMask=0077' \
+    '' \
+    '[Install]' \
+    'WantedBy=multi-user.target')
+  actual_unit=$(cat "$sentry_unit_path" 2>/dev/null || printf '')
+  [ "$actual_unit" = "$expected_unit" ] \
+    || { ccdc_warn "installed sentry unit differs from the trusted generated unit (reinstall sentry first)"; return 1; }
+}
+
+protect_sentry_payload() {
+  local force=${1:-0} kind live backup mode changed=0
+  [ "$protect_sentry" -eq 1 ] || return 0
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would hash and reconcile sentry unit, config, and installed tree from %s\n' "$repair_sentry_root"
+    return 0
+  fi
+
+  if [ "$force" -eq 1 ]; then
+    validate_sentry_enrollment || return 1
+    validate_sentry_matches_checkout || return 1
+    quarantine_untracked_sentry_files source || return 1
+    enrolling_sentry=1
+    while IFS='|' read -r kind live; do
+      [ "$kind" = protected ] || continue
+      backup=$(sentry_backup_for "$live") || return 1
+      mode=$(sentry_mode_for "$live")
+      copy_payload_file "$live" "$backup" "$mode" || return 1
+      chown 0:0 -- "$live" "$backup" 2>/dev/null \
+        && chmod "$mode" -- "$live" "$backup" 2>/dev/null \
+        || { ccdc_warn "cannot secure enrolled sentry path: $live"; return 1; }
+      # An explicit --install is the only operation allowed to establish a new
+      # sentry authority, and validation above tied this live file to the
+      # checkout/config-generated source. Refresh its hash at the checkpoint.
+      created="$created $live"
+    done <<EOF
+$(enumerate_sentry_artifacts)
+EOF
+    secure_sentry_directories || return 1
+    ensure_unit_enabled "$sentry_unit" || return 1
+    glog "sentry_enrolled unit=$sentry_unit tree=$sentry_dir repair=$repair_sentry_root"
+    return 0
+  fi
+
+  [ -f "$manifest" ] || { ccdc_warn "sentry protection has no guardian manifest; re-run --install"; return 1; }
+  prepare_sentry_reconcile_paths || return 1
+  quarantine_untracked_sentry_files manifest || return 1
+  while IFS='|' read -r kind live _hash _extra; do
+    [ "$kind" = protected ] || continue
+    backup=$(sentry_backup_for "$live") \
+      || { ccdc_warn "invalid protected sentry path in manifest: $live"; return 1; }
+    manifest_contains_path "$backup" \
+      || { ccdc_warn "manifest has no repair source for protected sentry path: $live"; return 1; }
+    if { [ -e "$live" ] || [ -L "$live" ]; } && [ ! -f "$live" ]; then
+      quarantine_tree_object "$live" || return 1
+    fi
+    if { [ -e "$backup" ] || [ -L "$backup" ]; } && [ ! -f "$backup" ]; then
+      quarantine_tree_object "$backup" || return 1
+    fi
+    if ! matches_manifest "$live" && matches_manifest "$backup"; then
+      changed=1
+      [ "$live" != "$sentry_unit_path" ] || need_daemon_reload=1
+    fi
+    mode=$(sentry_mode_for "$live")
+    repair_pair "$live" "$backup" "$mode" || return 1
+    if [ "$(stat -c '%u:%g:%a' "$live" 2>/dev/null || printf '')" != "0:0:${mode#0}" ]; then
+      chown 0:0 -- "$live" 2>/dev/null && chmod "$mode" -- "$live" 2>/dev/null \
+        || { ccdc_warn "cannot secure protected sentry path: $live"; return 1; }
+      changed=1
+      glog "sentry_metadata_repaired path=$live"
+    fi
+  done <"$manifest"
+
+  if [ "$changed" -eq 1 ] && ! ccdc_list_contains "$sentry_unit" "$units_needing_restart"; then
+    units_needing_restart="$units_needing_restart $sentry_unit"
+  fi
+  reload_if_needed || return 1
+  unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_dir/sentry.sh" \
+    || { ccdc_warn "effective sentry unit failed verification after repair"; return 1; }
+  ensure_unit_enabled "$sentry_unit" || return 1
+  return 0
 }
 
 write_payload() {
@@ -1305,6 +1728,7 @@ remove_all() {
         bad_manifest=1
         continue
       fi
+      [ "$kind" != protected ] || continue
       remove_artifact "$path" || bad_manifest=1
     done <"$manifest"
   fi
@@ -1319,8 +1743,13 @@ EOF
     [ -n "$path" ] || continue
     remove_exact_tree "$path" || true
   done <<EOF
-$(unit_override_paths)
+$(guardian_unit_override_paths)
 EOF
+
+  # It is safe to remove this whole subtree: guardian created it solely as its
+  # private sentry repair source. The live sentry tree is deliberately outside
+  # this ownership boundary and is never traversed here.
+  remove_exact_tree "$repair_sentry_root" || true
 
   while IFS='|' read -r kind path; do
     [ -n "$path" ] || continue
@@ -1402,6 +1831,7 @@ EOF
 
 verify_installation() {
   local schedulers=0
+  manifest_pair_matches || { ccdc_warn "guardian manifest does not match its private repair copy"; return 1; }
   manifest_matches_disk || { ccdc_warn "one or more installed artifacts do not match the manifest"; return 1; }
   if have_systemd; then
     unit_effective_matches "$unit_watch" "$svc_watch" "$watchdog_copy" || return 1
@@ -1414,6 +1844,11 @@ verify_installation() {
     run_systemctl is-enabled --quiet "$unit_ticker" 2>/dev/null || return 1
     run_systemctl is-active --quiet "$unit_timer" 2>/dev/null || return 1
     run_systemctl is-enabled --quiet "$unit_timer" 2>/dev/null || return 1
+    if [ "$protect_sentry" -eq 1 ]; then
+      unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_dir/sentry.sh" || return 1
+      run_systemctl is-active --quiet "$sentry_unit" 2>/dev/null || return 1
+      run_systemctl is-enabled --quiet "$sentry_unit" 2>/dev/null || return 1
+    fi
     schedulers=$((schedulers + 2))
   else
     watchdog_running_pidfile || return 1
@@ -1430,6 +1865,7 @@ removal_is_clean() {
   if [ -f "$manifest" ]; then
     while IFS='|' read -r kind path hash extra; do
       [ -n "${path:-}" ] || continue
+      [ "$kind" != protected ] || continue
       [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
     done <"$manifest"
   fi
@@ -1443,7 +1879,7 @@ EOF
     [ -n "$path" ] || continue
     [ ! -e "$path" ] && [ ! -L "$path" ] || return 1
   done <<EOF
-$(unit_override_paths)
+$(guardian_unit_override_paths)
 EOF
   [ ! -d "$guardian_dir" ]
 }
@@ -1457,6 +1893,10 @@ do_install() {
   [ -f "$SCRIPT_DIR/watchdog.sh" ] || ccdc_die "watchdog.sh not found next to guardian.sh"
   { have_systemd || have_crond; } \
     || ccdc_die "no verified systemd or cron scheduler is running; nothing was installed"
+  acquire_lock $((interval * 2)) \
+    || ccdc_die "could not obtain the guardian lock; no install changes were made"
+  ensure_manifest_integrity \
+    || ccdc_die "guardian manifest and repair copy are both unusable; install aborted"
   if [ ! -f "$manifest" ]; then
     fresh=1
     new_install_has_collision \
@@ -1464,12 +1904,8 @@ do_install() {
   elif ! manifest_layout_matches_config; then
     ccdc_die "refusing an in-place guardian layout/name change; use the previously installed config to run --uninstall --apply, then install the new layout"
   fi
-  acquire_lock $((interval * 2)) \
-    || ccdc_die "could not obtain the guardian lock; no install changes were made"
 
-  if [ "$fresh" -eq 0 ]; then
-    ensure_no_unit_overrides || ccdc_die "could not quarantine a systemd override; install aborted"
-  fi
+  ensure_no_unit_overrides || ccdc_die "could not quarantine a systemd override; install aborted"
 
   # A leftover sentinel from a previous uninstall would make every layer remove
   # itself on its first tick.
@@ -1479,6 +1915,8 @@ do_install() {
   fi
 
   if ! write_payload 1 \
+    || ! protect_sentry_payload 1 \
+    || ! record_manifest \
     || ! ensure_watchdog 1 \
     || ! ensure_layers 1 \
     || ! restart_repaired_units 1 \
@@ -1511,6 +1949,8 @@ do_install() {
 do_tick() {
   [ "$apply" -eq 1 ] && ccdc_require_root
   acquire_lock || return 0
+  ensure_manifest_integrity \
+    || { glog "reconcile_failed phase=manifest_authority"; return 1; }
 
   if [ -f "$sentinel" ]; then
     ccdc_info "disarm sentinel present ($sentinel): removing this layer instead of reconciling"
@@ -1524,6 +1964,9 @@ do_tick() {
   [ ! -f "$sentinel" ] || { remove_all; return 0; }
   write_payload 0 \
     || { glog "reconcile_failed phase=payload"; return 1; }
+  [ ! -f "$sentinel" ] || { remove_all; return 0; }
+  protect_sentry_payload 0 \
+    || { glog "reconcile_failed phase=sentry"; return 1; }
   [ ! -f "$sentinel" ] || { remove_all; return 0; }
   ensure_watchdog 0 \
     || { glog "reconcile_failed phase=watchdog"; return 1; }
@@ -1565,6 +2008,14 @@ do_status() {
   printf 'interval: %ss reconcile / %ss watchdog\n' "$interval" "$watchdog_interval"
   printf 'statedir: %s\n' "$state_dir"
   printf 'manifest: %s\n' "$manifest"
+  if [ -f "$manifest" ] \
+    && awk -F'|' '$1 == "protected" { found=1 } END { exit !found }' "$manifest" 2>/dev/null; then
+    printf 'sentry:   protected (%s, tree %s)\n' "$sentry_unit" "$sentry_dir"
+  elif [ "$protect_sentry" -eq 1 ]; then
+    printf 'sentry:   available but NOT ENROLLED (run guardian --install)\n'
+  else
+    printf 'sentry:   not enrolled for guardian repair\n'
+  fi
   if [ -f "$sentinel" ]; then
     printf 'state:    DISARMED (sentinel present: %s)\n' "$sentinel"
   elif verify_installation 2>/dev/null; then
@@ -1593,13 +2044,24 @@ do_status() {
   layer_line repair "$repair_watchdog"
   layer_line repair "$repair_common"
   layer_line repair "$repair_env"
+  layer_line repair "$manifest_repair"
+
+  if [ "$protect_sentry" -eq 1 ] && [ -f "$manifest" ]; then
+    printf '\nprotected sentry artifacts:\n'
+    while IFS='|' read -r protected_kind protected_path _protected_hash _protected_extra; do
+      case "$protected_kind" in
+        protected) layer_line sentry "$protected_path" ;;
+        protected-repair) layer_line backup "$protected_path" ;;
+      esac
+    done <"$manifest"
+  fi
 
   if have_systemd; then
     override_found=0
     while IFS= read -r override_path; do
       [ -n "$override_path" ] || continue
       if [ -e "$override_path" ] || [ -L "$override_path" ]; then
-        [ "$override_found" -eq 1 ] || printf '\nSYSTEMD OVERRIDES (guardian is not healthy):\n'
+        [ "$override_found" -eq 1 ] || printf '\nSYSTEMD OVERRIDES (guardian/sentry protection is not healthy):\n'
         printf '  %s\n' "$override_path"
         override_found=1
       fi
@@ -1633,11 +2095,13 @@ EOF
 
 do_uninstall() {
   [ "$apply" -eq 1 ] && ccdc_require_root
+  acquire_lock $((interval * 2)) \
+    || ccdc_die "could not obtain the guardian lock; uninstall made no changes"
+  ensure_manifest_integrity \
+    || ccdc_die "guardian manifest and repair copy are both unusable; uninstall made no changes"
   if [ -f "$manifest" ] && ! manifest_layout_matches_config; then
     ccdc_die "current config does not describe the installed guardian layout; use the previously installed config for --uninstall"
   fi
-  acquire_lock $((interval * 2)) \
-    || ccdc_die "could not obtain the guardian lock; uninstall made no changes"
 
   # Sentinel first, teardown second. A tick that fires in the middle of the
   # teardown must find the sentinel already there, or it will helpfully rebuild

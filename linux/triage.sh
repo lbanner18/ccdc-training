@@ -105,10 +105,8 @@ fix() { printf '           %s\n' "$1"; }
 #
 # SUBJECT is the thing to act on: a username, a path, or a documented compound
 # value. It is the only field sentry parses for an argument.
-if [ "$__ccdc_triage_cli_findings_set" -eq 1 ]; then
-  findings_file=$__ccdc_triage_cli_findings
-else
-  # This kit's own payload directories.
+
+# This kit's own payload directories.
 #
 # guardian's reconcile script legitimately contains the shapes the reverse-shell
 # detector hunts for, so on an armed box triage reported its own tooling as RED
@@ -128,7 +126,10 @@ own_payload() {
   return 1
 }
 
-findings_file=${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}
+if [ "$__ccdc_triage_cli_findings_set" -eq 1 ]; then
+  findings_file=$__ccdc_triage_cli_findings
+else
+  findings_file=${CCDC_TRIAGE_FINDINGS:-$state_dir/triage.findings}
 fi
 
 validate_findings_file() {
@@ -208,11 +209,12 @@ if [ -n "$uid0" ]; then
   done
   detail "confirm against the packet first - a scored account can have a bad UID"
   for u in $uid0; do
+    printf -v quser '%q' "$u"
     fixhdr
-    fix "sudo passwd -l $u"
-    fix "sudo usermod -s /usr/sbin/nologin $u"
-    fix "ps -ef | grep -w $u | grep -v grep      # kill these by PID, NOT by user"
-    fix "sudo userdel -f -r $u                   # -f required; warns about PID 1"
+    fix "sudo passwd -l $quser"
+    fix "sudo usermod -s /usr/sbin/nologin $quser"
+    fix "ps -ef | grep -w -- $quser | grep -v grep      # kill these by PID, NOT by user"
+    fix "sudo userdel -f -r -- $quser                   # -f required; warns about PID 1"
   done
   detail "NEVER pkill -u on a UID-0 account: the name resolves to root and you"
   detail "would kill every root process on the box. See CARD 1."
@@ -229,11 +231,12 @@ if [ -r /etc/shadow ]; then
     for u in $empty; do emit RED emptypw "$u" "account with an empty password"; done
     detail "anyone who can reach a login prompt is already in"
     for u in $empty; do
+      printf -v quser '%q' "$u"
       fixhdr
-      fix "sudo passwd -l $u"
-      fix "sudo usermod -s /usr/sbin/nologin $u"
-      fix "sudo pkill -9 -u $u                     # safe here: this is NOT UID 0"
-      fix "sudo userdel -r $u                      # only if the packet says it is not scored"
+      fix "sudo passwd -l $quser"
+      fix "sudo usermod -s /usr/sbin/nologin $quser"
+      fix "sudo pkill -9 -u $quser                     # safe here: this is NOT UID 0"
+      fix "sudo userdel -r -- $quser                      # only if the packet says it is not scored"
     done
   else
     clean "no empty-password accounts"
@@ -370,9 +373,11 @@ if [ -n "$cronhits" ]; then
     done <<EOF
 $(grep -IhE "$shells" "$f" 2>/dev/null | head -3)
 EOF
+    printf -v qf '%q' "$f"
+    printf -v qevidence '%q' "/var/tmp/evidence-$(basename -- "$f")"
     fixhdr
-    fix "sudo cp $f /var/tmp/evidence-$(basename "$f")   # keep it, the IR inject wants it"
-    fix "sudo rm -f $f"
+    fix "sudo cp -- $qf $qevidence   # keep it, the IR inject wants it"
+    fix "sudo rm -f -- $qf"
   done
   detail "then follow what it CALLED - the cron line is the schedule, not the payload:"
   fix "sudo ss -tnp | grep -v 127.0.0.1        # is it connected right now?"
@@ -477,14 +482,45 @@ begin
 unithits=$(grep -rIlE "$shells" /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$unithits" ]; then
   red "systemd unit(s) containing reverse-shell or download-and-run patterns   [CARD 4]"
-  for f in $unithits; do emit RED unit "$f" "unit containing a reverse shell"; done
+  for f in $unithits; do
+    case "$f" in
+      *.service.d/*.conf|*.timer.d/*.conf)
+        parent=$(basename -- "$(dirname -- "$f")")
+        owner=${parent%.d}
+        if machine_pair_safe "$owner" "$f"; then
+          emit RED unitdropin "$owner::$f" "drop-in containing a reverse shell"
+        else
+          ccdc_warn "omitted an ambiguous unitdropin subject from the machine queue; inspect the human triage output"
+        fi
+        ;;
+      *) emit RED unit "$f" "unit containing a reverse shell" ;;
+    esac
+  done
   for f in $unithits; do
     detail "$f"
-    u=$(basename "$f")
+    case "$f" in
+      *.service.d/*.conf|*.timer.d/*.conf)
+        parent=$(basename -- "$(dirname -- "$f")")
+        u=${parent%.d}
+        printf -v qf '%q' "$f"
+        printf -v qunit_name '%q' "$u"
+        printf -v qevidence '%q' "/var/tmp/evidence-$(basename -- "$f")"
+        fixhdr
+        fix "sudo systemctl cat -- $qunit_name                  # read the merged unit before changing it"
+        fix "sudo cp -- $qf $qevidence"
+        fix "sudo rm -f -- $qf                         # remove only the malicious drop-in"
+        fix "sudo systemctl daemon-reload && sudo systemctl try-restart -- $qunit_name"
+        continue
+        ;;
+    esac
+    u=$(basename -- "$f")
+    printf -v qf '%q' "$f"
+    printf -v qdropdir '%q' "$f.d"
+    printf -v qunit_name '%q' "$u"
     fixhdr
-    fix "sudo systemctl cat $u                  # read it before you delete it"
-    fix "sudo systemctl disable --now $u"
-    fix "sudo rm -f $f && sudo rm -rf $f.d      # .d holds drop-in overrides"
+    fix "sudo systemctl cat -- $qunit_name                  # read it before you delete it"
+    fix "sudo systemctl disable --now -- $qunit_name"
+    fix "sudo rm -f -- $qf && sudo rm -rf -- $qdropdir      # .d holds drop-in overrides"
     fix "sudo systemctl daemon-reload && sudo systemctl reset-failed"
   done
 else
@@ -498,7 +534,20 @@ tmpunits=$(grep -rIlE '^Exec[A-Za-z]*=.*(/tmp/|/var/tmp/|/dev/shm/)' \
   /etc/systemd/system /run/systemd/system 2>/dev/null)
 if [ -n "$tmpunits" ]; then
   red "systemd unit(s) executing from a world-writable directory   [CARD 4]"
-  for f in $tmpunits; do emit RED unittmp "$f" "unit executing from a world-writable directory"; done
+  for f in $tmpunits; do
+    case "$f" in
+      *.service.d/*.conf|*.timer.d/*.conf)
+        parent=$(basename -- "$(dirname -- "$f")")
+        owner=${parent%.d}
+        if machine_pair_safe "$owner" "$f"; then
+          emit RED unitdropin "$owner::$f" "drop-in executing from a world-writable directory"
+        else
+          ccdc_warn "omitted an ambiguous unitdropin subject from the machine queue; inspect the human triage output"
+        fi
+        ;;
+      *) emit RED unittmp "$f" "unit executing from a world-writable directory" ;;
+    esac
+  done
   for f in $tmpunits; do detail "$f"; done
 else
   clean "no systemd unit executes from /tmp, /var/tmp or /dev/shm"
@@ -530,7 +579,8 @@ if [ -n "$suid" ]; then
   fixhdr
   for f in $suid; do
     detail "$(ls -l "$f" 2>/dev/null)"
-    fix "sudo chmod u-s $f                      # strip SUID; do NOT delete the binary"
+    printf -v qf '%q' "$f"
+    fix "sudo chmod u-s -- $qf                      # strip SUID; do NOT delete the binary"
   done
 else
   clean "no SUID shells or interpreters"
@@ -605,11 +655,13 @@ if [ -n "$svcshell" ]; then
   for e in $svcshell; do emit RED svcshell "${e%%:*}" "service account with a login shell"; done
   for e in $svcshell; do
     u=${e%%:*}
+    printf -v quser '%q' "$u"
+    printf -v qhome '%q' "/home/$u/.ssh/"
     detail "$e"
     fixhdr
-    fix "sudo usermod -s /usr/sbin/nologin $u"
-    fix "sudo pkill -u $u                     # the -u matters: plain 'pkill $u' matches process NAMES"
-    fix "sudo crontab -u $u -l; sudo ls -la /home/$u/.ssh/ 2>/dev/null"
+    fix "sudo usermod -s /usr/sbin/nologin $quser"
+    fix "sudo pkill -u $quser                     # the -u matters: plain pkill matches process NAMES"
+    fix "sudo crontab -u $quser -l; sudo ls -la -- $qhome 2>/dev/null"
   done
   detail "do NOT userdel a service account - it probably owns the scored content."
   detail "take the shell away and leave the account."
@@ -710,9 +762,11 @@ if [ -n "$rchits" ]; then
     while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done <<EOF
 $(grep -IhE "$shells|$rc_launch" "$f" 2>/dev/null | head -3)
 EOF
+    printf -v qf '%q' "$f"
+    printf -v qevidence '%q' "/var/tmp/evidence-$(basename -- "$f")"
     fixhdr
-    fix "sudo cp $f /var/tmp/evidence-$(basename "$f")"
-    fix "sudo nano $f      # delete only the offending line, keep the rest"
+    fix "sudo cp -- $qf $qevidence"
+    fix "sudo nano $qf      # delete only the offending line, keep the rest"
   done
 else
   clean "no shell start-up file launches anything unusual"
@@ -740,8 +794,10 @@ if [ -n "$rcdeep" ]; then
     while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-88)"; done <<EOF
 $(grep -IhE "$shells" "$t" 2>/dev/null | head -2)
 EOF
+    printf -v qt '%q' "$t"
+    printf -v qevidence '%q' "$state_dir/evidence-$(basename -- "$t")"
     fixhdr
-    fix "sudo cp $t $state_dir/evidence-$(basename "$t") && sudo rm -f $t"
+    fix "sudo cp -- $qt $qevidence && sudo rm -f -- $qt"
   done
 else
   clean "no start-up file launches a script containing a reverse shell"
@@ -767,15 +823,15 @@ unit_exec_commands() {
         next
       }
       joined=joined part
-      if (joined ~ /^[[:space:]]*ExecStart=/) {
-        sub(/^[[:space:]]*ExecStart=/, "", joined)
+      if (joined ~ /^[[:space:]]*Exec[A-Za-z]*=/) {
+        sub(/^[[:space:]]*Exec[A-Za-z]*=/, "", joined)
         print joined
       }
       joined=""
     }
     END {
-      if (joined ~ /^[[:space:]]*ExecStart=/) {
-        sub(/^[[:space:]]*ExecStart=/, "", joined)
+      if (joined ~ /^[[:space:]]*Exec[A-Za-z]*=/) {
+        sub(/^[[:space:]]*Exec[A-Za-z]*=/, "", joined)
         print joined
       }
     }
@@ -783,7 +839,9 @@ unit_exec_commands() {
 }
 
 deephits=()
-for unit in /etc/systemd/system/*.service /run/systemd/system/*.service; do
+for unit in /etc/systemd/system/*.service /run/systemd/system/*.service \
+            /etc/systemd/system/*.service.d/*.conf /run/systemd/system/*.service.d/*.conf \
+            /etc/systemd/system/*.timer.d/*.conf /run/systemd/system/*.timer.d/*.conf; do
   [ -f "$unit" ] || continue
   while IFS= read -r command || [ -n "$command" ]; do
     targets=()
@@ -807,7 +865,14 @@ for unit in /etc/systemd/system/*.service /run/systemd/system/*.service; do
       [ "$target" = "$primary" ] || [ "$follow_args" -eq 1 ] || continue
       own_payload "$target" && continue
       grep -qIE "$shells" "$target" 2>/dev/null || continue
-      hit="$unit::$target"
+      case "$unit" in
+        *.service.d/*.conf|*.timer.d/*.conf)
+          parent=$(basename -- "$(dirname -- "$unit")")
+          owner=${parent%.d}
+          hit="$owner::$unit::$target"
+          ;;
+        *) hit="$unit::$target" ;;
+      esac
       duplicate=0
       for existing in "${deephits[@]}"; do
         [ "$existing" = "$hit" ] && duplicate=1 && break
@@ -820,26 +885,49 @@ if [ "${#deephits[@]}" -gt 0 ]; then
   red "unit(s) whose ExecStart script contains a reverse shell   [CARD 4]"
   detail "the unit itself looks clean - the payload is one level down"
   for e in "${deephits[@]}"; do
-    unit=${e%%::*}; target=${e#*::}; u=$(basename "$unit"); base=${u%.service}
-    detail "$u -> $target"
-    if machine_pair_safe "$unit" "$target"; then
-      emit RED unitdeep "$e" "unit whose ExecStart script contains a reverse shell"
+    rest=${e#*::}
+    if [ "$rest" != "$e" ] && case "$rest" in *::* ) true ;; *) false ;; esac; then
+      owner=${e%%::*}; unit=${rest%%::*}; target=${rest#*::}; u=$owner; base=${u%.service}
+      detail "$u drop-in $unit -> $target"
+      if machine_triple_safe "$owner" "$unit" "$target"; then
+        emit RED unitdropindeep "$e" "unit drop-in whose ExecStart script contains a reverse shell"
+      else
+        ccdc_warn "omitted an ambiguous unitdropindeep subject from the machine queue; inspect the human triage output"
+      fi
     else
-      ccdc_warn "omitted an ambiguous unitdeep subject from the machine queue; inspect the human triage output"
+      unit=${e%%::*}; target=${e#*::}; u=$(basename -- "$unit"); base=${u%.service}
+      detail "$u -> $target"
+      if machine_pair_safe "$unit" "$target"; then
+        emit RED unitdeep "$e" "unit whose ExecStart script contains a reverse shell"
+      else
+        ccdc_warn "omitted an ambiguous unitdeep subject from the machine queue; inspect the human triage output"
+      fi
     fi
     while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done \
       < <(grep -IhE "$shells" "$target" 2>/dev/null | head -2)
     printf -v qunit '%q' "$unit"
     printf -v qtarget '%q' "$target"
     printf -v qevidence '%q' "/var/tmp/evidence-$(basename "$target")"
-    printf -v qtimer '%q' "/etc/systemd/system/$base.timer"
     printf -v qunit_name '%q' "$u"
-    printf -v qtimer_name '%q' "$base.timer"
     fixhdr
-    fix "sudo systemctl disable --now $qtimer_name $qunit_name"
-    fix "sudo cp -- $qtarget $qevidence"
-    fix "sudo rm -f -- $qunit $qtimer $qtarget"
-    fix "sudo systemctl daemon-reload && sudo systemctl reset-failed"
+    case "$unit" in
+      *.service.d/*.conf|*.timer.d/*.conf)
+        printf -v qunit_evidence '%q' "/var/tmp/evidence-$(basename -- "$unit")"
+        fix "sudo systemctl cat -- $qunit_name"
+        fix "sudo cp -- $qunit $qunit_evidence"
+        fix "sudo cp -- $qtarget $qevidence"
+        fix "sudo rm -f -- $qunit $qtarget"
+        fix "sudo systemctl daemon-reload && sudo systemctl try-restart -- $qunit_name"
+        ;;
+      *)
+        printf -v qtimer '%q' "/etc/systemd/system/$base.timer"
+        printf -v qtimer_name '%q' "$base.timer"
+        fix "sudo systemctl disable --now -- $qtimer_name $qunit_name"
+        fix "sudo cp -- $qtarget $qevidence"
+        fix "sudo rm -f -- $qunit $qtimer $qtarget"
+        fix "sudo systemctl daemon-reload && sudo systemctl reset-failed"
+        ;;
+    esac
   done
 else
   clean "no unit's ExecStart script contains a reverse shell"

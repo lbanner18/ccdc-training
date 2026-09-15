@@ -66,9 +66,10 @@ hunt/process-anomalies.txt
 recon/accounts.txt
 recon/ssh.txt
 recon/sudoers.txt
-recon/listening.txt'
+recon/listening.txt
+recon/firewall.txt'
 
-# Two things change on their own every pass and will bury the one line that
+# Three things change on their own every pass and will bury the one line that
 # matters if they are not filtered out. Both were found by running this loop for
 # real rather than by reading it:
 #
@@ -94,7 +95,8 @@ normalise() {
   grep -v -F -- "$state_dir" "$1" 2>/dev/null \
     | grep -vE '(sentry|watch|hunt|recon|canary)\.sh( |$)' \
     | grep -vE '^[A-Z][a-z]{2} [0-9]{4}-[0-9]{2}-[0-9]{2}.*\.(timer|service)[[:space:]]*$' \
-    | grep -vE '^[A-Z][a-z]{2} [0-9]{4}-[0-9]{2}-[0-9]{2}.*(ago|left)[[:space:]]'
+    | grep -vE '^[A-Z][a-z]{2} [0-9]{4}-[0-9]{2}-[0-9]{2}.*(ago|left)[[:space:]]' \
+    | sed -E 's/counter packets [0-9]+ bytes [0-9]+/counter packets <n> bytes <n>/g'
 }
 
 stamp() { date -u '+%H:%M:%SZ'; }

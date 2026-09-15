@@ -17,7 +17,8 @@ Use the team packet to fill the bracketed values before competition day.
 [ ] Set CCDC_WATCHDOG_INTERVAL="5" and point CCDC_HTTP_CHECKS at the address
     the SCORER uses, not 127.0.0.1.
 [ ] sudo ./linux/arm.sh --config <cfg> --apply
-    -> backup + canaries + guardian/watchdog + supervised sentry/change sweep.
+    -> backup + canaries + supervised sentry, then guardian/watchdog.
+       Guardian independently enrolls sentry's unit, config, and installed tree.
        Never run either loop by hand; systemd keeps both alive and your one
        terminal remains free.
 [ ] Check the current queue: sudo ./linux/sentry.sh --config <cfg> --status

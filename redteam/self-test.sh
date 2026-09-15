@@ -20,6 +20,18 @@ done < <(find "$ROOT/linux" "$ROOT/redteam" -type f -name '*.sh' | sort)
 printf '\n== guardian drill helpers ==\n'
 bash "$ROOT/redteam/drill.sh" --self-test || failed=$((failed + 1))
 
+printf '\n== guardian protects sentry ==\n'
+rc=0
+bash "$ROOT/redteam/guardian-sentry-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - guardian/sentry sandbox test (bwrap unavailable)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
+printf '\n== canary and change watch ==\n'
+bash "$ROOT/redteam/canary-watch-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== sentry queue ==\n'
 rc=0
 bash "$ROOT/redteam/sentry-self-test.sh" || rc=$?

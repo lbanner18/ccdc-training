@@ -146,5 +146,51 @@ expect_rc 4 "$rc" 'watch propagates canary health failure'
 expect_text 'canary.sh failed this pass' "$test_root/watch.out" 'watch emits the component failure'
 expect_no_text 'quiet - no persistence' "$test_root/watch.out" 'watch never claims quiet after a component failure'
 
+# Firewall evidence was always collected by recon but used to be absent from
+# watch_files. Prove counter churn is quiet while a policy change alerts.
+cat >"$suite/canary.sh" <<'FAKE_CANARY_OK'
+#!/usr/bin/env bash
+exit 0
+FAKE_CANARY_OK
+cat >"$suite/hunt.sh" <<'FAKE_HUNT_OK'
+#!/usr/bin/env bash
+set -u
+out=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in --config) shift 2 ;; --output-dir) out=$2; shift 2 ;; *) exit 2 ;; esac
+done
+mkdir -p -- "$out"
+exit 0
+FAKE_HUNT_OK
+cat >"$suite/recon.sh" <<'FAKE_RECON_FIREWALL'
+#!/usr/bin/env bash
+set -u
+out=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in --config) shift 2 ;; --output-dir) out=$2; shift 2 ;; *) exit 2 ;; esac
+done
+mkdir -p -- "$out"
+cp -- "$CCDC_TEST_FIREWALL" "$out/firewall.txt"
+exit 0
+FAKE_RECON_FIREWALL
+chmod 0755 "$suite/canary.sh" "$suite/hunt.sh" "$suite/recon.sh"
+printf '\tcounter packets 1 bytes 20 accept\n' >"$test_root/firewall-source"
+printf '\nCCDC_TEST_FIREWALL="%s"\n' "$test_root/firewall-source" >>"$config"
+rm -rf -- "$state/watch"
+"$suite/watch.sh" --config "$config" --once >/dev/null 2>&1
+printf '\tcounter packets 99 bytes 2048 accept\n' >"$test_root/firewall-source"
+set +e
+"$suite/watch.sh" --config "$config" --once >"$test_root/counter-only.out" 2>&1
+rc=$?
+set -e
+expect_rc 0 "$rc" 'firewall traffic counters do not create drift noise'
+printf '\tcounter packets 100 bytes 4096 drop\n' >"$test_root/firewall-source"
+set +e
+"$suite/watch.sh" --config "$config" --once >"$test_root/firewall-drift.out" 2>&1
+rc=$?
+set -e
+expect_rc 3 "$rc" 'firewall policy drift raises a watch alert'
+expect_text 'recon/firewall.txt' "$test_root/firewall-drift.out" 'firewall alert names the changed evidence'
+
 printf 'canary/watch self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -16,7 +16,7 @@ cp config/example.env /tmp/ccdc-linux.env
 ./linux/recon.sh --config /tmp/ccdc-linux.env
 ./linux/hunt.sh  --config /tmp/ccdc-linux.env
 
-# 2. Arm everything persistent: backup + canaries + guardian/watchdog + sentry.
+# 2. Arm everything persistent: backup + canaries + sentry + guardian/watchdog.
 #    Both monitoring loops become supervised services; your terminal stays free.
 ./linux/arm.sh      --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
@@ -37,9 +37,11 @@ sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --ack                # revie
 ```
 
 That split is the point: detection, diagnosis, evidence capture, and typing are
-automatic; the destructive decision is yours. Approval first re-runs triage and
-re-evaluates the current protection lists, so a stale queue cannot act after the
-box or config changes. It **refuses to act at all** until
+automatic; the destructive decision is yours. Status freezes the identities
+behind the item numbers you reviewed; approval then re-runs triage and
+re-evaluates those exact identities against current protection lists, so a
+reordered or stale queue cannot act on something else after the box or config
+changes. It **refuses to act at all** until
 `CCDC_ALLOWED_USERS` and `CCDC_SYSTEMD_SERVICES` are filled in from the packet —
 an empty protect list does not mean nothing is protected, it means nobody has
 told the tool what is scored.
@@ -56,11 +58,19 @@ Do not start `watchdog.sh` by hand — `guardian.sh` (via `arm.sh`) installs it
 as a supervised unit. Launched from a shell it dies with your SSH session,
 which is the moment you need it most.
 
+`arm.sh` installs sentry before guardian so guardian can independently snapshot
+and hash sentry's systemd unit, config, ownership marker, and complete installed
+file tree. Each reconcile pass repairs drift from guardian's private copy,
+removes sentry-specific systemd drop-ins/runtime shadows, and restarts sentry so
+the repaired files become the running code. Guardian does not own the live
+sentry installation: when disarming, uninstall guardian first, then sentry.
+
 Treat the config outside the repo as the source of truth. After changing users,
-services, or checks, re-run `sudo ./linux/arm.sh --config <cfg> --apply` (or the
-individual sentry/guardian `--install --apply` commands). Never hand-edit the
-root-owned installed copies: the guardian intentionally rejects an unpinned
-config, and a manual edit can leave monitoring on different assumptions.
+services, or checks, re-run `sudo ./linux/arm.sh --config <cfg> --apply` (or run
+the individual sentry install followed immediately by guardian install). Never
+hand-edit the root-owned installed copies: the guardian intentionally rejects
+an unpinned config, and a manual edit can leave monitoring on different
+assumptions.
 
 `arm.sh` deliberately leaves two things to you, because both can take a scored
 service off the board if you get them wrong:

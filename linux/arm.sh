@@ -27,6 +27,7 @@ skip_guardian=0
 skip_backup=0
 skip_canary=0
 skip_sentry=0
+sentry_ready=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
@@ -131,37 +132,45 @@ if [ "$skip_canary" -eq 0 ]; then
   fi
 fi
 
-# --- 3. keep-alive -----------------------------------------------------------
-# guardian installs the watchdog as a supervised unit, so this starts both.
-
-if [ "$skip_guardian" -eq 0 ]; then
-  note "keep-alive (guardian.sh --install)"
-  if [ "$apply" -eq 1 ]; then
-    if "$SCRIPT_DIR/guardian.sh" --config "$config" --install --apply >/dev/null 2>&1; then
-      good "guardian armed (this also starts watchdog.sh as a supervised unit)"
-    else
-      bad "guardian install failed — run it directly to see why"
-    fi
-  else
-    printf '    [dry-run] would run guardian.sh --install --apply\n'
-    printf '    (this is what starts the watchdog; you do not launch it separately)\n'
-  fi
-fi
-
-# --- 4. supervised detection -------------------------------------------------
-# sentry includes the watch/canary sweep and runs under systemd, so it neither
-# dies with SSH nor occupies the operator's only terminal.
+# --- 3. supervised detection -------------------------------------------------
+# Install sentry before guardian: guardian snapshots this freshly installed
+# unit, config, and executable tree into its independent repair source.
 
 if [ "$skip_sentry" -eq 0 ]; then
   note "supervised detection (sentry.sh --install)"
   if [ "$apply" -eq 1 ]; then
     if "$SCRIPT_DIR/sentry.sh" --config "$config" --install --apply >/dev/null 2>&1; then
+      sentry_ready=1
       good "sentry installed; triage and change detection now run unattended"
     else
       bad "sentry install failed — run it directly to see why"
     fi
   else
     printf '    [dry-run] would install/start sentry as a supervised systemd service\n'
+  fi
+fi
+
+# --- 4. keep-alive and sentry repair -----------------------------------------
+# guardian starts watchdog and independently protects the sentry installation
+# produced above. With --skip-sentry, auto mode leaves sentry unenrolled.
+
+if [ "$skip_guardian" -eq 0 ]; then
+  note "keep-alive and sentry repair (guardian.sh --install)"
+  if [ "$apply" -eq 1 ] && [ "$skip_sentry" -eq 0 ] && [ "$sentry_ready" -eq 0 ]; then
+    bad "guardian not installed because a fresh sentry authority was not established"
+  elif [ "$apply" -eq 1 ]; then
+    if "$SCRIPT_DIR/guardian.sh" --config "$config" --install --apply >/dev/null 2>&1; then
+      if [ "$skip_sentry" -eq 0 ]; then
+        good "guardian armed; watchdog supervised and sentry repair source enrolled"
+      else
+        good "guardian armed; watchdog supervised (sentry deliberately skipped)"
+      fi
+    else
+      bad "guardian install failed — run it directly to see why"
+    fi
+  else
+    printf '    [dry-run] would run guardian.sh --install --apply\n'
+    printf '    (this starts watchdog and snapshots the sentry installation above)\n'
   fi
 fi
 
@@ -234,8 +243,8 @@ cat <<'NEXT'
   not something a setup script does on your behalf.
 
   Disarm everything:
-    sudo ./linux/sentry.sh  --config <cfg> --uninstall --apply
     sudo ./linux/guardian.sh --config <cfg> --uninstall --apply
+    sudo ./linux/sentry.sh  --config <cfg> --uninstall --apply
     sudo ./linux/canary.sh   --config <cfg> --remove    --apply
 NEXT
 [ "$failed" -eq 0 ] || exit 1
