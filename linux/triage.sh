@@ -1399,7 +1399,7 @@ if [ "$(id -u)" -eq 0 ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
       for sshd_src in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
         [ -f "$sshd_src" ] || continue
         grep -inE '^[[:space:]]*PermitRootLogin[[:space:]]' "$sshd_src" 2>/dev/null \
-          | sed "s|^|           $sshd_src:|"
+          | sed -E "s|^([0-9]+):[[:space:]]*|           $sshd_src   line \1:  |"
       done
       fixhdr
       fix "sudo $qsshd --config $qconfig          # the full SSH audit"

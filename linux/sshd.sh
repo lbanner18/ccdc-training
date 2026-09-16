@@ -193,7 +193,10 @@ policy_check() {
   sources=$(setting_sources "$key")
   if [ -n "$sources" ]; then
     detail "set in:"
-    printf '%s\n' "$sources" | sed 's/^/           /'
+    # "file:99:VALUE" is grep's format and it reads as a path to anyone in a
+    # hurry - watched on the lab box, an operator tried to `cd` into it. Spell
+    # the line number out.
+    printf '%s\n' "$sources" | sed -E 's|^([^:]+):([0-9]+):[[:space:]]*|           \1   line \2:  |'
   else
     detail "not set in any config file - this is the compiled-in default"
   fi
