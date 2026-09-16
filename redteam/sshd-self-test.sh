@@ -191,14 +191,22 @@ if awk '/SSH drop-in file/,/Match block|no Match/' "$test_root/delta.out" \
 else
   no 'a drop-in directive was filtered out of the drop-in listing'
 fi
-has 'NO package owns it' "$test_root/delta.out" \
-  'a drop-in no package owns is called out as such'
-if grep -qE 'written [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} \([0-9]+ (minute|hour|day)s? ago\)' \
-     "$test_root/delta.out"; then
-  ok 'and dated in both absolute and relative terms'
+# Dates, not package ownership, are what separated the plant on the lab box:
+# all three drop-ins there came back "no package owns it", because cloud-init
+# writes its files at runtime. The host keys are generated once at first boot,
+# so anything in /etc/ssh newer than they are arrived after the box existed.
+touch -d '2026-09-11 05:17' "$test_root/hostkey-ref" 2>/dev/null || true
+if grep -qE 'written [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}' "$test_root/delta.out"; then
+  ok 'each drop-in is dated'
 else
   no 'the drop-in was not dated'
   sed 's/^/    /' "$test_root/delta.out" | head -20
+fi
+if grep -qE 'AFTER this box was built|predates this box|when this box was built' \
+     "$test_root/delta.out"; then
+  ok 'and placed relative to when the box itself was built'
+else
+  no 'the drop-in date was not anchored to the box build'
 fi
 rm -f "$dropins/49-tuning.conf"
 base_env

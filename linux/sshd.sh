@@ -203,26 +203,55 @@ policy_check() {
   return 0
 }
 
-# A drop-in carries two facts that its contents never mention: when it was
-# written, and whether anything on this box claims to own it. Stock Ubuntu ships
-# this directory empty or with one cloud-init file; RHEL ships a couple from
-# openssh-server. Anything else arrived some other way.
+# When was this box built? The SSH host keys are generated once, at first boot,
+# and never touched again, which makes them the most reliable day-zero marker
+# available without trusting a package database.
 #
-# Neither fact proves hostility. "Written ninety minutes ago, owned by no
-# package" is not a verdict - it is the difference between a file you skim and a
-# file you read, which on the lab box was the whole difference.
+# And the package database is worth not trusting here. On the lab box all three
+# drop-ins came back "no package owns it" - cloud-init writes its files at
+# runtime, so the plant and the legitimate ones were indistinguishable by
+# ownership. By date they separated instantly: the base image's file predated
+# the host keys, cloud-init's matched them to the second, and the plant was
+# three days later. Ownership is reported when it exists and skipped when it
+# does not, because three identical "NO package" lines teach nothing.
+box_built() {
+  local f mtime oldest=''
+  for f in /etc/ssh/ssh_host_*_key; do
+    [ -f "$f" ] || continue
+    mtime=$(stat -c '%Y' "$f" 2>/dev/null) || continue
+    if [ -z "$oldest" ] || [ "$mtime" -lt "$oldest" ]; then oldest=$mtime; fi
+  done
+  [ -n "$oldest" ] || return 1
+  printf '%s\n' "$oldest"
+}
+
+# Human-scale gap, for a number of seconds.
+span() {
+  local s=$1
+  if   [ "$s" -lt 5400 ]; then printf '%s minutes' "$((s / 60))"
+  elif [ "$s" -lt 172800 ]; then printf '%s hours' "$((s / 3600))"
+  else printf '%s days' "$((s / 86400))"
+  fi
+}
+
+# Returns 0 if this file postdates the box's own construction - the single fact
+# that separated the plant from its neighbours.
 file_provenance() {
-  local path=$1 mtime now age when owner=''
-  mtime=$(stat -c '%Y' "$path" 2>/dev/null) || return 0
-  now=$(date +%s)
-  age=$(( (now - mtime) / 60 ))
+  local path=$1 mtime when built delta owner='' late=1
+  mtime=$(stat -c '%Y' "$path" 2>/dev/null) || return 1
   when=$(date -d "@$mtime" '+%Y-%m-%d %H:%M' 2>/dev/null || printf 'unknown')
-  if [ "$age" -lt 120 ]; then
-    printf 'written %s (%s minutes ago)' "$when" "$age"
-  elif [ "$age" -lt 2880 ]; then
-    printf 'written %s (%s hours ago)' "$when" "$((age / 60))"
+  if built=$(box_built); then
+    delta=$((mtime - built))
+    if [ "$delta" -gt 600 ]; then
+      printf 'written %s - %s AFTER this box was built\n' "$when" "$(span "$delta")"
+      late=0
+    elif [ "$delta" -lt -600 ]; then
+      printf 'written %s - predates this box (part of the base image)\n' "$when"
+    else
+      printf 'written %s - when this box was built\n' "$when"
+    fi
   else
-    printf 'written %s (%s days ago)' "$when" "$((age / 1440))"
+    printf 'written %s\n' "$when"
   fi
   if ccdc_have dpkg-query; then
     owner=$(dpkg-query -S "$path" 2>/dev/null | head -1 | cut -d: -f1)
@@ -230,11 +259,8 @@ file_provenance() {
     owner=$(rpm -qf "$path" 2>/dev/null | head -1)
     case "$owner" in *'not owned'*|*'No such file'*) owner='' ;; esac
   fi
-  if [ -n "$owner" ]; then
-    printf ', from package %s\n' "$owner"
-  else
-    printf ', NO package owns it\n'
-  fi
+  [ -n "$owner" ] && printf 'shipped by package %s\n' "$owner"
+  return "$late"
 }
 
 # The question an operator cannot answer at hour one is "is this file a plant?"
@@ -301,6 +327,7 @@ policy_delta() {
 
 do_audit() {
   local value sources match_files match_body dropin count started conf_mtime
+  local prov late_dropins=''
 
   if ! have_sshd; then
     printf '  sshd is not installed on this box; nothing to audit.\n'
@@ -435,7 +462,10 @@ do_audit() {
         [ -f "$dropin" ] || continue
         printf '\n'
         detail "$dropin"
-        detail "   $(file_provenance "$dropin")"
+        if prov=$(file_provenance "$dropin"); then
+          late_dropins="$late_dropins $dropin"
+        fi
+        printf '%s\n' "$prov" | sed 's/^/            /'
         # Every directive, not only the access-granting ones. The filtered
         # version of this listing printed PermitRootLogin out of a planted file
         # and silently dropped the "MaxAuthTries 30" one line below it, so the
@@ -445,6 +475,14 @@ do_audit() {
         grep -nE '^[[:space:]]*[A-Za-z]' "$dropin" 2>/dev/null \
           | sed -E 's|^([0-9]+):[[:space:]]*|           line \1:  |'
       done
+      if [ -n "$late_dropins" ]; then
+        printf '\n'
+        detail "of these, written after the box itself was built:"
+        for dropin in $late_dropins; do detail "   $dropin"; done
+        detail "that is not proof of anything. It is the one here you have no"
+        detail "account for, so it is the one to read all of, not just the line"
+        detail "some other check flagged."
+      fi
       fixhdr
       fixline "sudo $(sshd_bin) -T | grep -E 'permitrootlogin|passwordauth'   # what WINS"
       fixline "ls -lt -- $(printf '%q' "$dropin_dir")                    # newest first"
