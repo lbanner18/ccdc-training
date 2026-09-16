@@ -639,22 +639,92 @@ begin
 # all packaged. An unpackaged SUID root binary is somewhere between a
 # compiled-from-source install and a back door, and on a box you were handed an
 # hour ago it is worth looking at either way.
+# Does any package own this file?
+#
+# The naive `dpkg-query -S "$path"` is wrong on every modern Debian, Ubuntu and
+# RHEL, and wrong in the direction that matters: it says "nobody owns this"
+# about files that ship with the distribution.
+#
+# The cause is the merged-/usr layout. /bin is a symlink to usr/bin, so `find /`
+# reports /usr/bin/fusermount3 while dpkg recorded it as /bin/fusermount3, and
+# the lookup misses. On the lab box that produced a permanent AMBER for a
+# stock fuse3 binary - and an earlier version of this file drew exactly the
+# wrong conclusion from it, concluding the signal was noisy and telling the
+# operator "usually a packaging quirk; confirm once and move on". Directly
+# above a SUID root shell planted twenty minutes earlier.
+#
+# So: ask about the path, and about the same path with the merge undone.
+pkg_owns() {
+  local f=$1 alt=''
+  case "$f" in
+    /usr/bin/*)  alt="/bin/${f#/usr/bin/}" ;;
+    /usr/sbin/*) alt="/sbin/${f#/usr/sbin/}" ;;
+    /usr/lib/*)  alt="/lib/${f#/usr/lib/}" ;;
+    /bin/*)      alt="/usr/bin/${f#/bin/}" ;;
+    /sbin/*)     alt="/usr/sbin/${f#/sbin/}" ;;
+    /lib/*)      alt="/usr/lib/${f#/lib/}" ;;
+  esac
+  if ccdc_have dpkg-query; then
+    dpkg-query -S "$f" >/dev/null 2>&1 && return 0
+    [ -n "$alt" ] && dpkg-query -S "$alt" >/dev/null 2>&1 && return 0
+  elif ccdc_have rpm; then
+    rpm -qf "$f" >/dev/null 2>&1 && return 0
+    [ -n "$alt" ] && rpm -qf "$alt" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# When was this box built? SSH host keys are generated once at first boot and
+# never touched again, which makes them a day-zero marker needing no package
+# database. A SUID root binary newer than the box is a different claim from one
+# that shipped with it, and the date was sitting in the ls -l output all along
+# without anything reading it.
+BOX_BUILT=''
+for _hk in /etc/ssh/ssh_host_*_key; do
+  [ -f "$_hk" ] || continue
+  _m=$(stat -c '%Y' "$_hk" 2>/dev/null) || continue
+  if [ -z "$BOX_BUILT" ] || [ "$_m" -lt "$BOX_BUILT" ]; then BOX_BUILT=$_m; fi
+done
+unset _hk _m
+
+# Is this file newer than the box it is on? 10 minutes of slack so the files
+# written during first boot are not all flagged.
+newer_than_box() {
+  local m
+  [ -n "$BOX_BUILT" ] || return 1
+  m=$(stat -c '%Y' "$1" 2>/dev/null) || return 1
+  [ "$((m - BOX_BUILT))" -gt 600 ]
+}
+
+# A renamed shell is still byte-for-byte the shell. This is the one check that
+# turns "an unpackaged SUID binary, which could be anything" into a fact you can
+# act on without reading a disassembly: if it is identical to /bin/dash, it is
+# /bin/dash, and a SUID root /bin/dash under another name is a root shell.
+identical_to() {
+  local f=$1 c
+  for c in /bin/dash /bin/bash /bin/sh /usr/bin/dash /usr/bin/bash \
+           /bin/busybox /usr/bin/busybox /usr/bin/python3 /usr/bin/perl; do
+    [ -f "$c" ] || continue
+    [ "$c" = "$f" ] && continue
+    if cmp -s -- "$f" "$c" 2>/dev/null; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+
 suid_all=$(find / -xdev -perm -4000 -type f 2>/dev/null)
 suid=$(printf '%s\n' "$suid_all" \
   | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
 
 suid_unpackaged=''
+suid_twin=''
+twin=''
 if ccdc_have dpkg-query || ccdc_have rpm; then
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     # Already reported by name; do not say it twice.
     printf '%s\n' "$suid" | grep -qxF -- "$f" && continue
     own_payload "$f" && continue
-    if ccdc_have dpkg-query; then
-      dpkg-query -S "$f" >/dev/null 2>&1 && continue
-    else
-      rpm -qf "$f" >/dev/null 2>&1 && continue
-    fi
+    pkg_owns "$f" && continue
     suid_unpackaged="$suid_unpackaged $f"
   done <<EOF
 $suid_all
@@ -674,17 +744,32 @@ elif [ -z "$suid_unpackaged" ]; then
   clean "no SUID shells, interpreters, or unpackaged SUID binaries"
 fi
 
-# Where it lives decides how loudly to say it.
+# Where it lives is one signal. What it IS, and when it arrived, are two more,
+# and they outrank location.
 #
-# An unpackaged SUID binary in /usr/bin is usually a packaging quirk - on the
-# lab box /usr/bin/fusermount3 is genuinely in no dpkg file list, and it would
-# have fired on every pass forever. One in /usr/local, /opt, /home, /tmp or
-# /var is a different claim entirely: those are where things get DROPPED, and a
-# SUID root binary there is the shape of a privilege-escalation foothold
-# whatever it is called.
+# The previous version of this sorted on location alone: /usr/local and /tmp got
+# RED, everything else got an AMBER captioned "usually a packaging quirk;
+# confirm once and move on". A SUID root copy of /bin/dash at
+# /usr/lib/x86_64-linux-gnu/gvfsd-helper therefore printed under that caption,
+# one line above a genuine stock binary, and the operator - correctly reading
+# the tool's own advice - did not know which one to care about.
+#
+# /usr/lib is a good place to hide a SUID binary precisely because
+# ssh-keysign genuinely is SUID and genuinely does live there. Location cannot
+# separate those. Identity and date can.
 suid_dropped=''
 suid_odd=''
 for f in $suid_unpackaged; do
+  if twin=$(identical_to "$f"); then
+    suid_dropped="$suid_dropped $f"
+    suid_twin="$suid_twin$f|$twin
+"
+    continue
+  fi
+  if newer_than_box "$f"; then
+    suid_dropped="$suid_dropped $f"
+    continue
+  fi
   case "$f" in
     /usr/local/*|/opt/*|/home/*|/tmp/*|/var/tmp/*|/dev/shm/*|/srv/*|/root/*)
       suid_dropped="$suid_dropped $f" ;;
@@ -693,21 +778,36 @@ for f in $suid_unpackaged; do
 done
 
 if [ -n "$suid_dropped" ]; then
-  red "SUID root binary(s) in a drop location that NO PACKAGE owns   [CARD 5]"
-  detail "a renamed shell defeats a name-based check; ownership does not care what it is called"
+  red "SUID root binary(s) that no package owns   [CARD 5]"
+  detail "a renamed shell defeats a name-based check; ownership does not care"
+  detail "what it is called, and neither does a byte comparison."
   for f in $suid_dropped; do emit RED suidunpackaged "$f" "SUID root binary owned by no package"; done
   for f in $suid_dropped; do
+    printf '\n'
     detail "$(ls -l "$f" 2>/dev/null)"
+    twin=$(printf '%s' "$suid_twin" | awk -F'|' -v p="$f" '$1==p {print $2; exit}')
+    if [ -n "$twin" ]; then
+      detail "   byte-for-byte IDENTICAL to $twin"
+      detail "   that is not a binary that resembles a shell. It is that shell,"
+      detail "   SUID root, under a name chosen to belong where it sits."
+    fi
+    if newer_than_box "$f"; then
+      detail "   written $(date -d "@$(stat -c '%Y' "$f" 2>/dev/null)" '+%Y-%m-%d %H:%M' 2>/dev/null) - AFTER this box was built"
+    fi
     printf -v qf '%q' "$f"
     fixhdr
     fix "file -- $qf && sha256sum -- $qf          # what IS it?"
-    fix "sudo chmod u-s -- $qf                      # strip SUID; do NOT delete it yet"
+    fix "cmp -s -- $qf /bin/dash && echo 'it is dash'   # or bash, or busybox"
+    fix "sudo chmod u-s -- $qf                      # strip SUID FIRST - this alone defangs it"
+    fix "# only then decide about deleting it. Preserve before you do:"
+    fix "sudo cp -p -- $qf /var/tmp/ccdc-evidence/"
   done
 fi
 
 if [ -n "$suid_odd" ]; then
   amber "SUID root binary(s) in a system directory that no package owns   [CARD 5]"
-  detail "usually a packaging quirk; confirm once and move on"
+  detail "these predate the box and are not copies of a shell, so they are"
+  detail "most likely a packaging quirk - but confirm each one once."
   for f in $suid_odd; do
     emit AMBER suidunpackaged "$f" "SUID root binary in a system directory owned by no package"
     detail "$(ls -l "$f" 2>/dev/null)"
