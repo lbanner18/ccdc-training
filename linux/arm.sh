@@ -128,8 +128,12 @@ check_field_list() {
     printf '             got:      %s\n' "$line"
     printf '             expected: %s\n' "$label"
     if [ "$n" -eq 1 ]; then
-      printf '             no "|" at all - a space-separated list of host:port is\n'
-      printf '             the usual way to write this one wrong.\n'
+      # Say what THIS variable is missing. The hint used to be hardcoded for
+      # the TCP case ("a space-separated list of host:port"), which reads as
+      # nonsense above an HTTP check whose value is a URL - and a diagnosis
+      # that does not match what you are looking at is worse than none.
+      printf '             no "|" at all - this needs %s separator(s), and the\n' "$((want - 1))"
+      printf '             value above has none. Write one entry per line.\n'
     else
       printf '             %s field(s), needs %s\n' "$n" "$want"
     fi
