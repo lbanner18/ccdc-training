@@ -29,6 +29,28 @@ if [ "${1:-}" = "--clean" ]; then
   rm -f /usr/local/bin/rt-implant /tmp/.rt-listener /dev/shm/.rt
   # restore an SUID bash if we made one
   rm -f /usr/local/bin/rootbash
+  # The live attacks: kill the processes by the payload path they were started
+  # with, never by name. `pkill python3` on a box where a scored service is a
+  # Python app is an outage you caused during cleanup.
+  for payload in /usr/local/lib/.rt-c2.py /usr/local/lib/.rt-udp.py; do
+    for proc in /proc/[0-9]*/cmdline; do
+      [ -r "$proc" ] || continue
+      tr '\0' '\n' <"$proc" 2>/dev/null | grep -Fxq -- "$payload" || continue
+      pid=${proc#/proc/}; pid=${pid%/cmdline}
+      kill -9 "$pid" 2>/dev/null || true
+    done
+    rm -f "$payload"
+  done
+  # The held-open outbound socket: matched on the exact command line the plant
+  # used, so an unrelated shell on the box is never a candidate.
+  for proc in /proc/[0-9]*/cmdline; do
+    [ -r "$proc" ] || continue
+    tr '\0' '\n' <"$proc" 2>/dev/null | grep -q 'exec 3<>/dev/tcp/' || continue
+    tr '\0' '\n' <"$proc" 2>/dev/null | grep -q 'while :; do sleep 3600' || continue
+    pid=${proc#/proc/}; pid=${pid%/cmdline}
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  rm -f /etc/ssh/sshd_config.d/99-rt-tuning.conf
   # remove the extra authorized_key
   [ -f /root/.ssh/authorized_keys ] && sed -i "/$MARK/d" /root/.ssh/authorized_keys
   rm -f "$manifest"
@@ -189,6 +211,138 @@ if [ -d /var/www/html ]; then
 else
   printf '  skipped: web-file test (/var/www/html absent)\n'
 fi
+
+# --- 12-16: the live attacks -------------------------------------------------
+#
+# Everything above this line is an artifact on disk, which is what hunt.sh and
+# recon.sh were built to find. The five below are the ones that leave the disk
+# looking normal, and they are here because the kit grew checks for exactly
+# these and untested checks are decoration.
+#
+# A NOTE ON THE REVERSE SHELL, DELIBERATELY: the process below holds an
+# outbound connection and does NOT read commands from it. That is the whole
+# difference between a detection fixture and a backdoor. The detector's input -
+# a bash process owning an established outbound socket on 443 - is identical
+# either way, so nothing is lost by leaving out the loop that would execute
+# whatever the far end sent, and what is gained is that this file never
+# contains a working remote shell. Keep it that way.
+
+rt_port_free() {
+  ss -tlnH "sport = :$1" 2>/dev/null | grep -q . && return 1
+  return 0
+}
+
+# 12. Outbound "C2" on 443: the payload that never touches the disk.
+c2_port=${RT_C2_PORT:-443}
+c2_addr=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+if [ -z "$c2_addr" ]; then
+  printf '  skipped: outbound C2 test (no non-loopback address on this VM)\n'
+elif ! rt_port_free "$c2_port"; then
+  printf '  skipped: outbound C2 test (port %s is already in use - set RT_C2_PORT)\n' "$c2_port"
+elif ! command -v python3 >/dev/null 2>&1; then
+  printf '  skipped: outbound C2 test (python3 is needed to hold the far end)\n'
+else
+  cat >/usr/local/lib/.rt-c2.py <<'PY'
+import socket, sys, time
+# Lab fixture: accepts connections and does nothing with them. It exists so the
+# defender's socket table has something real to find.
+host, port = sys.argv[1], int(sys.argv[2])
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind((host, port)); s.listen(4); s.settimeout(5)
+held = []
+while True:
+    try:
+        c, _ = s.accept(); held.append(c)
+    except Exception:
+        time.sleep(1)
+PY
+  setsid python3 /usr/local/lib/.rt-c2.py "$c2_addr" "$c2_port" </dev/null >/dev/null 2>&1 &
+  c2_pid=$!
+  sleep 1
+  # The "implant": holds the socket open, reads nothing, executes nothing.
+  setsid bash -c "exec 3<>/dev/tcp/$c2_addr/$c2_port; while :; do sleep 3600; done" \
+    </dev/null >/dev/null 2>&1 &
+  shell_pid=$!
+  sleep 1
+  if ss -tnH state established "dst $c2_addr:$c2_port" 2>/dev/null | grep -q .; then
+    plant "c2:bash-outbound|addr=$c2_addr:$c2_port|listener_pid=$c2_pid|shell_pid=$shell_pid"
+  else
+    kill -9 "$c2_pid" "$shell_pid" 2>/dev/null || true
+    plant_failed "c2:bash-outbound|addr=$c2_addr:$c2_port"
+  fi
+fi
+
+# 13. Drop the runtime audit rules the way a service restart does.
+if command -v auditctl >/dev/null 2>&1; then
+  rules_before=$(auditctl -l 2>/dev/null | grep -c . || true)
+  [ -n "$rules_before" ] || rules_before=0
+  if auditctl -D >/dev/null 2>&1; then
+    plant "audit:runtime-rules-cleared|rules_before=$rules_before"
+  else
+    plant_failed "audit:runtime-rules-cleared"
+  fi
+else
+  printf '  skipped: audit rule drop (no auditctl on this VM)\n'
+fi
+
+# 14. SSH drop-in that re-enables root, with sshd_config untouched.
+#
+# sshd is deliberately NOT reloaded. The file alone is what `sshd -T` reads, so
+# the detection is exercised either way - and leaving the daemon unreloaded also
+# exercises the "config changed after sshd started" check, which is the one that
+# catches a booby trap set for the next restart.
+if [ -d /etc/ssh/sshd_config.d ]; then
+  if printf '# %s\nPermitRootLogin yes\nPasswordAuthentication yes\n' "$MARK" \
+       >/etc/ssh/sshd_config.d/99-rt-tuning.conf; then
+    plant "sshd-dropin:/etc/ssh/sshd_config.d/99-rt-tuning.conf|effect=PermitRootLogin-yes"
+  else
+    plant_failed "sshd-dropin:/etc/ssh/sshd_config.d/99-rt-tuning.conf"
+  fi
+else
+  printf '  skipped: sshd drop-in (this box has no sshd_config.d)\n'
+fi
+
+# 15. A UDP listener owned by no systemd unit.
+udp_port=${RT_UDP_PORT:-45455}
+if command -v python3 >/dev/null 2>&1; then
+  cat >/usr/local/lib/.rt-udp.py <<'PY'
+import socket, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", int(sys.argv[1])))
+while True:
+    time.sleep(3600)
+PY
+  setsid python3 /usr/local/lib/.rt-udp.py "$udp_port" </dev/null >/dev/null 2>&1 &
+  udp_pid=$!
+  sleep 1
+  if ss -ulnH "sport = :$udp_port" 2>/dev/null | grep -q .; then
+    plant "udp-listener:0.0.0.0:$udp_port|pid=$udp_pid|unit=none"
+  else
+    kill -9 "$udp_pid" 2>/dev/null || true
+    plant_failed "udp-listener:0.0.0.0:$udp_port"
+  fi
+else
+  printf '  skipped: UDP listener (python3 needed)\n'
+fi
+
+# 16. Wipe the auth log and stay on the box.
+#
+# This is destructive to a log on the lab VM, which is the point: the defender's
+# job is to notice that it happened, and nothing notices a log that was never
+# written to in the first place. A line is appended first so there is something
+# to lose.
+for auth_log in /var/log/auth.log /var/log/secure; do
+  [ -f "$auth_log" ] || continue
+  size_before=$(stat -c '%s' "$auth_log" 2>/dev/null || printf 0)
+  logger -p auth.notice "$MARK pre-wipe marker" 2>/dev/null || true
+  sleep 1
+  if : >"$auth_log" 2>/dev/null; then
+    plant "log-wipe:$auth_log|bytes_destroyed=$size_before"
+  else
+    plant_failed "log-wipe:$auth_log"
+  fi
+  break
+done
 
 echo
 echo "[*] GROUND TRUTH - $(wc -l <"$manifest") artifacts planted:"

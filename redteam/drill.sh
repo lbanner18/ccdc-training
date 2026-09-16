@@ -362,6 +362,163 @@ printf '\n  -- score.sh native output --\n'
 ./redteam/score.sh "$HUNT_DIR" "$RECON_DIR" 2>&1 | sed 's/^/    /'
 [ "${PIPESTATUS[0]}" -eq 0 ] && ok "score.sh returned success" || no "score.sh reported missed techniques"
 
+# ---------------------------------------------------------------- phase 2b
+hdr "PHASE 2b - the attacks that leave the disk looking normal"
+#
+# Everything scored above is an artifact on disk. These five are the ones a
+# file-based sweep cannot see: a socket, a dropped kernel rule, an override
+# file whose parent is untouched, a listener under no unit, and a log that is
+# missing what it used to say. Each corresponds to a check added for it, and a
+# check nobody has attacked is a check nobody has tested.
+#
+# Each block skips rather than fails when its plant was skipped: the plant
+# refuses to take port 443 from a scored service, and a drill that fails
+# because the VM is configured differently teaches the wrong lesson.
+
+TRIAGE_OUT="$DRILL_TMP/triage-live.out"
+./linux/triage.sh --config "$CFG" >"$TRIAGE_OUT" 2>&1
+triage_rc=$?
+[ "$triage_rc" -eq 3 ] && ok "triage flagged the planted box (exit 3)" \
+                       || no "triage exit was $triage_rc, expected 3"
+
+# 1. The reverse shell: bash holding an outbound connection on an allowed port.
+if grep -q '^c2:bash-outbound' /root/.rt_manifest 2>/dev/null; then
+  c2_line=$(grep '^c2:bash-outbound' /root/.rt_manifest | head -1)
+  c2_where=${c2_line#*addr=}; c2_where=${c2_where%%|*}
+  if grep -q 'should not be on the network' "$TRIAGE_OUT" \
+     && grep -q 'outbound' "$TRIAGE_OUT"; then
+    ok "triage found the outbound shell on $c2_where with no file to find"
+  else
+    no "the outbound reverse shell was NOT detected"
+    grep -A4 'network' "$TRIAGE_OUT" | head -12 | sed 's/^/    /'
+  fi
+  # And the machine-readable side, which is what sentry consumes.
+  if grep -q '^RED|netproc|.*bash' "$EV/triage.findings" 2>/dev/null; then
+    ok "the shell reached the machine findings as RED netproc"
+  else
+    no "no RED netproc finding was written for the outbound shell"
+  fi
+  # Volatile capture has to get the socket and the parent BEFORE remediation.
+  c2_shell_pid=${c2_line#*shell_pid=}; c2_shell_pid=${c2_shell_pid%%|*}
+  if ./linux/preserve.sh --config "$CFG" --pid "$c2_shell_pid" \
+       >"$DRILL_TMP/preserve.out" 2>&1; then
+    case_dir=$(find "$EV/cases" -maxdepth 1 -type d -name "*pid$c2_shell_pid" 2>/dev/null | head -1)
+    if [ -n "$case_dir" ] && [ -s "$case_dir/40-pid-$c2_shell_pid/ancestry.txt" ] \
+       && [ -s "$case_dir/40-pid-$c2_shell_pid/sockets.txt" ]; then
+      ok "preserve captured the shell's ancestry and socket while it was alive"
+    else
+      no "preserve did not capture the live process context"
+    fi
+  else
+    no "preserve.sh failed on the live implant"
+  fi
+else
+  note "skipped: outbound C2 was not planted on this VM"
+fi
+
+# 2. The audit rules the plant dropped, the way a service restart does.
+if grep -q '^audit:runtime-rules-cleared' /root/.rt_manifest 2>/dev/null; then
+  ./linux/audit.sh --config "$CFG" --check >"$DRILL_TMP/audit-check.out" 2>&1
+  audit_rc=$?
+  if [ "$audit_rc" -eq 3 ] && grep -q 'NOT LOADED\|NO persistent audit rules' "$DRILL_TMP/audit-check.out"; then
+    ok "audit.sh noticed the rules were gone from the kernel"
+  else
+    no "audit.sh did not report the dropped rules (exit $audit_rc)"
+    sed 's/^/    /' "$DRILL_TMP/audit-check.out" | head -10
+  fi
+  # And the repair that makes the difference between reporting and fixing.
+  ./linux/audit.sh --config "$CFG" --apply >"$DRILL_TMP/audit-install.out" 2>&1
+  ./linux/audit.sh --config "$CFG" --repair --apply >"$DRILL_TMP/audit-repair.out" 2>&1
+  if auditctl -l 2>/dev/null | grep -q 'ccdc-'; then
+    ok "audit rules were repaired back into the kernel"
+  else
+    no "audit repair did not restore the rules"
+    sed 's/^/    /' "$DRILL_TMP/audit-repair.out" | head -10
+  fi
+  # The real test of persistence: survive the restart that dropped them.
+  if systemctl restart auditd >/dev/null 2>&1 || service auditd restart >/dev/null 2>&1; then
+    sleep 2
+    if auditctl -l 2>/dev/null | grep -q 'ccdc-'; then
+      ok "the rules SURVIVED an auditd restart (this is the whole point)"
+    else
+      no "an auditd restart dropped the rules again - persistence is not working"
+    fi
+  else
+    note "could not restart auditd on this VM; persistence across restart untested"
+  fi
+else
+  note "skipped: audit rules were not dropped on this VM"
+fi
+
+# 3. The SSH drop-in, with sshd_config untouched.
+if [ -f /etc/ssh/sshd_config.d/99-rt-tuning.conf ]; then
+  ./linux/sshd.sh --config "$CFG" >"$DRILL_TMP/sshd-audit.out" 2>&1
+  sshd_rc=$?
+  if grep -qi 'permitrootlogin is "yes"' "$DRILL_TMP/sshd-audit.out"; then
+    ok "sshd.sh reported the EFFECTIVE root-login setting, not the main file"
+  else
+    no "the drop-in override was not detected"
+    sed 's/^/    /' "$DRILL_TMP/sshd-audit.out" | head -12
+  fi
+  if grep -q '99-rt-tuning.conf' "$DRILL_TMP/sshd-audit.out"; then
+    ok "sshd.sh named the drop-in file responsible"
+  else
+    no "sshd.sh did not name the responsible drop-in"
+  fi
+  if grep -q 'PermitRootLogin no' /etc/ssh/sshd_config 2>/dev/null; then
+    ok "and sshd_config itself still says no - which is why reading it is not enough"
+  else
+    note "sshd_config does not contain an explicit PermitRootLogin no on this VM"
+  fi
+  [ "$sshd_rc" -eq 3 ] && ok "sshd audit exited 3" || no "sshd audit exit was $sshd_rc"
+else
+  note "skipped: sshd drop-in was not planted on this VM"
+fi
+
+# 4. The UDP listener under no systemd unit.
+if grep -q '^udp-listener' /root/.rt_manifest 2>/dev/null; then
+  udp_line=$(grep '^udp-listener' /root/.rt_manifest | head -1)
+  udp_where=${udp_line#udp-listener:}; udp_where=${udp_where%%|*}
+  udp_port=${udp_where##*:}
+  ./linux/surface.sh --config "$CFG" >"$DRILL_TMP/surface.out" 2>&1
+  if grep -qE "udp .*[^0-9]$udp_port .*REVIEW" "$DRILL_TMP/surface.out" \
+     || grep -q "$udp_port" "$DRILL_TMP/surface.out"; then
+    ok "surface.sh listed the rogue UDP listener on $udp_port"
+  else
+    no "the rogue UDP listener was not in the surface report"
+  fi
+  if grep -q "$udp_port" "$TRIAGE_OUT"; then
+    ok "triage flagged the unaccounted UDP port as well"
+  else
+    no "triage did not flag the rogue UDP listener"
+  fi
+else
+  note "skipped: UDP listener was not planted on this VM"
+fi
+
+# 5. The wiped auth log.
+#
+# This one needs a baseline to compare against, which is the point being
+# tested: a size check with nothing to compare to cannot tell a wiped log from
+# a quiet one. The drill takes a baseline, wipes again, and asserts.
+if grep -q '^log-wipe' /root/.rt_manifest 2>/dev/null; then
+  wipe_line=$(grep '^log-wipe' /root/.rt_manifest | head -1)
+  wiped_log=${wipe_line#log-wipe:}; wiped_log=${wiped_log%%|*}
+  logger -p auth.notice "drill baseline line" 2>/dev/null || true
+  sleep 1
+  ./linux/audit.sh --config "$CFG" --check >/dev/null 2>&1
+  : >"$wiped_log" 2>/dev/null
+  ./linux/audit.sh --config "$CFG" --check >"$DRILL_TMP/audit-wipe.out" 2>&1
+  if grep -q 'SHRANK' "$DRILL_TMP/audit-wipe.out"; then
+    ok "a truncated $wiped_log was reported as tampering"
+  else
+    no "the log wipe was not detected"
+    sed 's/^/    /' "$DRILL_TMP/audit-wipe.out" | head -10
+  fi
+else
+  note "skipped: no auth log was wiped on this VM"
+fi
+
 printf '\n  -- canary check --\n'
 ./linux/canary.sh --config "$CFG" --check >"$DRILL_TMP/canary-check.out" 2>&1
 canary_rc=$?
@@ -442,6 +599,51 @@ for needle in '/usr/local/bin/rt-implant' '/etc/systemd/system/rt-backdoor.timer
 done
 [ "$rehunt_hits" -eq 0 ] && ok "re-hunt is clean" \
                          || no "re-hunt still finds $rehunt_hits red-team artifact(s)"
+
+# 4b. ERADICATE the live half: a socket, a listener, and an override file.
+#
+# Processes are killed by the exact payload path they were started with, never
+# by name. `pkill python3` on a box whose scored service is a Python app is an
+# outage you caused while cleaning up - which is the single most likely way for
+# this drill to teach a habit that costs points on the day.
+for payload in /usr/local/lib/.rt-c2.py /usr/local/lib/.rt-udp.py; do
+  for proc in /proc/[0-9]*/cmdline; do
+    [ -r "$proc" ] || continue
+    tr '\0' '\n' <"$proc" 2>/dev/null | grep -Fxq -- "$payload" || continue
+    pid=${proc#/proc/}; pid=${pid%/cmdline}
+    kill -9 "$pid" 2>/dev/null || true
+  done
+  rm -f "$payload"
+done
+for proc in /proc/[0-9]*/cmdline; do
+  [ -r "$proc" ] || continue
+  tr '\0' '\n' <"$proc" 2>/dev/null | grep -q 'exec 3<>/dev/tcp/' || continue
+  tr '\0' '\n' <"$proc" 2>/dev/null | grep -q 'while :; do sleep 3600' || continue
+  pid=${proc#/proc/}; pid=${pid%/cmdline}
+  kill -9 "$pid" 2>/dev/null || true
+done
+rm -f /etc/ssh/sshd_config.d/99-rt-tuning.conf
+sleep 1
+
+# The detectors have to go quiet again. A finding that cannot be cleared is
+# indistinguishable from a broken check.
+./linux/triage.sh --config "$CFG" >"$DRILL_TMP/triage-after.out" 2>&1
+if grep -q 'should not be on the network' "$DRILL_TMP/triage-after.out"; then
+  no "triage still reports a process on the network after eradication"
+  grep -A3 'on the network' "$DRILL_TMP/triage-after.out" | head -8 | sed 's/^/      /'
+else
+  ok "the outbound shell and rogue listener are gone from triage"
+fi
+if [ -f /etc/ssh/sshd_config.d/99-rt-tuning.conf ]; then
+  no "the malicious SSH drop-in survived eradication"
+else
+  ./linux/sshd.sh --config "$CFG" >"$DRILL_TMP/sshd-after.out" 2>&1
+  if grep -qi 'permitrootlogin is "yes"' "$DRILL_TMP/sshd-after.out"; then
+    no "root login is STILL enabled after removing the drop-in (something else sets it)"
+  else
+    ok "removing the drop-in restored the effective SSH policy"
+  fi
+fi
 
 # 5. RECOVER: the service must have stayed up the entire time, not merely be up
 # now. This is the assertion the monitor exists for.
