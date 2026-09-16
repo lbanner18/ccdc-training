@@ -95,6 +95,11 @@ sudo awk -F: '$2=="" {print $1}' /etc/shadow
 ```bash
 U=svc-monitor                      # <- the name triage printed
 
+# 0. WHERE DOES IT LIVE? Do this first, because it decides step 5.
+#    A UID-0 backdoor's home is very often /root - that is the point of it.
+H=$(awk -F: -v u="$U" '$1==u {print $6}' /etc/passwd); echo "$H"
+awk -F: -v h="$H" '$6==h {print $1}' /etc/passwd    # anyone else living there?
+
 # 1. STOP IT BEING USABLE. Safe, instant, and reversible if it turns out to be
 #    a scored account with a mangled UID rather than an implant.
 sudo passwd -l "$U"                        # lock the password
@@ -109,19 +114,20 @@ ps -ef | grep -w "$U" | grep -v grep       # note the PIDs, kill them one by one
 # 3. Is it actually theirs? Check before deleting.
 grep "^$U:" /etc/passwd
 sudo last "$U" | head
-ls -la "/home/$U" 2>/dev/null
+sudo ls -la "$H" 2>/dev/null               # $H from step 0, NOT /home/$U
 
 # 4. THE WAY BACK IN - all of these, not just the first.
 sudo crontab -u "$U" -l 2>/dev/null          # their personal crontab
 sudo grep -rn "$U" /etc/cron.d /etc/cron.* /etc/sudoers /etc/sudoers.d 2>/dev/null
-sudo cat "/home/$U/.ssh/authorized_keys" 2>/dev/null
+sudo cat "$H/.ssh/authorized_keys" 2>/dev/null
 sudo grep -rn "$U" /etc/ssh/sshd_config /etc/ssh/sshd_config.d 2>/dev/null
-sudo ls -la "/home/$U/.config/systemd/user/" 2>/dev/null   # user-level units
+sudo ls -la "$H/.config/systemd/user/" 2>/dev/null   # user-level units
 
 # 5. REMOVE. The -f is REQUIRED for a UID-0 account and is not optional:
 #    without it userdel refuses outright (see the trap below).
+#    -r is a SEPARATE decision. It deletes $H. Read the trap below first.
 sudo crontab -u "$U" -r 2>/dev/null
-sudo userdel -f -r "$U"
+sudo userdel -f "$U"                       # add -r ONLY per the trap below
 
 # 6. VERIFY - all four of these
 awk -F: '$3==0 {print $1}' /etc/passwd      # should be: root, and only root
@@ -139,16 +145,40 @@ userdel: user svc-monitor is currently used by process 1
 
 Process 1 is `systemd`. It is not the attacker's — the tools simply cannot tell
 the two UID-0 accounts apart. Verified on the lab box: plain `userdel -r` and
-`usermod -u` both **failed and changed nothing**, while `userdel -f -r`
-succeeded, removed the `/etc/shadow` entry and the home directory, and left all
-136 root processes and the scored service running. The warning still prints.
-Ignore it and check step 6 instead.
+`usermod -u` both **failed and changed nothing**, while `userdel -f`
+succeeded, removed the `/etc/shadow` entry, and left all 136 root processes and
+the scored service running. The warning still prints. Ignore it and check step 6
+instead.
+
+**Trap — `-r` deletes `$H`, and `$H` is probably not theirs.** A UID-0 backdoor
+usually has `/root` as its home directory, because that is what makes it root.
+`userdel -r` on such an account **deletes `/root`**: root's `authorized_keys`,
+root's dotfiles, and anything the team or a scored service kept there.
+
+This card and `triage.sh` both printed `userdel -f -r` unconditionally until an
+operator pasted it on the lab box and `/root` went with the account — noticed
+forty minutes later, and only because a canary deployed under `/root` could no
+longer be found. `triage.sh` now works the home directory out for you and omits
+`-r` when the directory is not the account's alone.
+
+Use step 0's answer:
+
+| `$H` | what to run |
+|---|---|
+| `/root`, `/`, `/etc`, `/var`, any system directory | `sudo userdel -f "$U"` — **never** `-r` |
+| shared with another account in step 0 | `sudo userdel -f "$U"` — **never** `-r` |
+| its own directory, e.g. `/home/svc-monitor` | `sudo userdel -f -r "$U"` is fine |
+
+When you skip `-r`, the directory stays. That is the right outcome: read it
+yourself afterwards. On a UID-0 backdoor it is root's own home, and what is in
+it is evidence.
 
 **Trap:** a second UID-0 account is a classic pair — the attacker expects you to
 find one. Re-run the `awk` in step 6 after removing it.
 
 **If the account is NOT UID 0** (an ordinary rogue user), `pkill -9 -u "$U"` is
-safe and is the right first move, and plain `userdel -r "$U"` works.
+safe and is the right first move, and `userdel -r "$U"` works — subject to the
+same `$H` check, which an ordinary account will normally pass.
 
 ---
 

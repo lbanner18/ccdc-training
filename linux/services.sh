@@ -52,6 +52,15 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error. This file was missed
+# by the first sweep for that defect because its commands live in heredocs
+# rather than printf, and a quoted heredoc hides them from a grep for the
+# idiom the sweep was looking for.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/services.sh"
 if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 ccdc_have systemctl || ccdc_die "this box does not use systemd; disable services by hand"
 
@@ -294,12 +303,12 @@ EOF
     printf '\n'
   done
 
-  cat <<'NEXT'
+  cat <<NEXT
   Next:
     1. Read the CANDIDATES. Disagree with any of them - they are suggestions.
     2. Put the ones you want gone in CCDC_DISABLE_SERVICES in your config.
-    3. sudo ./linux/services.sh --config <cfg> --disable            (dry run)
-    4. sudo ./linux/services.sh --config <cfg> --disable --apply
+    3. sudo $qself --config $qconfig --disable            (dry run)
+    4. sudo $qself --config $qconfig --disable --apply
     5. Check your scored services are STILL UP from off the box.
 
   Anything you turn off is recorded, so --revert puts it all back.
@@ -385,13 +394,13 @@ do_disable() {
     return 0
   fi
   ccdc_info "$count unit(s) disabled, $refused refused, $errors failed. Revert record: $record"
-  cat <<'AFTER'
+  cat <<AFTER
 
   NOW GO CHECK YOUR SCORED SERVICES FROM OFF THE BOX.
   Disabling something with a dependency you did not know about is the failure
   mode here, and it is silent from inside the box. If anything broke:
 
-      sudo ./linux/services.sh --config <cfg> --revert --apply
+      sudo $qself --config $qconfig --revert --apply
 AFTER
   if [ "$errors" -gt 0 ] || [ "$refused" -gt 0 ]; then
     ccdc_warn "requested service changes were incomplete; inspect warnings and keep the revert record"

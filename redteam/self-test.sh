@@ -29,6 +29,9 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== pasteable output ==\n'
+bash "$ROOT/redteam/pasteable-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== canary and change watch ==\n'
 bash "$ROOT/redteam/canary-watch-self-test.sh" || failed=$((failed + 1))
 

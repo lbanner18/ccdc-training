@@ -205,6 +205,51 @@ begin() { checks=$((checks + 1)); }
 printf 'triage.sh - what should alarm you on %s, right now\n' "${CCDC_BOX_NAME:-this box}"
 printf 'read-only. %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
+# What `userdel -r` would actually delete, and whether that is survivable.
+#
+# A backdoor UID-0 account's home directory is very often /root - that is the
+# whole point of the account, it IS root. `userdel -r` on one of those deletes
+# /root: root's authorized_keys, root's dotfiles, whatever the team put there,
+# and any scored content living underneath it.
+#
+# This is not hypothetical. This function exists because triage.sh printed
+#
+#     sudo userdel -f -r -- sysmon
+#
+# an operator pasted it exactly as instructed, and /root was gone from the lab
+# box - noticed forty minutes later, and only because a canary that had been
+# deployed under /root could not be found. The account was the finding. Its
+# home directory was not, and the tool had no business handing out a command
+# that removed it.
+#
+# So: work out where the account lives, and only offer -r when the directory
+# belongs to that account alone.
+userdel_fix() {
+  local user=$1 quser=$2 home shared
+  home=$(awk -F: -v u="$user" '$1 == u { print $6 }' /etc/passwd 2>/dev/null)
+  if [ -z "$home" ]; then
+    fix "sudo userdel -f -- $quser"
+    return 0
+  fi
+  case "$home" in
+    /|/root|/etc|/usr|/var|/opt|/srv|/home|/tmp|/boot|/dev|/run|/bin|/sbin|/lib|/nonexistent)
+      fix "sudo userdel -f -- $quser                   # NOT -r: home is $home"
+      fix "# -r would DELETE $home. Take the account, leave the directory."
+      fix "# Then read $home yourself - on a UID-0 backdoor it is usually"
+      fix "# root's own home, and what is in it is evidence, not the attacker's."
+      return 0 ;;
+  esac
+  # Another account in the same directory means -r takes THEIR home with it.
+  shared=$(awk -F: -v u="$user" -v h="$home" '$1 != u && $6 == h { print $1 }' \
+    /etc/passwd 2>/dev/null | tr '\n' ' ')
+  if [ -n "$shared" ]; then
+    fix "sudo userdel -f -- $quser                   # NOT -r: $home is shared"
+    fix "# also the home of: ${shared% }"
+    return 0
+  fi
+  fix "sudo userdel -f -r -- $quser                  # -r also deletes $home"
+}
+
 # --- 1. UID 0 accounts that are not root -------------------------------------
 # The cheapest persistent root there is, and invisible in `who`, `sudo -l` and
 # every "check for new users" habit that looks at UID >= 1000.
@@ -223,7 +268,7 @@ if [ -n "$uid0" ]; then
     fix "sudo passwd -l $quser"
     fix "sudo usermod -s /usr/sbin/nologin $quser"
     fix "ps -ef | grep -w -- $quser | grep -v grep      # kill these by PID, NOT by user"
-    fix "sudo userdel -f -r -- $quser                   # -f required; warns about PID 1"
+    userdel_fix "$u" "$quser"
   done
   detail "NEVER pkill -u on a UID-0 account: the name resolves to root and you"
   detail "would kill every root process on the box. See CARD 1."
@@ -245,7 +290,8 @@ if [ -r /etc/shadow ]; then
       fix "sudo passwd -l $quser"
       fix "sudo usermod -s /usr/sbin/nologin $quser"
       fix "sudo pkill -9 -u $quser                     # safe here: this is NOT UID 0"
-      fix "sudo userdel -r -- $quser                      # only if the packet says it is not scored"
+      fix "# only if the packet says this account is not scored:"
+      userdel_fix "$u" "$quser"
     done
   else
     clean "no empty-password accounts"

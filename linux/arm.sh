@@ -120,17 +120,68 @@ if [ "$skip_backup" -eq 0 ]; then
   fi
 fi
 
+# Are the decoys on disk, as the manifest describes them? Deliberately does NOT
+# ask whether any has been TRIPPED: a tripped canary is a detection, it belongs
+# in the sentry queue, and it is not arm.sh's business to grade it.
+canaries_already_laid() {
+  local m="$evidence_dir/canary.manifest" path count=0
+  [ -f "$m" ] && [ ! -L "$m" ] || return 1
+  while IFS='|' read -r path _rest; do
+    [ -n "$path" ] || continue
+    [ -e "$path" ] || return 1
+    count=$((count + 1))
+  done <"$m"
+  [ "$count" -gt 0 ] || return 1
+  printf '%s\n' "$count"
+}
+
+# Decoys the manifest describes that are no longer on disk. There are only two
+# ways to get here and both are worth a sentence rather than a generic error:
+# the deploy was interrupted, or something deleted them - and a deleted decoy
+# is the canary doing its job, which is a detection, not a setup failure.
+canaries_missing() {
+  local m="$evidence_dir/canary.manifest" path
+  [ -f "$m" ] || return 0
+  while IFS='|' read -r path _rest; do
+    [ -n "$path" ] || continue
+    [ -e "$path" ] || printf '%s\n' "$path"
+  done <"$m"
+}
+
 # --- 2. tripwires ------------------------------------------------------------
 
 if [ "$skip_canary" -eq 0 ]; then
   note "tripwires (canary.sh --deploy)"
   if [ "$apply" -eq 1 ]; then
-    if "$SCRIPT_DIR/canary.sh" --config "$config" --deploy --apply >/dev/null 2>&1; then
+    if canary_out=$("$SCRIPT_DIR/canary.sh" --config "$config" --deploy --apply 2>&1); then
       canary_count=$(wc -l <"$evidence_dir/canary.manifest" 2>/dev/null || true)
       [ -n "$canary_count" ] || canary_count=0
       good "decoys laid ($canary_count)"
+    elif canary_count=$(canaries_already_laid); then
+      # Re-running arm.sh is a normal thing to do: after a reboot, after fixing
+      # one failed step, after a teammate ran it first. Canaries are the single
+      # step that refuses to run twice, on purpose - a second deploy rewrites
+      # the manifest and discards the hashes every trip detection compares
+      # against. So a refused re-deploy is the tool protecting evidence.
+      #
+      # Reporting that as a PROBLEM, and the whole standing defence as
+      # INCOMPLETE, sent an operator off to debug a working system. It also
+      # taught them that a red line in this output might mean nothing, which is
+      # the more expensive of the two costs.
+      good "decoys already laid ($canary_count); left exactly as they are"
+    elif [ -n "$(canaries_missing)" ]; then
+      bad "canaries were deployed, but some are GONE from disk"
+      canaries_missing | sed 's/^/           missing: /'
+      printf '           Either the deploy was interrupted, or something deleted\n'
+      printf '           them - and a deleted decoy is a DETECTION, not a setup\n'
+      printf '           problem. Find out which before redeploying, because a\n'
+      printf '           redeploy rewrites the manifest and the evidence with it.\n'
+      printf '           sudo %s/canary.sh --config %s --check\n' "$qkit" "$qconfig"
+      printf '           sudo ausearch -f %s 2>/dev/null | tail -20\n' "$(canaries_missing | head -1)"
     else
-      bad "canary deploy failed (already deployed? run --status, or --remove first)"
+      bad "canary deploy failed"
+      printf '%s\n' "$canary_out" | sed 's/^/           /' | head -5
+      printf '           sudo %s/canary.sh --config %s --status\n' "$qkit" "$qconfig"
     fi
     ccdc_have auditctl || printf '    note: auditd absent — modify/delete is detectable, reads are not\n'
   else
@@ -228,7 +279,12 @@ if [ "$failed" -gt 0 ]; then
 else
   ccdc_info "armed. Machinery is now holding your services up."
 fi
-cat <<'NEXT'
+# NOT a quoted heredoc. This block prints commands meant to be pasted, and a
+# <<'NEXT' expands nothing - it printed the literal $qkit/sentry.sh, which
+# an operator pasted and got "command not found" three times in a row. Same
+# defect as the <cfg> one, in the one place the earlier sweep could not see:
+# inside a heredoc, the '"$var"' idiom is just text.
+cat <<NEXT
 
   What is now running without you:
     - watchdog: restarts a dead scored service and verifies it recovered
@@ -237,21 +293,21 @@ cat <<'NEXT'
     - canary:   decoys are laid and their trips feed sentry
 
   Your short check-in loop (the terminal stays free):
-    sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --status
-    sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve --apply
+    sudo $qkit/sentry.sh --config $qconfig --status
+    sudo $qkit/sentry.sh --config $qconfig --approve --apply
     and verify the scored service FROM OFF THE BOX, which no on-box tool can do
 
   What still needs you, once, as a judgement call:
-    '"$qkit"'/services.sh --config '"$qconfig"' --review    what should not be running
-    '"$qkit"'/fw.sh       --config '"$qconfig"'             what should not be reachable
+    $qkit/services.sh --config $qconfig --review    what should not be running
+    $qkit/fw.sh       --config $qconfig             what should not be reachable
   Neither runs here. Both can take a scored service off the board if you get
   them wrong, so they stay a decision you make with the packet in front of you,
   not something a setup script does on your behalf.
 
   Disarm everything:
-    sudo '"$qkit"'/guardian.sh --config '"$qconfig"' --uninstall --apply
-    sudo '"$qkit"'/sentry.sh  --config '"$qconfig"' --uninstall --apply
-    sudo '"$qkit"'/canary.sh   --config '"$qconfig"' --remove    --apply
+    sudo $qkit/guardian.sh --config $qconfig --uninstall --apply
+    sudo $qkit/sentry.sh  --config $qconfig --uninstall --apply
+    sudo $qkit/canary.sh   --config $qconfig --remove    --apply
 NEXT
 [ "$failed" -eq 0 ] || exit 1
 exit 0
