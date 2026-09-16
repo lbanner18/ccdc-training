@@ -51,21 +51,6 @@ looks like, or you will not be able to tell your own change from an intrusion.
 [ ]      ./linux/splunk.sh --config /tmp/ccdc-linux.env # are logs leaving?
 ```
 
-Three things that are only true until someone changes them, so do them early
-and write down the time:
-
-```
-[ ] sudo ./linux/audit.sh --config /tmp/ccdc-linux.env --apply
-    Persistent audit rules: they survive the `systemctl restart auditd` that
-    silently clears every runtime watch.
-[ ] sudo ./linux/audit.sh --config /tmp/ccdc-linux.env --capture
-    The log baseline. Without it, "they wiped the logs" is something you
-    believe rather than something you can show.
-[ ] sudo ./linux/splunk.sh --config /tmp/ccdc-linux.env --test-event --apply
-    Then FIND THE TOKEN IN SPLUNK. Write the token and the time in your notes:
-    "forwarding verified at 10:14 with token X" is an inject answer.
-```
-
 Read, by hand, in this order — this is where the red team's pre-placed access
 lives. **Every line below is a real command you can paste**; explanations are on
 their own `#` lines so nothing here is ambiguous at 10:05:
@@ -141,16 +126,41 @@ sources. Egress: the packet decides. Blocking outbound kills most C2 callbacks
 ("if red team can't call home, their persistence dies") but can break DNS or a
 scored service — test it, do not assume it.
 
-### 2c. SSH third
+### 2c. SSH third — audit first, then change it transactionally
 
-See the ssh-access inject draft for the full config. Minimum:
+**Audit before you touch anything.** `sshd_config` is not what the daemon does:
+a file in `sshd_config.d` overrides it, and `grep PermitRootLogin
+/etc/ssh/sshd_config` has no idea. Proven on the lab VM, where the main config
+did not set the directive at all and a drop-in had turned root logins back on.
 
 ```
-[ ] Keys over passwords - BUT if the scorer logs in with a password, keep it
-    for that account (Match block). Killing the scorer's login = downtime.
-[ ] PermitRootLogin no ; AllowGroups <admins> ; MaxAuthTries 3
-[ ] sshd -t   before restart, and hold a second session open during restart.
+[ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env     # READ-ONLY
+    Reads the EFFECTIVE config and names the file AND LINE that set each value.
+    It also reports the ways in that no authorized_keys review can see:
+      AuthorizedKeysCommand  - whatever that program prints IS an authorized key
+      TrustedUserCAKeys      - new keys mintable forever, without touching this box
+      Match blocks           - sshd -T does not evaluate them, so it says so
+[ ] Read every drop-in it lists. One of them may be why a scored login works.
 ```
+
+Then apply policy, behind the same dead man's switch as the firewall:
+
+```
+[ ] Set in the config: CCDC_SSH_PERMIT_ROOT_LOGIN="no", MAX_AUTH_TRIES="4".
+    LEAVE CCDC_SSH_PASSWORD_AUTH EMPTY unless the packet says key-only - the
+    scorer may log in with a password, and "hardening" that away is downtime.
+[ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --dry-run   # read the plan
+[ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --apply     # arms rollback
+[ ] OPEN A SECOND TERMINAL AND LOG IN AGAIN. Do not skip this, and do not test
+    it in the session you ran the command from - that one is already
+    authenticated and keeps working no matter how broken the config is.
+[ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --confirm   # only if it worked
+    (Locked out? Do nothing. It restores itself and reloads sshd.)
+```
+
+It refuses outright - not warns - on the two changes that are a certain
+lockout: `PasswordAuthentication no` when no allowed account has a working
+`authorized_keys`, and an `AllowUsers` that omits the account you are using.
 
 ### 2d. Turn off what nothing scores
 
@@ -204,6 +214,31 @@ when your SSH session drops, which is exactly when you need it.
 
 It deliberately does NOT touch the firewall (§2b) or services (§2d). Both need
 a human confirming against the packet.
+
+### Three things that are only true until someone changes them
+
+Do these immediately after arming, and write down the time. Each one is cheap
+now and impossible to reconstruct later.
+
+```
+[ ] sudo ./linux/audit.sh --config /tmp/ccdc-linux.env --apply
+    Persistent audit rules in /etc/audit/rules.d. canary.sh loads its watches
+    with `auditctl -w`, which lives only in the kernel: ONE `systemctl restart
+    auditd` clears every one of them and leaves the filesystem byte-identical.
+    These reload on every auditd start instead. Verified on the lab VM - a
+    runtime rule went 1 -> 0 across a restart while the persistent set stayed
+    15 -> 15.
+[ ] sudo ./linux/audit.sh --config /tmp/ccdc-linux.env --capture
+    The log baseline. `--check` reports a log that SHRANK without rotating,
+    but only against a baseline. Without this, "they wiped the logs" is
+    something you believe rather than something you can show.
+[ ] sudo ./linux/splunk.sh --config /tmp/ccdc-linux.env --test-event --apply
+    Then FIND THE TOKEN IN SPLUNK (§5). Write the token and the time down.
+```
+
+Guardian re-runs the audit repair every tick from its own hash-pinned copy, so
+if someone clears the rules later they come back without you noticing - the
+same way it rebuilds its own deleted units.
 
 > **After this, every tool needs `sudo`.** Arming makes the evidence directory
 > root-owned and `0700`, so a later `./linux/hunt.sh` without sudo stops with
@@ -311,14 +346,32 @@ the box can. Check that from off the box yourself.
 
 ---
 
-## 5. Splunk — make the box talk
+## 5. Splunk — make the box talk, then PROVE it did
+
+A running forwarder proves nothing. It can be running with no output group,
+pointed at an indexer it cannot reach, monitoring a file that no longer exists,
+or blocked on a full queue since before you sat down - and `systemctl status`
+is green in all four cases.
 
 ```
-[ ] Confirm the forwarder is running and reaching the indexer.
+[ ] ./linux/splunk.sh --config /tmp/ccdc-linux.env      # READ-ONLY health check
+    Reports the quiet failures: an input with `disabled = 1` that appears in
+    every config dump and reads nothing, an input pointed at a deleted file,
+    an indexer whose port answers while this box holds no connection to it.
+[ ] Fix what it names, then prove delivery end to end:
+[ ] sudo ./linux/splunk.sh --config /tmp/ccdc-linux.env --test-event --apply
+[ ] GO TO SPLUNK AND SEARCH FOR THE TOKEN IT PRINTS. Nothing short of finding
+    it there proves the box is forwarding.
+[ ] Write the token and the time in your notes: "forwarding verified at 10:14
+    with token X" is an inject answer you already have.
 [ ] Load the starter searches in splunk/searches.md.
-[ ] Forward the canary alert log and auditd events - that is where an intrusion
-    shows up first.
 ```
+
+**Why this is worth the ten minutes.** Logs that never left are logs the
+attacker can delete. `audit.sh` notices a wipe after the fact; this is the half
+that means the wipe does not cost you the evidence.
+
+For the logging inject's table: `./linux/splunk.sh --config <cfg> --inventory`.
 
 ---
 
@@ -367,7 +420,7 @@ literal command with this box's real values already in it. To read a whole
 card:
 
 ```
-[ ] ./linux/card.sh                      # list the nine cards
+[ ] ./linux/card.sh                      # list the cards
 [ ] ./linux/card.sh 1 backupsvc          # card 1, real username filled in
 ```
 
@@ -389,6 +442,48 @@ gone.
     inject, already half-written in injects/incident-report-template.md.
 ```
 
+### If it is a LIVE process, the order is different — and it is the opposite of the instinct
+
+A file on disk waits for you. A process does not: its socket, its parent, its
+open files and an unlinked binary all stop existing the moment you kill it, and
+those are exactly what the incident-report inject asks for.
+
+```
+[ ] DO NOT KILL IT YET.
+[ ] sudo ./linux/preserve.sh --config <cfg> --pid <PID> --freeze --apply
+    SIGSTOPs it so it holds still, then takes: the socket with its owner, the
+    parent chain, open file descriptors, the environment, and a copy of the
+    executable recovered THROUGH /proc - which works even when the file has
+    been deleted from disk and is the only copy left.
+[ ] Read 00-CASE.txt. The three sentences it names are your IR memo's opening.
+[ ] Read ancestry.txt BEFORE killing. ppid 1 means the real parent already
+    exited, so something SCHEDULED it - work CARD 3 (cron) and CARD 4 (units)
+    now, or it is back in sixty seconds and you have lost the evidence.
+[ ] Only then: kill -9 <PID>
+[ ] Re-run triage and confirm the finding CLEARS. A finding that will not clear
+    means you removed the artifact and missed the way back in.
+```
+
+**"We found a reverse shell and removed it"** is worth a fraction of **"a bash
+process was holding a connection to 10.0.0.5:443, started by the cron entry in
+/etc/cron.d/net-check at 14:02, running as www-data"**. Same incident, same
+five minutes of work, different order.
+
+### The four that look like nothing
+
+These leave the disk normal and pass every file-based check. Each has a tool:
+
+```
+[ ] a reverse shell over an ALLOWED port   -> triage.sh (finds it by socket
+    OWNER, not by port - 443 is permitted, the finding is that bash holds it)
+[ ] someone restarted auditd and your watches vanished
+                                           -> audit.sh --check, then --repair
+[ ] a drop-in enabled root while sshd_config still reads clean
+                                           -> sshd.sh
+[ ] the logs got shorter                   -> audit.sh --check reports SHRANK,
+    but ONLY if you ran --capture earlier. If you did not, that IS the finding.
+```
+
 Two traps under pressure: do not chase forensics while the box is being owned -
 speed over perfection; and remember you are your own worst enemy - confirm a
 "red team" outage is not your own firewall rule before you burn ten minutes on
@@ -400,23 +495,42 @@ it.
 
 ```
 BEFORE : packet -> config -> snapshot -> access confirmed
-SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; who ; ss -tulpn ; keys
-HARDEN : creds -> fw.sh(+confirm) -> ssh -> services.sh   [verify each]
+SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; sshd.sh ; splunk.sh
+HARDEN : creds -> fw.sh(+confirm) -> sshd.sh(+confirm) -> services.sh  [verify each]
 ARM    : sudo arm.sh --apply      (backup + canary + sentry + guardian/watchdog)
+PROVE  : audit.sh --apply ; audit.sh --capture ; splunk.sh --test-event --apply
 STATUS : sudo sentry.sh --status  (current triage + retained change events)
 SIGNOFF: sudo sentry.sh --approve --apply ; --ack reviewed change events
 INJECT : triage deadline+deliverables ; use responses/ ; screenshot as you go
-HIT?   : identify -> contain(snapshot!) -> eradicate(+way back in) -> recover
+HIT?   : preserve.sh --pid N --freeze FIRST -> identify -> contain -> eradicate
+         (+ the way back in) -> recover -> confirm the finding CLEARS
 ALWAYS : verify the scored service FROM THE NETWORK after every change
 ```
 
-Four returning commands are the whole operating loop. If you remember nothing else:
+Five returning commands are the whole operating loop. If you remember nothing else:
 
 ```
 sudo ./linux/triage.sh   --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh      --config /tmp/ccdc-linux.env --apply
      ./linux/services.sh --config /tmp/ccdc-linux.env --review
 sudo ./linux/sentry.sh   --config /tmp/ccdc-linux.env --status
+sudo ./linux/preserve.sh --config /tmp/ccdc-linux.env --pid <PID> --freeze --apply
+```
+
+The three that answer a question nothing else on the box answers, and all
+three answer "no" in ways that look like "yes" from a normal check:
+
+```
+sudo ./linux/triage.sh --config <cfg>   who is holding a socket right now?
+sudo ./linux/audit.sh  --config <cfg>   can this box still prove what happened?
+     ./linux/splunk.sh --config <cfg>   are the logs actually leaving?
+```
+
+And the two that write an inject table for you:
+
+```
+     ./linux/surface.sh --config <cfg> --table   # ports/owner/unit/pkg/needed?
+     ./linux/policy.sh  --config <cfg> --table   # the password-policy row
 ```
 
 Two things no tool here can do for you: check the scored service from off the
