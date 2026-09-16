@@ -571,19 +571,92 @@ fi
 # Distinguished from the general SUID list, which is long and mostly legitimate
 # and therefore unreadable - which is how a SUID bash hides in it.
 begin
-suid=$(find / -xdev -perm -4000 -type f 2>/dev/null \
+# Two ways in, because matching on the NAME alone is not enough.
+#
+# The name check below looks for a path ENDING in /bash, /python and so on. A
+# red team that copies bash to /usr/local/bin/bash-static defeats it
+# completely, and renaming the copy is free. Measured on the lab box: a SUID
+# root bash sat at /usr/local/bin/bash-static through a full triage pass that
+# printed "no SUID shells or interpreters".
+#
+# So the second check asks a question a rename cannot dodge: does any PACKAGE
+# own this file? A distro's SUID binaries (sudo, su, mount, passwd, ping) are
+# all packaged. An unpackaged SUID root binary is somewhere between a
+# compiled-from-source install and a back door, and on a box you were handed an
+# hour ago it is worth looking at either way.
+suid_all=$(find / -xdev -perm -4000 -type f 2>/dev/null)
+suid=$(printf '%s\n' "$suid_all" \
   | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
+
+suid_unpackaged=''
+if ccdc_have dpkg-query || ccdc_have rpm; then
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    # Already reported by name; do not say it twice.
+    printf '%s\n' "$suid" | grep -qxF -- "$f" && continue
+    own_payload "$f" && continue
+    if ccdc_have dpkg-query; then
+      dpkg-query -S "$f" >/dev/null 2>&1 && continue
+    else
+      rpm -qf "$f" >/dev/null 2>&1 && continue
+    fi
+    suid_unpackaged="$suid_unpackaged $f"
+  done <<EOF
+$suid_all
+EOF
+fi
+
 if [ -n "$suid" ]; then
   red "SUID interpreter(s)/utilities - instant root for any local user   [CARD 5]"
   for f in $suid; do emit RED suid "$f" "SUID interpreter or file utility"; done
-  fixhdr
   for f in $suid; do
     detail "$(ls -l "$f" 2>/dev/null)"
     printf -v qf '%q' "$f"
+    fixhdr
     fix "sudo chmod u-s -- $qf                      # strip SUID; do NOT delete the binary"
   done
-else
-  clean "no SUID shells or interpreters"
+elif [ -z "$suid_unpackaged" ]; then
+  clean "no SUID shells, interpreters, or unpackaged SUID binaries"
+fi
+
+# Where it lives decides how loudly to say it.
+#
+# An unpackaged SUID binary in /usr/bin is usually a packaging quirk - on the
+# lab box /usr/bin/fusermount3 is genuinely in no dpkg file list, and it would
+# have fired on every pass forever. One in /usr/local, /opt, /home, /tmp or
+# /var is a different claim entirely: those are where things get DROPPED, and a
+# SUID root binary there is the shape of a privilege-escalation foothold
+# whatever it is called.
+suid_dropped=''
+suid_odd=''
+for f in $suid_unpackaged; do
+  case "$f" in
+    /usr/local/*|/opt/*|/home/*|/tmp/*|/var/tmp/*|/dev/shm/*|/srv/*|/root/*)
+      suid_dropped="$suid_dropped $f" ;;
+    *) suid_odd="$suid_odd $f" ;;
+  esac
+done
+
+if [ -n "$suid_dropped" ]; then
+  red "SUID root binary(s) in a drop location that NO PACKAGE owns   [CARD 5]"
+  detail "a renamed shell defeats a name-based check; ownership does not care what it is called"
+  for f in $suid_dropped; do emit RED suidunpackaged "$f" "SUID root binary owned by no package"; done
+  for f in $suid_dropped; do
+    detail "$(ls -l "$f" 2>/dev/null)"
+    printf -v qf '%q' "$f"
+    fixhdr
+    fix "file -- $qf && sha256sum -- $qf          # what IS it?"
+    fix "sudo chmod u-s -- $qf                      # strip SUID; do NOT delete it yet"
+  done
+fi
+
+if [ -n "$suid_odd" ]; then
+  amber "SUID root binary(s) in a system directory that no package owns   [CARD 5]"
+  detail "usually a packaging quirk; confirm once and move on"
+  for f in $suid_odd; do
+    emit AMBER suidunpackaged "$f" "SUID root binary in a system directory owned by no package"
+    detail "$(ls -l "$f" 2>/dev/null)"
+  done
 fi
 
 # --- 8. Processes running from a world-writable directory ---------------------
@@ -906,16 +979,37 @@ else
       [ -n "$cmd" ] && entry="$entry${D}  cmdline: $cmd"$'\n'
       [ -n "$started" ] && entry="$entry${D}  started: $started"$'\n'
       entry="$entry$FIXHDR"$'\n'
-      entry="$entry${F}sudo kill -STOP $qpid                      # FREEZE it first - do not kill yet"$'\n'
-      entry="$entry${F}sudo mkdir -p -- $qevidence"$'\n'
-      entry="$entry${F}sudo cp -- /proc/$qpid/exe $qevidence/exe 2>/dev/null; sudo ls -l /proc/$qpid/exe"$'\n'
-      entry="$entry${F}sudo tr '\\0' ' ' < /proc/$qpid/cmdline; echo"$'\n'
-      entry="$entry${F}sudo ls -l /proc/$qpid/cwd /proc/$qpid/fd"$'\n'
-      entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid \$(ps -o ppid= -p $qpid)   # WHO STARTED IT"$'\n'
-      entry="$entry${F}sudo kill -9 $qpid"$'\n'
       if [ "$severity" = RED ]; then
+        entry="$entry${F}sudo kill -STOP $qpid                      # FREEZE it first - do not kill yet"$'\n'
+        entry="$entry${F}sudo mkdir -p -- $qevidence"$'\n'
+        entry="$entry${F}sudo cp -- /proc/$qpid/exe $qevidence/exe 2>/dev/null; sudo ls -l /proc/$qpid/exe"$'\n'
+        entry="$entry${F}sudo tr '\\0' ' ' < /proc/$qpid/cmdline; echo"$'\n'
+        entry="$entry${F}sudo ls -l /proc/$qpid/cwd /proc/$qpid/fd"$'\n'
+        entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid \$(ps -o ppid= -p $qpid)   # WHO STARTED IT"$'\n'
+        entry="$entry${F}sudo kill -9 $qpid"$'\n'
         net_red_buf="$net_red_buf$entry"
       else
+        # NEVER a kill command here, and this is not a style choice.
+        #
+        # This branch fires when an interpreter is serving a port the packet
+        # ACCOUNTS FOR - which is to say, most often, the scored service
+        # itself. The heading says "confirm each one"; printing the RED block
+        # underneath it hands the operator a ready-to-paste `kill -9` for the
+        # thing they are being scored on keeping alive.
+        #
+        # That is exactly what happened on the lab box: an operator worked two
+        # real reverse shells correctly, reached this AMBER, pasted the block
+        # under it as they had the two before, and killed their own web server.
+        # The tool told them to. So this branch answers the question the
+        # heading actually asks - WHOSE process is this - and offers nothing
+        # that can take a service down.
+        entry="$entry${F}systemctl status \$(ps -o unit= -p $qpid 2>/dev/null | tr -d ' ')   # which unit owns it?"$'\n'
+        entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid"$'\n'
+        entry="$entry${F}grep -n . <<<\"\$(ps -o cmd= -p $qpid)\"   # is this the packet's service?"$'\n'
+        # Commented, because everything inside a "run this" block gets pasted.
+        # A bare English sentence there is a "command not found" at best.
+        entry="$entry${F}# IS the scored service? -> nothing to do. Put its port in CCDC_ALLOWED_TCP_PORTS."$'\n'
+        entry="$entry${F}# NOT the scored service? -> CARD 12, starting with preserve.sh --freeze."$'\n'
         net_amber_buf="$net_amber_buf$entry"
       fi
       continue
@@ -1268,6 +1362,55 @@ if [ "${#deephits[@]}" -gt 0 ]; then
   done
 else
   clean "no unit's ExecStart script contains a reverse shell"
+fi
+
+# --- 9f. What SSH will actually do at the next login --------------------------
+# triage is the tool people run first and sometimes the only one they run, and
+# until now it said nothing at all about SSH policy. On the lab box a drop-in
+# had re-enabled root logins and every check above this line reported a clean
+# box, because none of them read sshd's configuration.
+#
+# Only the two that are almost never right on a scored box are here; the full
+# audit - drop-ins, Match blocks, AuthorizedKeysCommand, CA keys - is sshd.sh,
+# and this points at it. Reading the EFFECTIVE config matters: `grep
+# PermitRootLogin /etc/ssh/sshd_config` is answered by a file that a drop-in
+# three directories away overrides.
+begin
+if [ "$(id -u)" -eq 0 ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
+  sshd_bin_path=$(command -v sshd 2>/dev/null || printf '/usr/sbin/sshd')
+  sshd_effective=$("$sshd_bin_path" -T 2>/dev/null)
+  if [ -n "$sshd_effective" ]; then
+    rootlogin=$(printf '%s\n' "$sshd_effective" | awk 'tolower($1)=="permitrootlogin"{print $2; exit}')
+    emptypw_ssh=$(printf '%s\n' "$sshd_effective" | awk 'tolower($1)=="permitemptypasswords"{print $2; exit}')
+    if [ "$rootlogin" = yes ]; then
+      red "SSH allows DIRECT ROOT LOGIN - and the main config may not say so   [CARD 2]"
+      detail "this is the effective setting, after every Include and drop-in"
+      emit RED sshrootlogin "permitrootlogin" "sshd permits direct root login"
+      detail "set in:"
+      for sshd_src in /etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf; do
+        [ -f "$sshd_src" ] || continue
+        grep -inE '^[[:space:]]*PermitRootLogin[[:space:]]' "$sshd_src" 2>/dev/null \
+          | sed "s|^|           $sshd_src:|"
+      done
+      fixhdr
+      fix "sudo ./linux/sshd.sh --config <cfg>          # the full SSH audit"
+      fix "sudo grep -rn PermitRootLogin /etc/ssh/sshd_config /etc/ssh/sshd_config.d/"
+      fix "# remove the offending line, then:"
+      fix "sudo sshd -t && sudo systemctl reload ssh"
+    else
+      clean "sshd does not permit direct root login (effective: ${rootlogin:-unset})"
+    fi
+    if [ "$emptypw_ssh" = yes ]; then
+      red "SSH accepts EMPTY PASSWORDS   [CARD 2]"
+      emit RED sshemptypw "permitemptypasswords" "sshd permits empty passwords"
+      fixhdr
+      fix "sudo ./linux/sshd.sh --config <cfg>"
+    fi
+  else
+    clean "SSH policy check skipped (sshd -T produced nothing)"
+  fi
+else
+  clean "SSH policy check skipped (needs sudo and sshd; run ./linux/sshd.sh for the full audit)"
 fi
 
 # --- 10. Very recently modified /etc ------------------------------------------

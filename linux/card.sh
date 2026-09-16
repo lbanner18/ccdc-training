@@ -54,6 +54,28 @@ n=$1
 # Passing the value here means there is no variable to forget.
 subject=${2:-}
 
+# A value that looks like a flag is a mistake, not a subject.
+#
+# Watched on the lab box: the operator typed `./linux/card.sh 1 --approve`,
+# reaching for an approval verb this tool does not have. It substituted
+# "--approve" into every command on the card and printed, among others,
+# `sudo userdel -f -r --approve` and `sudo passwd -l --approve`. None of those
+# do what they look like they do, and one of them is a deletion.
+#
+# The card is printed, never run, so nothing happened - but the next step after
+# reading a card is pasting from it, so a card full of plausible-looking
+# nonsense is a loaded one. Refuse it and say what the argument is for.
+case "$subject" in
+  -*)
+    printf 'card.sh: "%s" looks like an option, not a subject.\n\n' "$subject" >&2
+    printf '  The second argument is the THING the finding is about - the username,\n' >&2
+    printf '  unit, path or PID that triage.sh printed next to it. For example:\n\n' >&2
+    printf '      ./linux/card.sh %s backupsvc\n' "$n" >&2
+    printf '      ./linux/card.sh %s /etc/cron.d/system-metrics\n\n' "$n" >&2
+    printf '  card.sh has no options other than -h. It prints a card; it never runs one.\n' >&2
+    exit 1 ;;
+esac
+
 # Pull out just this card: from its heading to the next heading or ---.
 body=$(awk -v want="$n" '
   /^## CARD / {
