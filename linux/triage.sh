@@ -763,7 +763,22 @@ unit_is_ours() {
 begin
 unit_rogue=''
 unit_ours=''
-for udir in /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system; do
+# /run/systemd/system is deliberately NOT scanned, and the reason is worth
+# stating because it looks like an omission.
+#
+# It is tmpfs, and it is where systemd GENERATORS write - netplan, the fstab
+# generator, and others. Every unit there is unpackaged by definition, and its
+# mtime is not evidence of anything: `systemctl daemon-reload` re-runs the
+# generators and rewrites the files. On the lab box netplan-ovs-cleanup.service
+# was reported as "written 3 seconds ago" immediately after an operator ran a
+# daemon-reload that this tool had just told them to run, which is a finding
+# the tool manufactured for itself.
+#
+# The cost of skipping it is real but small: a unit dropped in /run does not
+# survive a reboot, so it is not persistence, which is what this check is for -
+# and if it is actually doing something it surfaces in the process and socket
+# checks instead.
+for udir in /etc/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/system-preset; do
   [ -d "$udir" ] || continue
   for uf in "$udir"/*.service "$udir"/*.timer "$udir"/*.socket "$udir"/*.path; do
     # A symlink here is what `systemctl enable` creates; the real unit it points
@@ -789,6 +804,13 @@ if [ -n "$unit_rogue" ]; then
   detail "These are the ones nothing on the box accounts for."
   for uf in $unit_rogue; do emit AMBER rogueunit "$uf" "unpackaged systemd unit newer than the box"; done
   fixhdr
+  # Timers first. Disabling the .service while its .timer still exists prints
+  # "Disabling 'x.service', but its triggering units are still active", which
+  # reads like the command failed - an operator hit exactly that and had to
+  # work out on their own that the order was wrong, not the command.
+  unit_rogue=$(printf '%s\n' $unit_rogue | sed 's|.*|& &|' \
+    | awk '{ k = ($1 ~ /\.timer$/) ? 0 : 1; print k, $2 }' \
+    | sort -k1,1n -k2,2 | awk '{print $2}')
   for uf in $unit_rogue; do
     ubase=$(basename -- "$uf")
     printf -v quf '%q' "$uf"
@@ -810,6 +832,16 @@ if [ -n "$unit_rogue" ]; then
               fix "ls -l -- $qt && cat -- $qt            # what it actually runs"
             else
               fix "ls -l -- $qt && file -- $qt           # what it actually runs"
+            fi
+            # Naming the payload is not the same as removing it. An operator
+            # removed both unit files exactly as instructed and left
+            # /usr/local/sbin/sysstat-collect sitting on disk, because nothing
+            # here offered to take it - and a payload with no unit is one
+            # `systemctl enable` away from being persistence again.
+            if ! pkg_owns "$target"; then
+              fix "sudo cp -p -- $qt $(printf '%q' "$state_dir")/ && sudo rm -- $qt   # the PAYLOAD, not just the unit"
+            else
+              fix "#   (that target is package-owned - leave it alone)"
             fi ;;
       esac
     done

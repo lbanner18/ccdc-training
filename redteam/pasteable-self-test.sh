@@ -436,5 +436,40 @@ for marker in 'no package shipped, written after this box was built' 'unit_rogue
   fi
 done
 
+# ------------------------------- the rogue-unit check, after three live defects
+# /run/systemd/system is generator territory: tmpfs, never package-owned, and
+# rewritten by `systemctl daemon-reload` - which this tool tells operators to
+# run. Scanning it meant reporting netplan-ovs-cleanup.service as "written 3
+# seconds ago" immediately after a reload we asked for. A finding the tool
+# manufactured for itself.
+if grep -q 'for udir in /etc/systemd/system /usr/local/lib/systemd/system' "$tri" \
+   && ! grep -q 'for udir in.*[^.]/run/systemd/system' "$tri"; then
+  ok 'the rogue-unit scan skips generator territory in /run'
+else
+  no 'the rogue-unit scan reads /run/systemd/system (netplan will fire forever)'
+fi
+
+# Disabling a .service whose .timer still exists prints "its triggering units
+# are still active", which reads like the command failed.
+if grep -q '\$1 ~ /\\.timer\$/' "$tri"; then
+  ok 'rogue units are ordered timers-first so the disable does not warn'
+else
+  no 'rogue units are not ordered; disabling a service before its timer warns'
+fi
+
+# Naming the ExecStart target is not removing it. An operator removed both unit
+# files exactly as instructed and left the payload on disk - one systemctl
+# enable away from being persistence again.
+if grep -q 'the PAYLOAD, not just the unit' "$tri"; then
+  ok 'the ExecStart payload is offered for removal, not just named'
+else
+  no 'the unit is removed but its payload is only printed'
+fi
+if grep -q 'that target is package-owned - leave it alone' "$tri"; then
+  ok 'and a package-owned target is explicitly left alone'
+else
+  no 'a package-owned ExecStart target could be offered for deletion'
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
