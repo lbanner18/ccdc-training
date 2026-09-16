@@ -572,5 +572,173 @@ else
   no "dedup key at line $kl is built before local_addr at line $al"
 fi
 
+# =========================================================================
+# WHOLE-KIT SWEEPS
+#
+# Everything above grew one assertion at a time, aimed at the tool an operator
+# happened to be holding. These run the same rules across every tool, because
+# the bugs were never specific to triage.sh - that is just where someone was
+# standing when they found them.
+# =========================================================================
+all_tools=$(ls "$ROOT"/linux/*.sh 2>/dev/null | grep -vE '/(lib|watchdog)\.sh$')
+
+# 1. Angle brackets are redirects. "<cfg>" cost an operator a syntax error mid
+#    incident; "<n>", "<user>", "<file>" and "<indexer>" were still in five
+#    other tools when this sweep was written.
+hits=''
+for t in $all_tools; do
+  h=$(grep -nE '^\s*(printf|fix|fixline|fixcmd|detail)\b[^|]*<[a-zA-Z][a-zA-Z0-9 _-]*>' "$t" 2>/dev/null | head -3)
+  [ -z "$h" ] || hits="$hits$(basename "$t"): $h
+"
+done
+if [ -z "$hits" ]; then
+  ok 'no tool prints an angle-bracket placeholder'
+else
+  no 'a tool prints <angle> placeholders, which bash reads as redirects'
+  printf '%s' "$hits" | sed 's/^/    /' | head -8
+fi
+
+# 2. sudo does not cover a glob: the unprivileged shell expands it first.
+hits=''
+for t in $all_tools; do
+  h=$(grep -nE '^\s*(printf|fix|fixline|fixcmd)\b[^"]*"[^"]*sudo (cat|ls|grep|head|tail|cp|rm)[^"]*/\*' "$t" 2>/dev/null | head -2)
+  [ -z "$h" ] || hits="$hits$(basename "$t"): $h
+"
+done
+if [ -z "$hits" ]; then
+  ok 'no tool prints a glob that sudo cannot reach'
+else
+  no 'a printed command puts a glob behind sudo'
+  printf '%s' "$hits" | sed 's/^/    /' | head -6
+fi
+
+# 3. A quoted heredoc expands nothing; the '"$var"' idiom inside one is text.
+#    (The dedicated check above covers this; repeated here so the whole-kit
+#    block is a complete statement of the rules.)
+# 4. Backticks inside an EXPANDING heredoc are command substitution - prose
+#    there is code. Covered above, same reason.
+
+# 5. Every mutating tool must reject a config that does not load. This is the
+#    one that mattered most: ccdc_load_config used [ -r ], which is true for a
+#    DIRECTORY, and `.` on a directory fails without stopping the script - so a
+#    mistyped --config ran the tool on compiled-in defaults and reported
+#    success. One function, every tool.
+cfgdir=$test_root/badcfg
+mkdir -p "$cfgdir/isadir.env"
+printf 'CCDC_BOX_NAME="x\n' >"$cfgdir/syntax.env"
+bad_accept=''
+for t in $all_tools; do
+  base=$(basename "$t" .sh)
+  case "$base" in card) continue ;; esac   # card.sh prints cards without a config by design
+  grep -q 'ccdc_load_config' "$t" || continue
+  for c in missing.env syntax.env isadir.env; do
+    timeout 20 "$t" --config "$cfgdir/$c" >/dev/null 2>&1 && bad_accept="$bad_accept $base:$c"
+  done
+done
+if [ -z "$bad_accept" ]; then
+  ok 'every config-taking tool rejects a missing, malformed or directory config'
+else
+  no "a tool ran successfully on a broken config:$bad_accept"
+fi
+
+# 6. ccdc_load_config itself must check all four, since every tool inherits it.
+common=$ROOT/linux/lib/common.sh
+miss=''
+grep -q 'config is a directory' "$common" || miss="$miss directory"
+grep -q 'config does not exist' "$common" || miss="$miss missing"
+grep -q 'config failed to load' "$common" || miss="$miss source-failure"
+grep -q 'is not a regular file' "$common" || miss="$miss not-regular"
+if [ -z "$miss" ]; then
+  ok 'ccdc_load_config rejects missing, directory, non-regular and unsourceable configs'
+else
+  no "ccdc_load_config no longer checks:$miss"
+fi
+
+# 7. Nothing may offer to destroy a scored service without saying so.
+if grep -q 'subject_is_protected' "$ROOT/linux/card.sh" \
+   && grep -q 'STOP AND READ' "$ROOT/linux/card.sh"; then
+  ok 'card.sh warns when its subject is a scored or protected service'
+else
+  no 'card.sh renders destructive cards around scored units with no warning'
+fi
+if grep -q 'refusing to SIGSTOP' "$ROOT/linux/preserve.sh"; then
+  ok 'preserve.sh refuses to freeze a scored service'
+else
+  no 'preserve.sh will SIGSTOP a scored service, which reads as a crash'
+fi
+if grep -q 'CCDC_PRESERVE_FREEZE_SCORED' "$ROOT/linux/preserve.sh"; then
+  ok 'and offers an explicit override for when it really is the target'
+else
+  no 'the freeze refusal has no override path'
+fi
+
+# 8. Past tense in a dry run is a lie the operator acts on. audit.sh --repair
+#    printed "repaired: reloaded the audit rules into the kernel" beneath its
+#    own [dry-run] lines; services.sh --disable printed "disabled: cups.socket"
+#    for a service it had not touched. In both the WORK was correctly gated and
+#    only the sentence was wrong - and the sentence is the part that is believed.
+dr=$test_root/dryrun.env
+cat >"$dr" <<EOF
+CCDC_BOX_NAME="dryrun-probe"
+CCDC_EVIDENCE_DIR="$test_root/drstate"
+CCDC_SYSTEMD_SERVICES="ssh"
+CCDC_DISABLE_SERVICES="cups"
+EOF
+claims=''
+for spec in "services.sh --disable" "canary.sh --deploy" "audit.sh --repair"; do
+  tool=${spec%% *}; rest=${spec#* }
+  [ -x "$ROOT/linux/$tool" ] || continue
+  out=$(timeout 30 "$ROOT/linux/$tool" --config "$dr" $rest 2>&1 \
+        | grep -inE '^[[:space:]]*(ok:|AUDIT[[:space:]]+)?(installed|wrote|removed|restored|repaired|applied|deployed|armed|disabled|created|backed up):' \
+        | head -2)
+  [ -z "$out" ] || claims="$claims$tool: $out
+"
+done
+if [ -z "$claims" ]; then
+  ok 'no mutating tool claims past-tense success in a dry run'
+else
+  no 'a tool reports work it did not do when run without --apply'
+  printf '%s' "$claims" | sed 's/^/    /' | head -6
+fi
+
+# 9. Shell functions are not hoisted. Defining a helper below the code that
+#    calls it is a runtime "command not found" that `bash -n` reports as clean -
+#    which is exactly how newer_than_box shipped broken for one commit.
+hoist=$(python3 - "$ROOT" <<'PY'
+import io, re, sys, glob, os
+bad = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
+    src = io.open(f, encoding='utf-8').read().split('\n')
+    defs = {}
+    for i, l in enumerate(src, 1):
+        m = re.match(r'^([a-z_][a-z0-9_]*)\(\)\s*\{', l)
+        if m and m.group(1) not in defs:
+            defs[m.group(1)] = i
+    depth = 0
+    for i, l in enumerate(src, 1):
+        if re.match(r'^[a-z_][a-z0-9_]*\(\)\s*\{', l):
+            depth = 1
+            continue
+        if depth and re.match(r'^\}', l):
+            depth = 0
+            continue
+        if depth:
+            continue
+        for fn, dl in defs.items():
+            if i >= dl:
+                continue
+            if re.search(r'(^|[;&|(]\s*|\$\(\s*|\bthen\s+|\belse\s+|\bdo\s+)%s\b' % re.escape(fn), l):
+                bad.append('%s:%d uses %s() defined at %d' % (os.path.basename(f), i, fn, dl))
+                break
+print('\n'.join(sorted(set(bad))))
+PY
+)
+if [ -z "$hoist" ]; then
+  ok 'no tool calls a function at top level before defining it'
+else
+  no 'a function is called before its definition (bash -n cannot see this)'
+  printf '%s\n' "$hoist" | sed 's/^/    /' | head -6
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

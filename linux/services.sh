@@ -377,7 +377,11 @@ do_disable() {
         continue
       fi
       ccdc_is_dry_run || ccdc_append_log "$log" "disabled unit=$target was_enabled=$was_enabled was_active=$was_active masked=$mask"
-      printf '    disabled: %-28s %s\n' "$target" "${candidate_reason[$base]:-}"
+      if ccdc_is_dry_run; then
+        printf '    would disable: %-23s %s\n' "$target" "${candidate_reason[$base]:-}"
+      else
+        printf '    disabled: %-28s %s\n' "$target" "${candidate_reason[$base]:-}"
+      fi
       acted=1
     done
 
