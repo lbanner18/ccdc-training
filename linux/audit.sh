@@ -465,7 +465,7 @@ do_check() {
     if [ -n "$disk_sha" ] && [ -n "$wanted" ] && [ "$disk_sha" != "$wanted" ]; then
       finding "the persistent rules file does not match what the config asks for"
       detail "either the config changed, or someone edited the rules on disk"
-      fixline "sudo diff -- $(printf '%q' "$rules_file") <(sudo ./linux/audit.sh --config '"$qconfig"' --status --dry-run)"
+      fixline "sudo diff -- $(printf '%q' "$rules_file") <(sudo $qself --config $qconfig --status --dry-run)"
       fixline "sudo $qself --config $qconfig --repair --apply"
     fi
   else

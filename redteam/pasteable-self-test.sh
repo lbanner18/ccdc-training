@@ -551,5 +551,26 @@ else
   printf '%s\n' "$back" | sed 's/^/    /'
 fi
 
+# --------------------- one binary, many sockets: the legitimate one masked the implant
+# The socket dedup key was "exe|direction|peer" with no local address. The
+# scored service is `python3 -m http.server 8080`; an attacker's python3 UDP
+# listener on 49152 produced an identical key and was dropped as a duplicate.
+# The legitimate service masked the implant and triage printed "no unexpected
+# listening UDP ports" on a box that had one.
+if grep -q 'key="$exe|$direction|$local_addr|$peer"' "$tri"; then
+  ok 'the socket dedup key includes the local address'
+else
+  no 'two listeners from one binary collapse into a single finding'
+  grep -n 'key="$exe' "$tri" | sed 's/^/    /'
+fi
+# and the key must be built after local_addr is known
+kl=$(grep -n 'key="$exe|' "$tri" | head -1 | cut -d: -f1)
+al=$(grep -n 'local_port=${local_addr##\*:}' "$tri" | head -1 | cut -d: -f1)
+if [ -n "$kl" ] && [ -n "$al" ] && [ "$al" -lt "$kl" ]; then
+  ok 'and is built after the local address is parsed'
+else
+  no "dedup key at line $kl is built before local_addr at line $al"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

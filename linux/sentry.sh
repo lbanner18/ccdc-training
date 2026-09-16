@@ -451,6 +451,8 @@ write_alerts() {
       printf '  MONITOR HEALTH PROBLEM - detection is not current:\n'
       [ ! -s "$triage_health" ] || sed 's/^/    /' "$triage_health"
       [ ! -s "$watch_health" ] || sed 's/^/    /' "$watch_health"
+      health_age "$watch_health" "$watch_last" "$watch_interval" "full sweep"
+      health_age "$triage_health" "" "$interval" "triage"
       [ ! -s "$triage_health" ] \
         || printf '\n  The action queue was cleared and cannot execute until triage refreshes cleanly.\n'
       printf '\n'
@@ -555,6 +557,37 @@ rebuild_queue() {
   mv -f -- "$seen.next" "$seen"
   if [ "$newred" -gt 0 ] && [ "$bell" -eq 1 ] && [ -t 1 ]; then printf '\a' || true; fi
   printf '%s|%s\n' "$new" "$newred"
+}
+
+# How stale is a health failure, and when does the next attempt land? A bare
+# timestamp cannot answer either, and the two cases it conflates - "failed once
+# and is about to retry" versus "has been failing for twenty minutes" - want
+# opposite reactions from the operator.
+health_age() {
+  local hfile=$1 lastfile=$2 every=$3 label=$4 stamp now age last due
+  [ -s "$hfile" ] || return 0
+  stamp=$(awk '{print $1; exit}' "$hfile" 2>/dev/null)
+  now=$(date +%s)
+  age=$(date -d "$stamp" +%s 2>/dev/null) || return 0
+  age=$((now - age))
+  printf '      that was %ss ago.' "$age"
+  if [ -f "$lastfile" ]; then
+    read -r last <"$lastfile" 2>/dev/null || last=0
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    due=$((last + every - now))
+    if [ "$due" -gt 0 ]; then
+      printf ' Next %s attempt in %ss.\n' "$label" "$due"
+    else
+      printf ' The next %s attempt is overdue - the loop may be stuck.\n' "$label"
+    fi
+  else
+    printf '\n'
+  fi
+  if [ "$age" -gt $((every * 3)) ]; then
+    printf '      It has not recovered across %s attempts. Treat detection as DOWN:\n' "$((age / every))"
+    printf '        sudo systemctl status %s.service --no-pager -l\n' "${CCDC_SENTRY_NAME:-ccdc-sentry}"
+    printf '        sudo %s/sentry.sh --config %s --once\n' "$qkit" "$qconfig"
+  fi
 }
 
 run_watch_if_due() {

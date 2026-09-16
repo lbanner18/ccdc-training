@@ -1396,7 +1396,7 @@ else
         && ccdc_list_contains "$local_port" "${CCDC_ALLOWED_TCP_PORTS:-} ${CCDC_ALLOWED_UDP_PORTS:-}"; then
         severity=AMBER
       fi
-      key="$exe|$direction|$peer"
+      key="$exe|$direction|$local_addr|$peer"
       case " $seen_sockets " in *" $key "*) continue ;; esac
       seen_sockets="$seen_sockets $key"
 
