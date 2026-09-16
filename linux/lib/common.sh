@@ -27,12 +27,28 @@ ccdc_have() {
 ccdc_load_config() {
   local config=${1:-}
   [ -n "$config" ] || return 0
-  [ -r "$config" ] || ccdc_die "config is not readable: $config"
+  [ -e "$config" ] || ccdc_die "config does not exist: $config"
+  if [ -d "$config" ]; then
+    ccdc_die "config is a directory, not a file: $config
+  --config takes the env FILE, e.g. $config/config/example.env"
+  fi
+  [ -f "$config" ] || ccdc_die "config is not a regular file: $config"
+  [ -r "$config" ] || ccdc_die "config is not readable: $config (try sudo)"
   # The example config is shell syntax, but never execute an implicit default
   # path. The caller chooses the file explicitly.
+  #
+  # And the sourcing itself must be checked. `.` returns non-zero on a syntax
+  # error or an unreadable file, and without this the tool runs on with an
+  # empty or half-loaded environment - which looks exactly like a successful
+  # run against a config that happens to say nothing.
   set -a
   # shellcheck disable=SC1090
-  . "$config"
+  if ! . "$config"; then
+    set +a
+    ccdc_die "config failed to load: $config
+  Nothing was applied. Fix the file and re-run - a partially sourced config
+  would leave this tool acting on defaults you did not choose."
+  fi
   set +a
 }
 

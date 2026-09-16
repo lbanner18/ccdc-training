@@ -119,7 +119,25 @@ finding() { findings=$((findings + 1)); printf '  AUDIT  %s\n' "$*"; }
 detail()  { printf '         %s\n' "$*"; }
 fixline() { printf '           %s\n' "$*"; }
 okline()  { printf '  ok     %s\n' "$*"; }
-acted()   { actions=$((actions + 1)); printf '  AUDIT  repaired: %s\n' "$*"; ccdc_append_log "$log" "REPAIR $*"; }
+# In dry-run this printed "repaired: restored ..." and "repaired: reloaded the
+# audit rules into the kernel" directly beneath its own "[dry-run] would write"
+# lines, and logged a REPAIR for work it had not done. Nothing was actually
+# changed - write_rules_file and ccdc_action are both dry-run aware - so the
+# only thing wrong was the sentence, which is the part the operator reads. They
+# walked away believing the rules were back in the kernel.
+#
+# Gated here, at the one place that speaks, rather than at four call sites each
+# having to remember to ask.
+acted() {
+  if ccdc_is_dry_run; then
+    printf '  AUDIT  would repair: %s\n' "$*"
+    printf '         (nothing changed - re-run with --apply to do it)\n'
+    return 0
+  fi
+  actions=$((actions + 1))
+  printf '  AUDIT  repaired: %s\n' "$*"
+  ccdc_append_log "$log" "REPAIR $*"
+}
 
 have_auditctl() { ccdc_have auditctl; }
 
