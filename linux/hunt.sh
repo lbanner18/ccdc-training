@@ -155,7 +155,13 @@ PROBE
 ccdc_record_shell "$evidence/web-files.txt" "$web_probe"
 
 ccdc_record_shell "$evidence/binary-integrity.txt" 'if command -v dpkg >/dev/null 2>&1; then dpkg --verify 2>&1 || true; elif command -v rpm >/dev/null 2>&1; then rpm -Va 2>&1 || true; else echo "no package verification tool"; fi'
-ccdc_record_shell "$evidence/suid-capabilities.txt" 'for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && find "$scan_root" -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null; done; if command -v getcap >/dev/null 2>&1; then for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && getcap -r "$scan_root" 2>/dev/null; done; fi'
+# One filesystem, every directory of it. The enumerated list this replaced
+# omitted /usr/lib, and a SUID root dash planted at
+# /usr/lib/x86_64-linux-gnu/gvfsd-helper was invisible to the entire hunt
+# report while triage.sh - which has always used `find / -xdev` - flagged it
+# on the same box. /usr/lib hides a SUID binary well precisely because
+# ssh-keysign genuinely is SUID and genuinely does live there.
+ccdc_record_shell "$evidence/suid-capabilities.txt" 'find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null; if command -v getcap >/dev/null 2>&1; then for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && getcap -r "$scan_root" 2>/dev/null; done; fi'
 # The manifest must not hash itself: the redirect creates it empty before find
 # runs, so sha256sum records the hash of a partial file and "sha256sum -c"
 # then always reports FAILED.
