@@ -387,6 +387,10 @@ policy_lines() {
   [ -n "${CCDC_SSH_ALLOW_TCP_FORWARDING:-}" ] && printf 'AllowTcpForwarding %s\n' "$CCDC_SSH_ALLOW_TCP_FORWARDING"
   [ -n "${CCDC_SSH_CLIENT_ALIVE_INTERVAL:-}" ] && printf 'ClientAliveInterval %s\n' "$CCDC_SSH_CLIENT_ALIVE_INTERVAL"
   [ -n "${CCDC_SSH_ALLOW_USERS:-}" ] && printf 'AllowUsers %s\n' "$CCDC_SSH_ALLOW_USERS"
+  # The login-banner inject's other half. banner.sh writes the file; the
+  # directive that makes sshd serve it belongs here, behind the same rollback
+  # as every other change to this daemon.
+  [ -n "${CCDC_SSH_BANNER:-}" ] && printf 'Banner %s\n' "$CCDC_SSH_BANNER"
   return 0
 }
 
@@ -411,6 +415,25 @@ validate_policy_values() {
     ''|yes|no|prohibit-password|forced-commands-only) ;;
     *) ccdc_die "CCDC_SSH_PERMIT_ROOT_LOGIN must be yes/no/prohibit-password/forced-commands-only" ;;
   esac
+  # The banner is a PATH, so it needs the slash the loop above rejects - and it
+  # needs a different check: sshd fails to start if Banner names a file that
+  # does not exist, which would take the scored service down for a cosmetic
+  # inject.
+  if [ -n "${CCDC_SSH_BANNER:-}" ]; then
+    case "$CCDC_SSH_BANNER" in
+      none) ;;
+      /*)
+        case "$CCDC_SSH_BANNER" in
+          *[!A-Za-z0-9_/.@+-]*) ccdc_die "CCDC_SSH_BANNER contains unsupported characters: $CCDC_SSH_BANNER" ;;
+        esac
+        [ -f "$CCDC_SSH_BANNER" ] \
+          || ccdc_die "CCDC_SSH_BANNER names a file that does not exist: $CCDC_SSH_BANNER
+  sshd will refuse to start with a Banner it cannot read. Create it first:
+      sudo ./linux/banner.sh --config <cfg> --apply"
+        ;;
+      *) ccdc_die "CCDC_SSH_BANNER must be an absolute path or \"none\": $CCDC_SSH_BANNER" ;;
+    esac
+  fi
   for name in CCDC_SSH_PASSWORD_AUTH CCDC_SSH_PERMIT_EMPTY_PASSWORDS \
               CCDC_SSH_PERMIT_USER_ENV CCDC_SSH_X11_FORWARDING CCDC_SSH_ALLOW_TCP_FORWARDING; do
     eval "value=\${$name:-}"

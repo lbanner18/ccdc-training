@@ -41,6 +41,15 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== login banner ==\n'
+rc=0
+bash "$ROOT/redteam/banner-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - banner self-test (bwrap unavailable)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
 printf '\n== password policy audit ==\n'
 rc=0
 bash "$ROOT/redteam/policy-self-test.sh" || rc=$?
