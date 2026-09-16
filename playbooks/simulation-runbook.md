@@ -109,15 +109,15 @@ tools, and the order matters:
 [ ] sudo ./linux/triage.sh --config /tmp/ccdc-linux.env
     Look for RED "process(es) on the network that should not be on the network".
     The finding is NOT the port - 443 is allowed. It is that bash is holding it.
-[ ] Before killing it: sudo ./linux/preserve.sh --config <cfg> --pid <PID> --freeze --apply
+[ ] Before killing it: sudo ./linux/preserve.sh --config "$CFG" --pid <PID> --freeze --apply
     Read 00-CASE.txt and ancestry.txt. What STARTED it? That is the way back in.
-[ ] sudo ./linux/audit.sh --config <cfg>      # rules gone from the kernel?
+[ ] sudo ./linux/audit.sh --config "$CFG"      # rules gone from the kernel?
     Then --apply, then restart auditd and check `auditctl -l | grep ccdc`.
     Surviving that restart is the entire point of the persistent ruleset.
-[ ] sudo ./linux/sshd.sh --config <cfg>       # PermitRootLogin yes - from WHERE?
+[ ] sudo ./linux/sshd.sh --config "$CFG"       # PermitRootLogin yes - from WHERE?
     Then look at /etc/ssh/sshd_config yourself. It still says no. That is the
     lesson: reading the obvious file is not an audit.
-[ ] sudo ./linux/surface.sh --config <cfg>    # the UDP listener, under no unit
+[ ] sudo ./linux/surface.sh --config "$CFG"    # the UDP listener, under no unit
 [ ] The wiped auth.log: audit.sh reports SHRANK only if it had a baseline from
     an earlier pass. If it did not, that IS the finding - run --capture early,
     every time, or you cannot prove a wipe happened at all.

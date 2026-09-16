@@ -30,6 +30,12 @@ The supervised sentry keeps a current ranked queue, folds in canary and broader
 host-change events, and works out the exact remediation. It never acts on its
 own — findings queue for your sign-off:
 
+Set this once per shell and every command below pastes as-is:
+
+```bash
+CFG=/tmp/ccdc-linux.env      # your filled-in config for THIS box
+```
+
 ```bash
 sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status             # what is waiting
 sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply    # do it
@@ -66,7 +72,7 @@ the repaired files become the running code. Guardian does not own the live
 sentry installation: when disarming, uninstall guardian first, then sentry.
 
 Treat the config outside the repo as the source of truth. After changing users,
-services, or checks, re-run `sudo ./linux/arm.sh --config <cfg> --apply` (or run
+services, or checks, re-run `sudo ./linux/arm.sh --config "$CFG" --apply` (or run
 the individual sentry install followed immediately by guardian install). Never
 hand-edit the root-owned installed copies: the guardian intentionally rejects
 an unpinned config, and a manual edit can leave monitoring on different
@@ -85,10 +91,10 @@ service off the board if you get it wrong:
 ## The four that answer a question nothing else does
 
 ```bash
-sudo ./linux/triage.sh   --config <cfg>   # who is holding a socket right now
-sudo ./linux/audit.sh    --config <cfg>   # can this box still prove what happened?
-     ./linux/splunk.sh   --config <cfg>   # are the logs actually leaving?
-sudo ./linux/preserve.sh --config <cfg> --pid N   # take it BEFORE you kill it
+sudo ./linux/triage.sh   --config "$CFG"   # who is holding a socket right now
+sudo ./linux/audit.sh    --config "$CFG"   # can this box still prove what happened?
+     ./linux/splunk.sh   --config "$CFG"   # are the logs actually leaving?
+sudo ./linux/preserve.sh --config "$CFG" --pid N   # take it BEFORE you kill it
 ```
 
 The first three all answer "no" in ways that look like "yes" from a normal
@@ -101,9 +107,29 @@ process, an unlinked binary — stops existing the moment you remediate.
 Two produce the table an inject asks for directly:
 
 ```bash
-./linux/surface.sh --config <cfg> --table   # ports, owners, "needed?"
-./linux/policy.sh  --config <cfg> --table   # the password-policy findings row
+./linux/surface.sh --config "$CFG" --table   # ports, owners, "needed?"
+./linux/policy.sh  --config "$CFG" --table   # the password-policy findings row
 ```
+
+## Practising against it
+
+Two fixtures, and they exercise different skills:
+
+```bash
+sudo ./redteam/walkthrough.sh          # five planted artifacts; clean them up
+sudo ./redteam/live.sh                 # five RUNNING footholds; different discipline
+sudo ./redteam/walkthrough.sh --clean  # (or live.sh --clean) to remove them
+```
+
+`walkthrough.sh` plants things that sit still while you think — an account, a
+drop-in, a SUID binary, a timer, a sudoers rule. `live.sh` starts processes,
+where the order inverts: **freeze, capture, identify the parent, and only then
+kill.** `kill -9` first takes the memory, the open sockets and the parent with
+it, and the parent is how it comes back. One of the five runs with its
+executable already unlinked, so `/proc/PID/exe` is the only copy that exists.
+
+`plant.sh` + `drill.sh` are the larger scored version: sixteen artifacts and a
+pass/fail count, for measuring the tools rather than practising with them.
 
 ## Before any mutation
 
@@ -139,7 +165,16 @@ linux/                    Bash tools for Linux boxes:
   users.sh backup.sh      accounts; restore points
   diff-evidence.sh        compare two evidence snapshots
 windows/                  PowerShell first-pass tools
-redteam/self-test.sh      fast non-root regression suite (199 assertions)
+redteam/                  red-team fixtures and the regression suite:
+  self-test.sh            runs every suite below (267 assertions, non-root)
+  pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
+                          remediation that damages your own box, no flag
+                          without documentation
+  walkthrough.sh          five planted footholds for hands-on practice
+  live.sh                 five footholds that are RUNNING, for the
+                          freeze-before-kill drill
+  plant.sh drill.sh       the full sixteen-artifact fixture, and the scored
+                          detect/eradicate drill against it
 splunk/                   starter searches and field notes
 injects/                  memo and incident-report templates
 injects/responses/        pre-written drafts for the known injects

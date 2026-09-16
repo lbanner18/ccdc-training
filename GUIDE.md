@@ -87,6 +87,9 @@ These are consistent across the Linux tools; a reviewer can assume them.
 | `preserve.sh` | evidence only (`--freeze` needs `--apply`) | Takes what stops existing when you remediate: sockets with owners, the parent chain, executables recovered through `/proc` (the only copy of an unlinked payload), file descriptors, namespaces, environment, and a hashed manifest. `--freeze` SIGSTOPs the target first so it holds still. Run it BEFORE the kill, not after. |
 | `surface.sh` | no | Every listening socket joined to its PID, systemd unit (read from the cgroup, not matched by name), owning package, and a verdict: scored / local only / client socket / REVIEW. Also socket-activated units, containers, and inetd. `--table` is the network-audit inject. Without root it prints `? (need root)` rather than inventing an owner. |
 | `policy.sh` | **never** | Password policy: `login.defs`, pwquality (including PAM arguments, which override the file), faillock, hash schemes in `/etc/shadow`, per-account aging, credential files. `--table` is the password-policy inject row. It has no `--apply` on purpose — a broken PAM stack locks out every account including root, and the way back is a reboot. |
+| `triage.sh` | **never** | The one-shot ranked view of what is wrong right now, and the tool most operators live in. 22 checks, each RED/AMBER with the commands to act on it. Three of them ask the pair of questions you can actually answer on a box you were handed an hour ago — *does any package own this, and is it newer than the box itself?* — because "is this a plant?" is not answerable and spending the first hour on it is how a real finding gets left in place. The box's own birthday comes from the SSH host keys, which are generated once at first boot. |
+| `card.sh` | **never** | Prints one remediation card into the terminal with the real value substituted for `$U`/`$F`, so there is no variable left to forget to set. Pass `--config` and it checks the subject against your scored and protected services first: CARD 4 contains `systemctl disable --now` and `rm -rf`, and rendering that around your own scored unit with no warning is how you lose uptime to your own runbook. It warns rather than refuses — a scored service genuinely can be the compromised thing. |
+| `diff-evidence.sh` | no | Compares two evidence snapshots and prints only what changed. The answer to "was that always there?" when you have a baseline from before you touched anything. |
 | `scan.sh` | no | Wrapper for a ClamAV/YARA that is already installed, with signature age reported: a clean result from an empty database reads exactly like a clean box. Never installs, quarantines, moves or deletes. |
 | `banner.sh` | `--apply`/`--revert` | `/etc/issue` and `/etc/issue.net` with exact restore. The SSH half goes through `CCDC_SSH_BANNER` in `sshd.sh`, behind that tool's rollback, because sshd refuses to start with a `Banner` it cannot read. |
 
@@ -453,7 +456,7 @@ what keeps even a hidden guardian legible to its owner.
 | Sentry approval loop, end to end as root | **exercised on the lab VM**: a planted `/etc/cron.d/... -> /usr/local/bin/...` reverse shell was detected, queued, approved and removed; a healthy armed box reports zero RED. Two sign-off defects were found doing this (see below). |
 | Guardian → sentry independent repair | Implemented here: unit, config, ownership marker, and every installed regular file are hash-paired with a private repair copy; sentry drop-ins/runtime shadows are quarantined and the service is restarted after repair. The disposable root/systemd drill now contains payload/config/unit and drop-in attacks; **not yet executed on that VM**. |
 | `unitdropin` / `unitdropindeep` handling | Wired end to end in this review: direct malicious drop-ins and clean-looking drop-ins that launch a malicious script receive distinct findings, so approval removes only the drop-in (and deep payload when applicable), including on a protected/scored unit. Non-root regression coverage is included. Both real removal/reload/restart paths are now assertions in `redteam/drill.sh`; **the expanded root/systemd drill has not yet been executed**. |
-| Fast non-root regression suite | `redteam/self-test.sh`, **199 assertions across ten sub-suites, 0 failures**: guardian helpers 24/24; guardian→sentry repair/ownership sandbox **21/21**; canary/watch health, firewall drift and audit-change reporting **20/20**; audit rules **20/20**; banner **13/13**; policy **16/16**; surface+preserve **25/25**; sshd **32/32**; splunk **19/19**; live reverse-shell detection **6/6**; sentry queue **27/27** |
+| Fast non-root regression suite | `redteam/self-test.sh`, **267 assertions across twelve sub-suites, 0 failures**. The newest is `pasteable-self-test.sh`, which checks what the tools PRINT rather than what they detect: no command that cannot be pasted, no remediation that damages the operator's own box, no dry run that claims past-tense success, no flag a tool accepts without documenting. It exists because a human driving the kit for one afternoon found roughly thirty-five defects that 199 detection assertions had not. |
 | `fw.sh` dead man's switch, **rewritten** arm-before-apply path | **retested on the lab VM 2026-09-13**, five cases: dry-run changes nothing; safe apply arms a real systemd timer; `--status` distinguishes armed from broken; a second apply while one is pending is refused; `--confirm` keeps rules and disarms |
 | `fw.sh` **real lockout** (port 22 removed from the allow list) | **passed** — a new SSH connection was refused, the switch fired unattended, and access was restored ~60s later with the baseline ruleset intact and the scored service still up |
 | `watchdog.sh` state-change logging | **lab VM** — 60s quiet went from ~84 log lines to 6, and an incident is 4 lines. Four defects found and fixed doing it, listed in the commit |
@@ -564,6 +567,44 @@ that a newly protected unit is not acted on from an old queue, that disappeared
 findings can alert again, and that triage failure clears the queue loudly.
 These paths have sandbox coverage; the changed root/systemd lifecycle still
 needs the fresh VM drill listed in the test table.
+
+### The operator pass (2026-09-15/16) — what a human driving it found
+
+A person worked the kit on a live VM for one afternoon: read the output, pasted
+the commands, and said when something was confusing. That produced roughly
+thirty-five defects across sixteen commits. The number matters less than where
+they were.
+
+**Almost none were in detection.** 199 assertions covered detection and that is
+where the fewest bugs were. The rest lived at the boundary between the tool and
+the person — which nothing was testing, because a passing assertion about what
+a tool FOUND says nothing about what it then printed.
+
+The classes, and the worst instance of each:
+
+| Class | Worst case |
+|---|---|
+| Printed commands that do not run | `--config <cfg>` is a bash redirect; the operator got a syntax error mid-incident. Also `'"$qkit"'` leaking out of a quoted heredoc, and `sudo cat /etc/sudoers.d/*` (your shell expands the glob before sudo runs, and cannot read the directory). |
+| **Remediation that damages your own box** | `triage.sh` printed `sudo userdel -f -r -- sysmon`. The operator pasted it as instructed. `sysmon`'s home was `/root`, so `/root` went with the account. A UID-0 backdoor is homed at `/root` nearly by definition, so this was the common case, not an edge case. |
+| Detection gaps | A systemd timer with a plausible name was invisible: all three unit checks were CONTENT checks, and it contained nothing incriminating. Separately, one binary's sockets deduplicated to a single finding, so the scored `python3` masked an attacker's `python3` UDP listener. |
+| False positives that teach you to ignore the check | The SUID check called `fusermount3` unpackaged — `dpkg -S` fails on merged-`/usr` paths — then wrote that distrust into its own guidance: *"usually a packaging quirk; confirm once and move on"*, directly above a planted root shell. |
+| Status that misleads | `audit.sh --repair` without `--apply` printed "repaired: reloaded the audit rules into the kernel" beneath its own `[dry-run]` lines. The work was correctly gated; only the sentence was wrong, and the sentence is what gets believed. |
+| Input validation | `ccdc_load_config` tested `[ -r ]`, which is true for a **directory**. A mistyped `--config` ran the tool on compiled-in defaults and reported success. Every tool inherits that function. |
+| Shell mechanics | A backtick pair in prose inside an *expanding* heredoc ran `grep -rl` with no arguments on every guardian install, and failed it. |
+
+The response was not to fix them one at a time. `redteam/pasteable-self-test.sh`
+now asserts the RULES across every tool: no unpastable command, no glob behind
+sudo, no angle-bracket placeholder, no remediation that damages the operator's
+own box without saying so, no dry run claiming past-tense success, no function
+called before it is defined, no flag accepted without documentation, and no
+`--help` that prints source. Writing those sweeps found four more bugs on their
+first run, including the same `/usr/lib` SUID hole in `recon.sh` that had
+already been fixed in `hunt.sh`.
+
+**What this does not cover.** Five of the seven classes now have automated
+checks. The two that do not are *detection gaps* and *false positives*, and
+they cannot be tested statically — they need a real box with real attacks on
+it. That is an argument for more drill runs, not more test code.
 
 ---
 

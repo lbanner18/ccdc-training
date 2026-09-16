@@ -809,5 +809,43 @@ else
   no "a tool prints source for --help:$srchelp"
 fi
 
+# 12. The DOCS must not teach a command the tools were fixed to stop printing.
+#     README, GUIDE and the playbooks all carried "--config <cfg>" - the exact
+#     redirect that gave an operator a syntax error mid-incident - and the
+#     remediation cards, which are read through card.sh and pasted, carried
+#     nine more angle-bracket placeholders.
+docbad=$(python3 - "$ROOT" <<'PY'
+import io, re, sys, glob, os
+bad = []
+files = [os.path.join(sys.argv[1], 'README.md'), os.path.join(sys.argv[1], 'GUIDE.md')]
+files += sorted(glob.glob(os.path.join(sys.argv[1], 'playbooks', '*.md')))
+for p in files:
+    if not os.path.exists(p):
+        continue
+    for i, l in enumerate(io.open(p, encoding='utf-8').read().split('\n'), 1):
+        t = l.strip()
+        if not (t.startswith('sudo ') or t.startswith('./linux/') or t.startswith('./redteam/')):
+            continue
+        if re.search(r'<[a-zA-Z][a-zA-Z0-9 _-]*>', t):
+            bad.append('%s:%d: %s' % (os.path.basename(p), i, t[:70]))
+print('\n'.join(bad))
+PY
+)
+if [ -z "$docbad" ]; then
+  ok 'no example command in the docs carries an angle-bracket placeholder'
+else
+  no 'the docs teach a command that will not paste'
+  printf '%s\n' "$docbad" | sed 's/^/    /' | head -6
+fi
+
+# 13. The README's assertion count is a claim about this suite. A stale one is
+#     a small lie in the first thing anyone reads.
+claimed=$(grep -oE '\([0-9]+ assertions' "$ROOT/README.md" | grep -oE '[0-9]+' | head -1)
+if [ -n "$claimed" ] && [ "$claimed" -ge 250 ]; then
+  ok "README claims $claimed assertions, which is in range"
+else
+  no "README claims ${claimed:-no} assertions; the suite has well over 250"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

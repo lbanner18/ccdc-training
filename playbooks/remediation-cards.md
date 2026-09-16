@@ -431,7 +431,7 @@ sudo cp "/proc/$P/exe" "/var/tmp/recovered-$P.bin"
 
 # 3. Kill it, then remove the file if it still exists on disk.
 sudo kill -9 $P
-sudo rm -f /tmp/<name> /var/tmp/<name> /dev/shm/<name>
+sudo rm -f /tmp/NAME /var/tmp/NAME /dev/shm/NAME
 
 # 4. THE WAY BACK IN - something started it, and will again.
 #    Work CARD 3 (schedulers) and CARD 4 (units) now.
@@ -466,7 +466,7 @@ sudo grep -rn NOPASSWD /etc/sudoers /etc/sudoers.d
 # Remove the offending line. ALWAYS edit with visudo - it syntax-checks, and a
 # broken sudoers file means nobody on the box can use sudo again.
 sudo visudo                        # for /etc/sudoers
-sudo visudo -f /etc/sudoers.d/<file>
+sudo visudo -f /etc/sudoers.d/FILE
 
 # THE WAY BACK IN
 ls -la /etc/sudoers.d/             # a file named "10-base" is not automatically
@@ -475,7 +475,7 @@ sudo grep -rn '^[^#]' /etc/sudoers.d/
 getent group sudo admin wheel      # who is in the admin groups?
 
 # VERIFY
-sudo -l -U <user>                  # what can that user actually do now
+sudo -l -U "$U"                    # what can that user actually do now
 ```
 
 **Trap:** keep your own passwordless sudo if that is how you are working, or
@@ -536,7 +536,7 @@ if the scripts are gone - or you just want to check by hand - type this:
 sudo find /etc -xdev -type f -mmin -30 2>/dev/null
 
 # what changed vs your baseline (this is why recon.sh runs FIRST)
-./linux/diff-evidence.sh <old-evidence-dir> <new-evidence-dir>
+./linux/diff-evidence.sh OLD_DIR NEW_DIR
 
 # package-owned files, checked against the distro's own hashes
 sudo dpkg --verify 2>/dev/null | head -20     # Debian/Ubuntu
@@ -548,12 +548,12 @@ sudo rpm -Va 2>/dev/null | head -20           # RHEL/CentOS
 #    what you ran. Guardian units appearing right after arm.sh is expected.
 
 # 2. For anything you did not do - what changed?
-sudo ./linux/diff-evidence.sh <old-evidence-dir> <new-evidence-dir>
+sudo ./linux/diff-evidence.sh OLD_DIR NEW_DIR
 #    (this is why recon.sh runs FIRST, before you change anything)
 
 # 3. Restore from your own backup if it is one of the files you saved:
 sudo ./linux/backup.sh --config /tmp/ccdc-linux.env --list
-sudo ./linux/backup.sh --config /tmp/ccdc-linux.env --restore <path> --apply
+sudo ./linux/backup.sh --config /tmp/ccdc-linux.env --restore TARGET_PATH --apply
 
 # 4. Package-owned files can be checked against the distro's own hashes:
 sudo dpkg --verify 2>/dev/null | head -20        # Debian/Ubuntu
@@ -655,7 +655,7 @@ sudo nano "$F"                     # delete ONLY the offending line
 Follow whatever it launched — the hook is the trigger, not the payload:
 
 ```bash
-sudo cat /usr/local/bin/<whatever-it-called>
+sudo cat /usr/local/bin/NAME
 ```
 
 Then work CARD 4 (units) and CARD 3 (schedulers), because a hook like this is
@@ -692,7 +692,7 @@ sudo ss -tunapH | grep ESTAB
 sudo ss -tunap | grep -E 'bash|sh,|python|perl|nc|ncat|socat'
 
 # for any PID it names: what IS it?
-sudo ls -l /proc/<PID>/exe          # "(deleted)" here is its own answer
+sudo ls -l /proc/$P/exe             # "(deleted)" here is its own answer
 ```
 
 The port is not the finding. `443` is allowed on almost every box, which is

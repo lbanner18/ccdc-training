@@ -222,7 +222,7 @@ target and a place to hide persistence.
 [ ] sudo ./linux/services.sh --config /tmp/ccdc-linux.env --disable --apply
 [ ] VERIFY THE SCORED SERVICE FROM OFF THE BOX. This is the step most likely
     to cost you points by accident.
-[ ] Broke something? sudo ./linux/services.sh --config <cfg> --revert --apply
+[ ] Broke something? sudo ./linux/services.sh --config "$CFG" --revert --apply
 ```
 
 It refuses anything scored, anything of yours (sshd, cron, DNS, logging, the
@@ -414,7 +414,7 @@ is green in all four cases.
 attacker can delete. `audit.sh` notices a wipe after the fact; this is the half
 that means the wipe does not cost you the evidence.
 
-For the logging inject's table: `./linux/splunk.sh --config <cfg> --inventory`.
+For the logging inject's table: `./linux/splunk.sh --config "$CFG" --inventory`.
 
 ---
 
@@ -472,7 +472,7 @@ markdown; bash executes the prose. Use `card.sh`, or `less` if the scripts are
 gone.
 
 ```
-[ ] IDENTIFY: sudo ./linux/triage.sh --config <cfg>   <- ranks what is wrong
+[ ] IDENTIFY: sudo ./linux/triage.sh --config "$CFG"   <- ranks what is wrong
 [ ] IDENTIFY: what tripped? ausearch -k ccdc-canary -i  /  ps auxf  /  ss -tulpn
 [ ] CONTAIN:  disable the abused account, block the source, snapshot BEFORE you
     clean (the snapshot is your only forensics + your evidence for the IR memo).
@@ -493,7 +493,7 @@ those are exactly what the incident-report inject asks for.
 
 ```
 [ ] DO NOT KILL IT YET.
-[ ] sudo ./linux/preserve.sh --config <cfg> --pid <PID> --freeze --apply
+[ ] sudo ./linux/preserve.sh --config "$CFG" --pid PID --freeze --apply
     SIGSTOPs it so it holds still, then takes: the socket with its owner, the
     parent chain, open file descriptors, the environment, and a copy of the
     executable recovered THROUGH /proc - which works even when the file has
@@ -557,23 +557,23 @@ sudo ./linux/triage.sh   --config /tmp/ccdc-linux.env
 sudo ./linux/arm.sh      --config /tmp/ccdc-linux.env --apply
      ./linux/services.sh --config /tmp/ccdc-linux.env --review
 sudo ./linux/sentry.sh   --config /tmp/ccdc-linux.env --status
-sudo ./linux/preserve.sh --config /tmp/ccdc-linux.env --pid <PID> --freeze --apply
+sudo ./linux/preserve.sh --config /tmp/ccdc-linux.env --pid PID --freeze --apply
 ```
 
 The three that answer a question nothing else on the box answers, and all
 three answer "no" in ways that look like "yes" from a normal check:
 
 ```
-sudo ./linux/triage.sh --config <cfg>   who is holding a socket right now?
-sudo ./linux/audit.sh  --config <cfg>   can this box still prove what happened?
-     ./linux/splunk.sh --config <cfg>   are the logs actually leaving?
+sudo ./linux/triage.sh --config "$CFG"   who is holding a socket right now?
+sudo ./linux/audit.sh  --config "$CFG"   can this box still prove what happened?
+     ./linux/splunk.sh --config "$CFG"   are the logs actually leaving?
 ```
 
 And the two that write an inject table for you:
 
 ```
-     ./linux/surface.sh --config <cfg> --table   # ports/owner/unit/pkg/needed?
-     ./linux/policy.sh  --config <cfg> --table   # the password-policy row
+     ./linux/surface.sh --config "$CFG" --table   # ports/owner/unit/pkg/needed?
+     ./linux/policy.sh  --config "$CFG" --table   # the password-policy row
 ```
 
 Two things no tool here can do for you: check the scored service from off the
