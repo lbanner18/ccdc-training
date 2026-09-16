@@ -1562,7 +1562,7 @@ write_cron() {
 # Remove with: $guardian_copy --config <cfg> --uninstall --apply
 #
 # The label names THIS chain's own payload rather than the kit, because a fixed
-# string here is a join key: one `grep -rl` across /etc/cron.d would otherwise
+# string here is a join key: one "grep -rl" across /etc/cron.d would otherwise
 # link every independent chain on the box. The path below is already on the
 # ExecStart line underneath, so nothing is hidden that was not already visible.
 SHELL=/bin/bash

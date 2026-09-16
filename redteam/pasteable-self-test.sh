@@ -471,5 +471,85 @@ else
   no 'a package-owned ExecStart target could be offered for deletion'
 fi
 
+# --------------------------------- every PROBLEM must hand over a command
+# "PROBLEM: guardian install failed - run it directly to see why" is not a
+# command. The operator has to reconstruct the invocation from three variables
+# while the clock runs, and they will reconstruct it wrong.
+armsh=$ROOT/linux/arm.sh
+orphan=$(python3 - "$armsh" <<'PY'
+import io, re, sys
+src = io.open(sys.argv[1], encoding='utf-8').read().split('\n')
+bad = []
+for i, l in enumerate(src):
+    if not re.match(r'\s*bad "', l):
+        continue
+    if 'bad()' in l:
+        continue
+    # a fixcmd, a printf of guidance, or a bad_cfg helper within the next few
+    # lines counts as handing over instructions
+    window = '\n'.join(src[i + 1:i + 7])
+    if 'fixcmd' in window or re.search(r"printf '\s{4,}", window) or 'canaries_missing' in window:
+        continue
+    bad.append('line %d: %s' % (i + 1, l.strip()[:70]))
+print('\n'.join(bad))
+PY
+)
+if [ -z "$orphan" ]; then
+  ok 'every arm.sh PROBLEM is followed by something to run'
+else
+  no 'an arm.sh PROBLEM reports a failure with no command'
+  printf '%s\n' "$orphan" | sed 's/^/    /'
+fi
+if grep -qE '^\s*bad "[^"]*run it directly' "$armsh"; then
+  no 'arm.sh still says "run it directly" instead of printing the command'
+else
+  ok 'and none of them says "run it directly to see why"'
+fi
+
+# One failed install produced five PROBLEM lines: the install, plus four
+# verification checks for the thing that had just failed to install.
+if grep -q 'guardian layers not checked: the install above did not succeed' "$armsh"; then
+  ok 'step 6 does not re-report what step 5 already failed'
+else
+  no 'a failed guardian install is counted five times'
+fi
+
+# A config value in the wrong SHAPE must fail in preflight, before anything is
+# written - not four steps later inside a restart-looping unit's journal.
+if grep -q 'check_field_list CCDC_TCP_CHECKS 4' "$armsh" \
+   && grep -q 'check_field_list CCDC_HTTP_CHECKS 3' "$armsh"; then
+  ok 'arm.sh validates the shape of the pipe-delimited config lists up front'
+else
+  no 'arm.sh does not validate config list format in preflight'
+fi
+
+# Prose inside an EXPANDING heredoc is code. A backtick pair in a comment ran
+# `grep -rl` with no arguments on every guardian install, printed grep's usage
+# to stderr, and failed the install.
+back=$(python3 - "$ROOT" <<'PY'
+import re, sys, glob, io, os
+hits = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))
+                + glob.glob(os.path.join(sys.argv[1], 'redteam', '*.sh'))):
+    tag = None
+    for i, l in enumerate(io.open(f, encoding='utf-8').read().split('\n'), 1):
+        if tag is None:
+            m = re.search(r"<<-?([A-Za-z_][A-Za-z0-9_]*)\s*$", l)
+            if m and "<<'" not in l and '<<"' not in l:
+                tag = m.group(1)
+        elif l.strip() == tag:
+            tag = None
+        elif '`' in l:
+            hits.append('%s:%d: %s' % (os.path.basename(f), i, l.strip()[:70]))
+print('\n'.join(hits))
+PY
+)
+if [ -z "$back" ]; then
+  ok 'no backtick sits inside an expanding heredoc'
+else
+  no 'a backtick inside an expanding heredoc will run as a command'
+  printf '%s\n' "$back" | sed 's/^/    /'
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

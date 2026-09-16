@@ -28,6 +28,7 @@ skip_backup=0
 skip_canary=0
 skip_sentry=0
 sentry_ready=0
+guardian_ready=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
@@ -58,6 +59,12 @@ failed=0
 note() { step=$((step + 1)); printf '\n[%s] %s\n' "$step" "$1"; }
 good() { printf '    ok: %s\n' "$1"; }
 bad()  { printf '    PROBLEM: %s\n' "$1"; failed=$((failed + 1)); }
+# The command that investigates the PROBLEM just reported. Every bad() must be
+# followed by one: "run it directly to see why" is not a command, and an
+# operator who has to reconstruct the invocation from three variables while the
+# clock runs will reconstruct it wrong. Printed at the same indent as the
+# problem so a block stays pasteable.
+fixcmd() { printf '             %s\n' "$1"; }
 
 # --- preflight ---------------------------------------------------------------
 # Every check here is something that has actually gone wrong in practice.
@@ -76,7 +83,8 @@ else
 fi
 
 if [ "$apply" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then
-  bad "--apply needs root (re-run with sudo)"
+  bad "--apply needs root"
+  fixcmd "sudo $qself --config $qconfig --apply"
 fi
 
 # A service that is already down before you arm anything is the thing to fix
@@ -86,9 +94,63 @@ for unit in ${CCDC_SYSTEMD_SERVICES:-}; do
     good "scored unit up: $unit"
   else
     bad "scored unit is DOWN before arming: $unit — fix this first"
+    fixcmd "sudo systemctl status $(printf '%q' "$unit") --no-pager -l"
+    fixcmd "sudo journalctl -u $(printf '%q' "$unit") -n 50 --no-pager"
+    fixcmd "sudo systemctl start $(printf '%q' "$unit")"
   fi
 done
 [ -n "${CCDC_SYSTEMD_SERVICES:-}" ] || printf '    note: CCDC_SYSTEMD_SERVICES is empty; the watchdog will have nothing to hold up\n'
+
+# A config value in the wrong SHAPE must fail here, not four steps downstream.
+#
+# CCDC_TCP_CHECKS was written as "127.0.0.1:8080 127.0.0.1:22" instead of the
+# documented name|host|port|service, one per line. Nothing objected. arm.sh
+# wrote a restore point, laid six canaries, installed sentry, and then reported
+# "guardian install failed" - because the watchdog it starts exits 1 on a
+# malformed check and systemd puts it in a restart loop. The actual message
+# ("invalid TCP check name") existed only in the journal, three layers down.
+#
+# That is twenty minutes on competition day to learn that a pipe was a space.
+# The shape is checkable in a hundred milliseconds before anything is written.
+check_field_list() {
+  local varname=$1 want=$2 label=$3 value line n bad=0
+  eval "value=\${$varname:-}"
+  [ -n "$value" ] || return 0
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    n=$(printf '%s' "$line" | awk -F'|' '{print NF}')
+    [ "$n" -eq "$want" ] && continue
+    if [ "$bad" -eq 0 ]; then
+      bad "$varname is not in the documented format"
+      bad=1
+    fi
+    # Diagnosis before prescription: what is wrong, then what to run.
+    printf '             got:      %s\n' "$line"
+    printf '             expected: %s\n' "$label"
+    if [ "$n" -eq 1 ]; then
+      printf '             no "|" at all - a space-separated list of host:port is\n'
+      printf '             the usual way to write this one wrong.\n'
+    else
+      printf '             %s field(s), needs %s\n' "$n" "$want"
+    fi
+  done <<EOF
+$value
+EOF
+  [ "$bad" -eq 0 ] && return 0
+  fixcmd "\$EDITOR $qconfig"
+  fixcmd "grep -n -A4 $(printf '%q' "$varname") $qconfig"
+  fixcmd "# every value's format is documented above it in config/example.env"
+  return 1
+}
+
+if [ -n "${CCDC_TCP_CHECKS:-}" ]; then
+  check_field_list CCDC_TCP_CHECKS 4 'name|host|port|systemd-service' \
+    && good "CCDC_TCP_CHECKS parses"
+fi
+if [ -n "${CCDC_HTTP_CHECKS:-}" ]; then
+  check_field_list CCDC_HTTP_CHECKS 3 'name|url|systemd-service' \
+    && good "CCDC_HTTP_CHECKS parses"
+fi
 
 case "${CCDC_HTTP_CHECKS:-}" in
   *127.0.0.1*|*localhost*)
@@ -114,7 +176,8 @@ if [ "$skip_backup" -eq 0 ]; then
   if [ "$apply" -eq 1 ]; then
     "$SCRIPT_DIR/backup.sh" --config "$config" --apply >/dev/null 2>&1 \
       && good "backed up CCDC_BACKUP_PATHS" \
-      || bad "backup failed — continuing, but you have no restore point"
+      || { bad "backup failed — continuing, but you have no restore point"
+           fixcmd "sudo $qkit/backup.sh --config $qconfig --apply"; }
   else
     printf '    [dry-run] would run backup.sh --apply\n'
   fi
@@ -200,7 +263,9 @@ if [ "$skip_sentry" -eq 0 ]; then
       sentry_ready=1
       good "sentry installed; triage and change detection now run unattended"
     else
-      bad "sentry install failed — run it directly to see why"
+      bad "sentry install failed"
+      fixcmd "sudo $qkit/sentry.sh --config $qconfig --install --apply"
+      fixcmd "sudo journalctl -u ${CCDC_SENTRY_NAME:-ccdc-sentry}.service -n 30 --no-pager"
     fi
   else
     printf '    [dry-run] would install/start sentry as a supervised systemd service\n'
@@ -215,15 +280,22 @@ if [ "$skip_guardian" -eq 0 ]; then
   note "keep-alive and sentry repair (guardian.sh --install)"
   if [ "$apply" -eq 1 ] && [ "$skip_sentry" -eq 0 ] && [ "$sentry_ready" -eq 0 ]; then
     bad "guardian not installed because a fresh sentry authority was not established"
+    fixcmd "sudo $qkit/sentry.sh --config $qconfig --install --apply   # fix sentry first"
+    fixcmd "sudo $qkit/arm.sh --config $qconfig --apply        # then re-run this"
   elif [ "$apply" -eq 1 ]; then
     if "$SCRIPT_DIR/guardian.sh" --config "$config" --install --apply >/dev/null 2>&1; then
       if [ "$skip_sentry" -eq 0 ]; then
+        guardian_ready=1
         good "guardian armed; watchdog supervised and sentry repair source enrolled"
       else
+        guardian_ready=1
         good "guardian armed; watchdog supervised (sentry deliberately skipped)"
       fi
     else
-      bad "guardian install failed — run it directly to see why"
+      bad "guardian install failed"
+      fixcmd "sudo $qkit/guardian.sh --config $qconfig --install --apply"
+      fixcmd "sudo bash -x $qkit/guardian.sh --config $qconfig --install --apply 2>&1 | tail -40"
+      fixcmd "#   the -x run names the exact line; the plain one names the reason"
     fi
   else
     printf '    [dry-run] would run guardian.sh --install --apply\n'
@@ -235,7 +307,13 @@ fi
 
 note "verify what is actually running"
 if [ "$apply" -eq 1 ]; then
-  if [ "$skip_guardian" -eq 0 ] && ccdc_have systemctl; then
+  if [ "$skip_guardian" -eq 0 ] && [ "$guardian_ready" -eq 0 ]; then
+    # Do not re-report what step 5 already reported. Four "NOT active" lines
+    # for one failed install is four problems the operator has to triage down
+    # to the one that is real, and it inflates the final count past the point
+    # where the count means anything.
+    printf '    (guardian layers not checked: the install above did not succeed)\n'
+  elif [ "$skip_guardian" -eq 0 ] && ccdc_have systemctl; then
     # Each layer can be named independently (CCDC_GUARDIAN_*_NAME), so these
     # cannot be derived from CCDC_GUARDIAN_NAME alone -- doing that reported
     # every layer as "NOT active" on exactly the configs that hide best.
@@ -244,24 +322,45 @@ if [ "$apply" -eq 1 ]; then
     for u in "${CCDC_GUARDIAN_WATCH_NAME:-$gname-watch}.service" \
              "${CCDC_GUARDIAN_TICKER_NAME:-$gname}.service" \
              "${CCDC_GUARDIAN_RECONCILE_NAME:-$gname-reconcile}.timer"; do
-      systemctl is-active --quiet "$u" 2>/dev/null && good "active: $u" || bad "NOT active: $u"
+      if systemctl is-active --quiet "$u" 2>/dev/null; then
+        good "active: $u"
+      else
+        bad "NOT active: $u"
+        fixcmd "sudo systemctl status $(printf '%q' "$u") --no-pager -l"
+        fixcmd "sudo journalctl -u $(printf '%q' "$u") -n 30 --no-pager"
+      fi
     done
   fi
   # The installed copy is named after the chain's watch layer, so "watchdog.sh"
   # is not what is in `ps`. Look for the payload directory instead, which every
   # layer of this chain names and no other chain does.
-  if [ "$skip_guardian" -eq 0 ]; then
+  if [ "$skip_guardian" -eq 0 ] && [ "$guardian_ready" -eq 1 ]; then
     gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/${CCDC_GUARDIAN_NAME:-node-health}}
-    pgrep -f "$gdir" >/dev/null 2>&1 && good "watchdog process running" || bad "no watchdog process"
+    if pgrep -f "$gdir" >/dev/null 2>&1; then
+      good "watchdog process running"
+    else
+      bad "no watchdog process"
+      fixcmd "sudo systemctl status ${CCDC_GUARDIAN_WATCH_NAME:-${CCDC_GUARDIAN_NAME:-node-health}-watch}.service --no-pager -l"
+      fixcmd "sudo $qkit/guardian.sh --config $qconfig --tick --apply   # force a reconcile"
+    fi
   fi
   if [ "$skip_sentry" -eq 0 ] && ccdc_have systemctl; then
     sname=${CCDC_SENTRY_NAME:-ccdc-sentry}
-    systemctl is-active --quiet "$sname.service" 2>/dev/null \
-      && good "active: $sname.service" || bad "NOT active: $sname.service"
+    if systemctl is-active --quiet "$sname.service" 2>/dev/null; then
+      good "active: $sname.service"
+    else
+      bad "NOT active: $sname.service"
+      fixcmd "sudo systemctl status $sname.service --no-pager -l"
+      fixcmd "sudo $qkit/sentry.sh --config $qconfig --install --apply"
+    fi
   fi
   if [ "$skip_canary" -eq 0 ]; then
-    [ -f "$evidence_dir/canary.manifest" ] \
-      && good "canary manifest present" || bad "no canary manifest"
+    if [ -f "$evidence_dir/canary.manifest" ]; then
+      good "canary manifest present"
+    else
+      bad "no canary manifest"
+      fixcmd "sudo $qkit/canary.sh --config $qconfig --deploy --apply"
+    fi
   fi
 else
   printf '    [dry-run] nothing armed, so nothing to verify\n'
