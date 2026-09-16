@@ -9,8 +9,9 @@ you set a lockout threshold anywhere.
 **Section 2's table generates itself, one row per host:**
 
 ```bash
-./linux/policy.sh --config <cfg> --table    # the row
-./linux/policy.sh --config <cfg>            # the full audit behind it
+CFG=/tmp/ccdc-linux.env  # change if this box's filled config is elsewhere
+./linux/policy.sh --config "$CFG" --table  # the row
+./linux/policy.sh --config "$CFG"          # the full audit behind it
 ```
 
 It reads the effective settings rather than the obvious file - a `minlen` passed

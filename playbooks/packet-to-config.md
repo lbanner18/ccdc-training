@@ -193,8 +193,10 @@ Then do a full rehearsal on a snapshot you can revert:
 ```
 [ ] sudo ./linux/arm.sh --config ~/ccdc-real.env --apply
 [ ] sudo ./linux/sentry.sh --config ~/ccdc-real.env --status
-[ ] sudo ./linux/fw.sh --config ~/ccdc-real.env --apply   ... --confirm
-[ ] sudo ./linux/sshd.sh --config ~/ccdc-real.env --apply ... --confirm
+[ ] Apply the firewall, verify a new SSH connection and the scored service,
+    then run `sudo ./linux/fw.sh --config ~/ccdc-real.env --confirm`.
+[ ] Apply SSH policy, test a new login, then run
+    `sudo ./linux/sshd.sh --config ~/ccdc-real.env --confirm`.
 [ ] revert the snapshot
 ```
 

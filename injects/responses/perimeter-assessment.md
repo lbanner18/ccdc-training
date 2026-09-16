@@ -7,7 +7,8 @@ the graded artifact.
 **The host half of that table generates itself, per box:**
 
 ```bash
-sudo ./linux/surface.sh --config <cfg> --table
+CFG=/tmp/ccdc-linux.env  # change if this box's filled config is elsewhere
+sudo ./linux/surface.sh --config "$CFG" --table
 ```
 
 Every listening port with its process, systemd unit, owning package, and a

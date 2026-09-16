@@ -13,6 +13,14 @@ Never run `redteam/plant.sh` anywhere but a VM you own and can revert. Take the
 Time budget: ~60–90 min for the full loop the first time; ~30 once it is muscle
 memory. Do it under a timer — the tryout clock is the real adversary.
 
+`[ ]` marks a task on this printable card; copy commands after the marker, not
+the marker itself. This runbook uses `/tmp/ccdc-linux.env`; set `CFG` to that
+path before any later command that uses `$CFG`.
+
+```bash
+CFG=/tmp/ccdc-linux.env
+```
+
 ---
 
 ## Prerequisites
@@ -40,7 +48,9 @@ memory. Do it under a timer — the tryout clock is the real adversary.
     # Do NOT run either loop by hand with `&`; systemd owns their lifetime.
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
 [ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --status   # decoys + audit rules laid
-[ ] (optional) sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --apply then --confirm
+[ ] Optional: `sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --apply`; verify
+    access from a second SSH session, then run
+    `sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --confirm`.
 ```
 
 **Pass:** `canary.sh --status` lists the decoys and, if auditd is present, the

@@ -8,7 +8,8 @@ Linux *and* Windows.
 **The audit that fills in section 2 of this memo:**
 
 ```bash
-sudo ./linux/sshd.sh --config <cfg>          # read-only; the EFFECTIVE config
+CFG=/tmp/ccdc-linux.env  # change if this box's filled config is elsewhere
+sudo ./linux/sshd.sh --config "$CFG"         # read-only; the EFFECTIVE config
 ```
 
 It reports what the daemon will actually do rather than what `sshd_config`

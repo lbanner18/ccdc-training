@@ -9,8 +9,9 @@ On an isolated competition network you often cannot — see the notes.
 **What this box can already do, and how old its signatures are:**
 
 ```bash
-./linux/scan.sh --config <cfg>            # capability + signature age
-./linux/scan.sh --config <cfg> --scan     # scan the drop directories
+CFG=/tmp/ccdc-linux.env  # change if this box's filled config is elsewhere
+./linux/scan.sh --config "$CFG"           # capability + signature age
+./linux/scan.sh --config "$CFG" --scan    # scan the drop directories
 ```
 
 Signature age belongs in the memo. A clean result from a database with no

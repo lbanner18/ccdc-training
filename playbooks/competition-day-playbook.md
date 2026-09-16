@@ -9,6 +9,10 @@ team is.
 Fill every `<BRACKET>` from the team packet before you touch anything. A
 command run against a guessed value is a command run twice.
 
+**Reading the checklists:** lines beginning `[ ]` are things to complete, not
+shell input. Commands that are meant to be copied are in `bash` blocks without
+that marker.
+
 ---
 
 ## 0. Before the clock starts
@@ -36,47 +40,43 @@ win on uptime alone. Budget time for injects from minute one — see §6.
 Everything here is read-only. Do not harden anything until you know what normal
 looks like, or you will not be able to tell your own change from an intrusion.
 
+```bash
+# Run this first. Without sudo, triage can see only your own processes.
+sudo ./linux/triage.sh --config /tmp/ccdc-linux.env
+./linux/recon.sh --config /tmp/ccdc-linux.env
+./linux/hunt.sh --config /tmp/ccdc-linux.env
+sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env
+./linux/splunk.sh --config /tmp/ccdc-linux.env
 ```
-[ ] sudo ./linux/triage.sh --config /tmp/ccdc-linux.env  # WHAT IS ALREADY WRONG
-    High-confidence checks, ranked, ~25 lines. Run this FIRST: the red team's
-    access is usually pre-placed, and it is the only tool here that judges
-    rather than collects. Each finding names a remediation card.
-    Run it with sudo. Without it, the check that finds a reverse shell can
-    only see YOUR OWN processes, and it says so instead of printing "clean".
-[ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline snapshot
-[ ] ./linux/hunt.sh  --config /tmp/ccdc-linux.env      # persistence sweep (ro)
-[ ] Note the evidence path both printed. It is your before-picture.
-[ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env  # what SSH will ACTUALLY do
-    Reads drop-ins. sshd_config saying PermitRootLogin no proves nothing.
-[ ]      ./linux/splunk.sh --config /tmp/ccdc-linux.env # are logs leaving?
-```
+
+Save the evidence paths printed by recon and hunt; they are the before-picture.
 
 Read, by hand, in this order — this is where the red team's pre-placed access
 lives. **Every line below is a real command you can paste**; explanations are on
 their own `#` lines so nothing here is ambiguous at 10:05:
 
-```
+```bash
 # who is logged in right now, and who has been
-[ ] who
-[ ] w
-[ ] last | head -20
+who
+w
+last | head -20
 # every listening port. Anything not scored is a question:
 # "nothing but scored services should show on an nmap scan"
-[ ] ss -tulpn
+ss -tulpn
 # accounts with UID 0, or a service account that has a login shell
-[ ] awk -F: '$3==0 {print $1}' /etc/passwd
-[ ] getent passwd | awk -F: '$7 ~ /(bash|sh)$/ {print $1, $7}'
+awk -F: '$3==0 {print $1}' /etc/passwd
+getent passwd | awk -F: '$7 ~ /(bash|sh)$/ {print $1, $7}'
 # who can become root
-[ ] getent group sudo admin wheel
+getent group sudo admin wheel
 # scheduled footholds
-[ ] ls -la /etc/cron.d/ /etc/cron.daily/
-[ ] systemctl list-timers --all --no-pager
+ls -la /etc/cron.d/ /etc/cron.daily/
+systemctl list-timers --all --no-pager
 # unknown keys are access
-[ ] sudo cat /root/.ssh/authorized_keys
-[ ] sudo find /home -name authorized_keys -exec ls -la {} \;
+sudo cat /root/.ssh/authorized_keys
+sudo find /home -name authorized_keys -exec ls -la {} \;
 # boot-start services, and SUID binaries
-[ ] systemctl list-unit-files --state=enabled
-[ ] sudo find / -xdev -perm -4000 -type f 2>/dev/null
+systemctl list-unit-files --state=enabled
+sudo find / -xdev -perm -4000 -type f 2>/dev/null
 ```
 
 If you find a foothold now, note it, but do not start pulling threads before
@@ -100,12 +100,10 @@ it down, and it is the most common self-inflicted wound.
 The red team's cheapest win is a default or known password. Change them before
 they use them.
 
-```
-[ ] Change the password on every account that has one you did not set.
-[ ] ./linux/users.sh --config /tmp/ccdc-linux.env --dry-run    # review targets
-[ ] ./linux/users.sh --config /tmp/ccdc-linux.env --apply      # then apply
-[ ] Do NOT lock the scored service account or your own. See the password-policy
-    inject draft for the lockout trap.
+```bash
+# Review targets first. Do not lock the scored service account or your own.
+./linux/users.sh --config /tmp/ccdc-linux.env --dry-run
+sudo ./linux/users.sh --config /tmp/ccdc-linux.env --apply
 ```
 
 ### 2b. Firewall second — with the dead man's switch
@@ -113,13 +111,14 @@ they use them.
 The firewall is your biggest single lever, and the fastest way to lock
 yourself out. `fw.sh` arms an automatic rollback so a bad rule undoes itself.
 
+```bash
+./linux/fw.sh --config /tmp/ccdc-linux.env --dry-run
+sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --apply
+# Open a new SSH session and verify access plus the scored service first.
+sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --confirm
 ```
-[ ] ./linux/fw.sh --config /tmp/ccdc-linux.env --dry-run    # read the ruleset
-[ ] ./linux/fw.sh --config /tmp/ccdc-linux.env --apply      # arms auto-rollback
-[ ] OPEN A NEW SSH SESSION and confirm you still have access + scored service.
-[ ] ./linux/fw.sh --config /tmp/ccdc-linux.env --confirm    # keep the rules
-    (If you are locked out, do nothing: the rollback fires on its own.)
-```
+
+If you are locked out, do nothing: the rollback fires on its own.
 
 Default-deny inbound, allow only scored ports + the scorer/Splunk/admin
 sources. Egress: the packet decides. Blocking outbound kills most C2 callbacks
@@ -222,7 +221,7 @@ target and a place to hide persistence.
 [ ] sudo ./linux/services.sh --config /tmp/ccdc-linux.env --disable --apply
 [ ] VERIFY THE SCORED SERVICE FROM OFF THE BOX. This is the step most likely
     to cost you points by accident.
-[ ] Broke something? sudo ./linux/services.sh --config "$CFG" --revert --apply
+[ ] Broke something? `sudo ./linux/services.sh --config /tmp/ccdc-linux.env --revert --apply`
 ```
 
 It refuses anything scored, anything of yours (sshd, cron, DNS, logging, the
@@ -414,7 +413,8 @@ is green in all four cases.
 attacker can delete. `audit.sh` notices a wipe after the fact; this is the half
 that means the wipe does not cost you the evidence.
 
-For the logging inject's table: `./linux/splunk.sh --config "$CFG" --inventory`.
+For the logging inject's table:
+`./linux/splunk.sh --config /tmp/ccdc-linux.env --inventory`.
 
 ---
 
@@ -472,7 +472,7 @@ markdown; bash executes the prose. Use `card.sh`, or `less` if the scripts are
 gone.
 
 ```
-[ ] IDENTIFY: sudo ./linux/triage.sh --config "$CFG"   <- ranks what is wrong
+[ ] IDENTIFY: `sudo ./linux/triage.sh --config /tmp/ccdc-linux.env` ranks what is wrong
 [ ] IDENTIFY: what tripped? ausearch -k ccdc-canary -i  /  ps auxf  /  ss -tulpn
 [ ] CONTAIN:  disable the abused account, block the source, snapshot BEFORE you
     clean (the snapshot is your only forensics + your evidence for the IR memo).
@@ -493,7 +493,7 @@ those are exactly what the incident-report inject asks for.
 
 ```
 [ ] DO NOT KILL IT YET.
-[ ] sudo ./linux/preserve.sh --config "$CFG" --pid PID --freeze --apply
+[ ] `sudo ./linux/preserve.sh --config /tmp/ccdc-linux.env --pid PID --freeze --apply`
     SIGSTOPs it so it holds still, then takes: the socket with its owner, the
     parent chain, open file descriptors, the environment, and a copy of the
     executable recovered THROUGH /proc - which works even when the file has
@@ -564,16 +564,16 @@ The three that answer a question nothing else on the box answers, and all
 three answer "no" in ways that look like "yes" from a normal check:
 
 ```
-sudo ./linux/triage.sh --config "$CFG"   who is holding a socket right now?
-sudo ./linux/audit.sh  --config "$CFG"   can this box still prove what happened?
-     ./linux/splunk.sh --config "$CFG"   are the logs actually leaving?
+sudo ./linux/triage.sh --config /tmp/ccdc-linux.env   # who is holding a socket right now?
+sudo ./linux/audit.sh  --config /tmp/ccdc-linux.env   # can this box still prove what happened?
+./linux/splunk.sh --config /tmp/ccdc-linux.env        # are the logs actually leaving?
 ```
 
 And the two that write an inject table for you:
 
 ```
-     ./linux/surface.sh --config "$CFG" --table   # ports/owner/unit/pkg/needed?
-     ./linux/policy.sh  --config "$CFG" --table   # the password-policy row
+./linux/surface.sh --config /tmp/ccdc-linux.env --table   # ports/owner/unit/pkg/needed?
+./linux/policy.sh --config /tmp/ccdc-linux.env --table    # the password-policy row
 ```
 
 Two things no tool here can do for you: check the scored service from off the

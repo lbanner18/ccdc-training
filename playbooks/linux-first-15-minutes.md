@@ -2,6 +2,15 @@
 
 Use the team packet to fill the bracketed values before competition day.
 
+Before using this card, set the config path once in the shell:
+
+```bash
+CFG=/tmp/ccdc-linux.env
+```
+
+`[ ]` marks a task on this printable card; copy the command after it, not the
+checkbox.
+
 ```text
 [ ] Confirm host, console/SSH access, and current time.
 [ ] Take a VM snapshot if the environment permits it.
@@ -35,7 +44,7 @@ Use the team packet to fill the bracketed values before competition day.
     means nothing if a file in sshd_config.d says yes.
 [ ] Review the packet's scored users, ports, and firewall exceptions.
 [ ] sudo ./linux/surface.sh --config "$CFG"    # every port, with an owner
-[ ] sudo ./linux/services.sh --config "$CFG" --review, then disable deliberately.
+[ ] `sudo ./linux/services.sh --config "$CFG" --review` — then decide deliberately what to disable.
 [ ] Apply one change at a time with --dry-run first.
 [ ] Verify the scored service after every change.
 [ ] Run recon.sh again and note the evidence path in the incident report.

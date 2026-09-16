@@ -6,15 +6,16 @@ and network device. That is the graded half. Budget time for it.
 **On a Linux box, the mechanical part is two commands:**
 
 ```bash
-sudo ./linux/banner.sh --config <cfg> --apply    # /etc/issue and /etc/issue.net
+CFG=/tmp/ccdc-linux.env  # change if this box's filled config is elsewhere
+sudo ./linux/banner.sh --config "$CFG" --apply    # /etc/issue and /etc/issue.net
 # then, so SSH actually SHOWS it - this is the half people miss:
 #   CCDC_SSH_BANNER="/etc/issue.net"  in the config, then
-sudo ./linux/sshd.sh --config <cfg> --apply
+sudo ./linux/sshd.sh --config "$CFG" --apply
 ```
 
 `/etc/issue` is the console banner and `/etc/issue.net` is the network one. A
 box that sets only the first passes a look at the console and fails the inject,
-because the grader connects over SSH. `banner.sh --config <cfg>` (no --apply)
+because the grader connects over SSH. `banner.sh --config "$CFG"` (no --apply)
 prints which of the two this box currently serves.
 
 ---

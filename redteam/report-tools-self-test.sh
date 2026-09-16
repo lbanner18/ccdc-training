@@ -66,7 +66,9 @@ fi
 
 # Never assert an owner that was not actually looked up.
 if [ "$(id -u)" -ne 0 ]; then
-  if grep -q 'need root' "$test_root/surface.out"; then
+  if ! grep -qE '^  (tcp|udp)[[:space:]]' "$test_root/surface.out"; then
+    ok 'no visible listeners: no owner cells to verify in a non-root run'
+  elif grep -q 'need root' "$test_root/surface.out"; then
     ok 'unknown owners are reported as unknown, not guessed'
   else
     no 'a non-root run filled in owner columns it could not have read'
