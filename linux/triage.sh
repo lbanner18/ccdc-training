@@ -199,6 +199,79 @@ emit() {
   fi
 }
 fixhdr(){ printf '         ---- run this ----------------------------------------\n'; }
+
+# Does any package own this file?
+#
+# The naive `dpkg-query -S "$path"` is wrong on every modern Debian, Ubuntu and
+# RHEL, and wrong in the direction that matters: it says "nobody owns this"
+# about files that ship with the distribution.
+#
+# The cause is the merged-/usr layout. /bin is a symlink to usr/bin, so `find /`
+# reports /usr/bin/fusermount3 while dpkg recorded it as /bin/fusermount3, and
+# the lookup misses. On the lab box that produced a permanent AMBER for a
+# stock fuse3 binary - and an earlier version of this file drew exactly the
+# wrong conclusion from it, concluding the signal was noisy and telling the
+# operator "usually a packaging quirk; confirm once and move on". Directly
+# above a SUID root shell planted twenty minutes earlier.
+#
+# So: ask about the path, and about the same path with the merge undone.
+pkg_owns() {
+  local f=$1 alt=''
+  case "$f" in
+    /usr/bin/*)  alt="/bin/${f#/usr/bin/}" ;;
+    /usr/sbin/*) alt="/sbin/${f#/usr/sbin/}" ;;
+    /usr/lib/*)  alt="/lib/${f#/usr/lib/}" ;;
+    /bin/*)      alt="/usr/bin/${f#/bin/}" ;;
+    /sbin/*)     alt="/usr/sbin/${f#/sbin/}" ;;
+    /lib/*)      alt="/usr/lib/${f#/lib/}" ;;
+  esac
+  if ccdc_have dpkg-query; then
+    dpkg-query -S "$f" >/dev/null 2>&1 && return 0
+    [ -n "$alt" ] && dpkg-query -S "$alt" >/dev/null 2>&1 && return 0
+  elif ccdc_have rpm; then
+    rpm -qf "$f" >/dev/null 2>&1 && return 0
+    [ -n "$alt" ] && rpm -qf "$alt" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# When was this box built? SSH host keys are generated once at first boot and
+# never touched again, which makes them a day-zero marker needing no package
+# database. A SUID root binary newer than the box is a different claim from one
+# that shipped with it, and the date was sitting in the ls -l output all along
+# without anything reading it.
+BOX_BUILT=''
+for _hk in /etc/ssh/ssh_host_*_key; do
+  [ -f "$_hk" ] || continue
+  _m=$(stat -c '%Y' "$_hk" 2>/dev/null) || continue
+  if [ -z "$BOX_BUILT" ] || [ "$_m" -lt "$BOX_BUILT" ]; then BOX_BUILT=$_m; fi
+done
+unset _hk _m
+
+# Is this file newer than the box it is on? 10 minutes of slack so the files
+# written during first boot are not all flagged.
+newer_than_box() {
+  local m
+  [ -n "$BOX_BUILT" ] || return 1
+  m=$(stat -c '%Y' "$1" 2>/dev/null) || return 1
+  [ "$((m - BOX_BUILT))" -gt 600 ]
+}
+
+# A renamed shell is still byte-for-byte the shell. This is the one check that
+# turns "an unpackaged SUID binary, which could be anything" into a fact you can
+# act on without reading a disassembly: if it is identical to /bin/dash, it is
+# /bin/dash, and a SUID root /bin/dash under another name is a root shell.
+identical_to() {
+  local f=$1 c
+  for c in /bin/dash /bin/bash /bin/sh /usr/bin/dash /usr/bin/bash \
+           /bin/busybox /usr/bin/busybox /usr/bin/python3 /usr/bin/perl; do
+    [ -f "$c" ] || continue
+    [ "$c" = "$f" ] && continue
+    if cmp -s -- "$f" "$c" 2>/dev/null; then printf '%s\n' "$c"; return 0; fi
+  done
+  return 1
+}
+
 clean() { [ "$quiet" -eq 1 ] || printf '  ok     %s\n' "$1"; }
 begin() { checks=$((checks + 1)); }
 
@@ -345,11 +418,19 @@ if [ "${#keyfiles[@]}" -gt 0 ]; then
   done
   if [ "$total" -gt 0 ]; then
     amber "$total SSH key(s) grant login. Recognise EVERY one or remove it   [CARD 2]"
+    sshkey_fix=1
     for f in "${keyfiles[@]}"; do
       n=$(grep -c '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null)
       [ -n "$n" ] || n=0
       [ "$n" -gt 0 ] && emit AMBER sshkey "$f" "SSH keys grant login here"
     done
+    for f in "${keyfiles[@]}"; do
+      [ -s "$f" ] || continue
+      if newer_than_box "$f"; then
+        detail "$f - written $(date -d "@$(stat -c '%Y' "$f" 2>/dev/null)" '+%Y-%m-%d %H:%M' 2>/dev/null), AFTER this box was built"
+      fi
+    done
+    fixhdr
     for f in "${keyfiles[@]}"; do
       while IFS= read -r k; do
         [ -n "$k" ] || continue
@@ -603,20 +684,73 @@ if [ -n "$tmpunits" ]; then
       *) emit RED unittmp "$f" "unit executing from a world-writable directory" ;;
     esac
   done
-  for f in $tmpunits; do detail "$f"; done
+  for f in $tmpunits; do
+    detail "$f"
+    printf -v qf '%q' "$f"
+    unit_name=$(basename -- "$f")
+    printf -v qunit '%q' "${unit_name%.conf}"
+    fixhdr
+    fix "systemctl cat -- $qunit                     # read it BEFORE you stop it"
+    fix "sudo cp -p -- $qf $(printf '%q' "$state_dir")/   # keep the unit file"
+    fix "sudo systemctl disable --now -- $qunit      # stop it and unhook it from boot"
+    fix "sudo rm -- $qf && sudo systemctl daemon-reload"
+    fix "# the ExecStart target is a SEPARATE artifact - remove that too:"
+    fix "grep -h '^Exec' -- $qf"
+  done
 else
   clean "no systemd unit executes from /tmp, /var/tmp or /dev/shm"
 fi
 
 # --- 6. Passwordless sudo -----------------------------------------------------
+# `grep -h` suppresses the filename, and that is the whole problem with the way
+# this used to print. An operator got
+#
+#     www-lab ALL=(ALL) NOPASSWD:ALL
+#     banneluk ALL=(ALL) NOPASSWD:ALL
+#
+# and no way to tell that the first is in a file planted twenty minutes ago and
+# the second shipped with the image at first boot. Same line, same shape, and
+# the answer is entirely in which file each one lives in and when that file
+# appeared. -H, not -h.
 begin
-nopw=$(grep -rIh '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -v '^\s*$')
+nopw=$(grep -rIHn '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -v '^\s*$')
 if [ -n "$nopw" ]; then
   amber "passwordless sudo is configured - confirm each line is the packet's   [CARD 7]"
   emit AMBER nopasswd "sudoers" "passwordless sudo is configured"
-  while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-96)"; done <<EOF
+  nopw_late=''
+  while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    nfile=${l%%:*}
+    rest=${l#*:}
+    nline=${rest%%:*}
+    ntext=${rest#*:}
+    detail "$(printf '%s' "$ntext" | cut -c1-96)"
+    if newer_than_box "$nfile"; then
+      detail "   $nfile   line $nline   - written $(date -d "@$(stat -c '%Y' "$nfile" 2>/dev/null)" '+%Y-%m-%d %H:%M' 2>/dev/null), AFTER this box was built"
+      nopw_late="$nopw_late $nfile"
+    else
+      detail "   $nfile   line $nline   - predates this box or is as old as it"
+    fi
+  done <<EOF
 $nopw
 EOF
+  if [ -n "$nopw_late" ]; then
+    detail ""
+    detail "the file(s) written after the box was built are the ones you have no"
+    detail "account for. That is not proof - it is where to look first."
+  fi
+  fixhdr
+  fix "sudo cat /etc/sudoers.d/*                     # read every line, not just the grep hit"
+  fix "ls -lt /etc/sudoers.d/                        # newest first"
+  fix "# a line that is not the packet's goes away with the file it is in:"
+  fix "sudo cp -p -- FILE $(printf '%q' "$state_dir")/   # keep it first"
+  fix "sudo rm -- FILE"
+  fix "sudo visudo -c                                # MUST say 'parsed OK' before you walk away"
+  fix "# a broken sudoers file locks EVERYONE out of sudo, including you."
+  fix "# Keep this shell open until visudo -c passes."
+  detail "removing the ACCOUNT instead of the rule is usually wrong here: a line"
+  detail "granting NOPASSWD to a service account is an escalation of an account"
+  detail "the scored service still needs. Take the rule, keep the account."
 else
   clean "no NOPASSWD sudo rules"
 fi
@@ -639,78 +773,6 @@ begin
 # all packaged. An unpackaged SUID root binary is somewhere between a
 # compiled-from-source install and a back door, and on a box you were handed an
 # hour ago it is worth looking at either way.
-# Does any package own this file?
-#
-# The naive `dpkg-query -S "$path"` is wrong on every modern Debian, Ubuntu and
-# RHEL, and wrong in the direction that matters: it says "nobody owns this"
-# about files that ship with the distribution.
-#
-# The cause is the merged-/usr layout. /bin is a symlink to usr/bin, so `find /`
-# reports /usr/bin/fusermount3 while dpkg recorded it as /bin/fusermount3, and
-# the lookup misses. On the lab box that produced a permanent AMBER for a
-# stock fuse3 binary - and an earlier version of this file drew exactly the
-# wrong conclusion from it, concluding the signal was noisy and telling the
-# operator "usually a packaging quirk; confirm once and move on". Directly
-# above a SUID root shell planted twenty minutes earlier.
-#
-# So: ask about the path, and about the same path with the merge undone.
-pkg_owns() {
-  local f=$1 alt=''
-  case "$f" in
-    /usr/bin/*)  alt="/bin/${f#/usr/bin/}" ;;
-    /usr/sbin/*) alt="/sbin/${f#/usr/sbin/}" ;;
-    /usr/lib/*)  alt="/lib/${f#/usr/lib/}" ;;
-    /bin/*)      alt="/usr/bin/${f#/bin/}" ;;
-    /sbin/*)     alt="/usr/sbin/${f#/sbin/}" ;;
-    /lib/*)      alt="/usr/lib/${f#/lib/}" ;;
-  esac
-  if ccdc_have dpkg-query; then
-    dpkg-query -S "$f" >/dev/null 2>&1 && return 0
-    [ -n "$alt" ] && dpkg-query -S "$alt" >/dev/null 2>&1 && return 0
-  elif ccdc_have rpm; then
-    rpm -qf "$f" >/dev/null 2>&1 && return 0
-    [ -n "$alt" ] && rpm -qf "$alt" >/dev/null 2>&1 && return 0
-  fi
-  return 1
-}
-
-# When was this box built? SSH host keys are generated once at first boot and
-# never touched again, which makes them a day-zero marker needing no package
-# database. A SUID root binary newer than the box is a different claim from one
-# that shipped with it, and the date was sitting in the ls -l output all along
-# without anything reading it.
-BOX_BUILT=''
-for _hk in /etc/ssh/ssh_host_*_key; do
-  [ -f "$_hk" ] || continue
-  _m=$(stat -c '%Y' "$_hk" 2>/dev/null) || continue
-  if [ -z "$BOX_BUILT" ] || [ "$_m" -lt "$BOX_BUILT" ]; then BOX_BUILT=$_m; fi
-done
-unset _hk _m
-
-# Is this file newer than the box it is on? 10 minutes of slack so the files
-# written during first boot are not all flagged.
-newer_than_box() {
-  local m
-  [ -n "$BOX_BUILT" ] || return 1
-  m=$(stat -c '%Y' "$1" 2>/dev/null) || return 1
-  [ "$((m - BOX_BUILT))" -gt 600 ]
-}
-
-# A renamed shell is still byte-for-byte the shell. This is the one check that
-# turns "an unpackaged SUID binary, which could be anything" into a fact you can
-# act on without reading a disassembly: if it is identical to /bin/dash, it is
-# /bin/dash, and a SUID root /bin/dash under another name is a root shell.
-identical_to() {
-  local f=$1 c
-  for c in /bin/dash /bin/bash /bin/sh /usr/bin/dash /usr/bin/bash \
-           /bin/busybox /usr/bin/busybox /usr/bin/python3 /usr/bin/perl; do
-    [ -f "$c" ] || continue
-    [ "$c" = "$f" ] && continue
-    if cmp -s -- "$f" "$c" 2>/dev/null; then printf '%s\n' "$c"; return 0; fi
-  done
-  return 1
-}
-
 suid_all=$(find / -xdev -perm -4000 -type f 2>/dev/null)
 suid=$(printf '%s\n' "$suid_all" \
   | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
@@ -812,6 +874,12 @@ if [ -n "$suid_odd" ]; then
     emit AMBER suidunpackaged "$f" "SUID root binary in a system directory owned by no package"
     detail "$(ls -l "$f" 2>/dev/null)"
   done
+  fixhdr
+  fix "# confirm once. If these three agree it is stock, it is stock:"
+  fix "dpkg -S FILE || dpkg -S \$(echo FILE | sed 's|^/usr||')   # merged-/usr spelling"
+  fix "file -- FILE && sha256sum -- FILE"
+  fix "# and nothing needs doing. If it is a copy of a shell, it is not stock:"
+  fix "cmp -s -- FILE /bin/dash && echo 'THIS IS DASH - treat as RED'"
 fi
 
 # --- 8. Processes running from a world-writable directory ---------------------
@@ -823,6 +891,17 @@ if [ -n "$tmpproc" ]; then
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $tmpproc
 EOF
+  detail ""
+  detail "the PID is the number in the /proc path above."
+  fixhdr
+  fix "# FREEZE first. A killed process takes its memory, its open sockets and"
+  fix "# its parent with it, and the parent is how it comes back."
+  fix "sudo kill -STOP PID"
+  fix "sudo cp -- /proc/PID/exe $(printf '%q' "$state_dir")/exe-PID   # works even if unlinked"
+  fix "sudo tr '\\0' ' ' < /proc/PID/cmdline; echo"
+  fix "sudo ls -l /proc/PID/cwd /proc/PID/fd"
+  fix "ps -o pid,ppid,user,lstart,cmd -p PID \$(ps -o ppid= -p PID)   # WHO STARTED IT"
+  fix "sudo kill -9 PID                             # only after the five above"
 else
   clean "no process runs from a world-writable directory"
 fi
@@ -837,6 +916,14 @@ if [ -n "$deleted" ]; then
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $deleted
 EOF
+  fixhdr
+  fix "# /proc/PID/exe still resolves after the file is unlinked, so the binary"
+  fix "# is recoverable from memory for exactly as long as the process lives."
+  fix "sudo cp -- /proc/PID/exe $(printf '%q' "$state_dir")/exe-PID   # DO THIS FIRST"
+  fix "sudo dpkg -S \$(readlink /proc/PID/exe | sed 's/ (deleted)//') 2>/dev/null"
+  fix "ps -o pid,ppid,user,lstart,cmd -p PID"
+  fix "# a package mid-upgrade looks exactly like this and is harmless. The"
+  fix "# question the ps line answers: did apt start it, or did something else?"
 else
   clean "no running process has a deleted executable"
 fi
@@ -863,6 +950,16 @@ EOF
     for p in $unexpected; do
       detail "$(ss -tlnpH "sport = :$p" 2>/dev/null | head -1 | cut -c1-100)"
     done
+    fixhdr
+    fix "sudo ss -tlnp 'sport = :PORT'                 # what holds it"
+    fix "sudo systemctl status \$(ss -tlnpH 'sport = :PORT' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 | xargs -r ps -o unit= -p)"
+    fix "# THEN decide, and the order matters:"
+    fix "#  - it is a scored service on a port you forgot    -> add it to CCDC_ALLOWED_TCP_PORTS"
+    fix "#  - it is a service you do not need                -> services.sh --review, not kill"
+    fix "#  - nothing accounts for it                        -> CARD 12, freeze before you kill"
+    fix "# Do NOT firewall it off as a first move: if it turns out to be scored,"
+    fix "# you have taken the service down from the scoring engine's side while"
+    fix "# it still looks up from here."
   else
     clean "no unexpected listening TCP ports"
   fi
@@ -1578,6 +1675,15 @@ if [ -n "$recent" ]; then
   emit AMBER etcchange "see-log" "/etc changed recently"
   detail "if you did not change these, someone else did"
   for f in $recent; do detail "$(date -r "$f" '+%H:%M') $f"; done
+  fixhdr
+  fix "# what changed, against the copy the package shipped:"
+  fix "sudo dpkg -S FILE && sudo dpkg --verify \$(dpkg -S FILE | cut -d: -f1)"
+  fix "# or against YOUR restore point, which is usually the better answer:"
+  fix "sudo ls -la $(printf '%q' "${CCDC_BACKUP_DIR:-/var/backups/ccdc}")/"
+  fix "sudo diff -u $(printf '%q' "${CCDC_BACKUP_DIR:-/var/backups/ccdc}")/latest/FILE FILE"
+  fix "# and who was on the box when it happened:"
+  fix "sudo last -F | head -20"
+  fix "sudo ausearch -f FILE 2>/dev/null | tail -20     # if audit.sh --apply ran"
 else
   clean "no /etc changes in the last 30 minutes"
 fi

@@ -274,5 +274,71 @@ else
   no 'CARD 1 does not resolve the home directory'
 fi
 
+# ------------------------------- every finding must say what to do about it
+# An operator reached the passwordless-sudo AMBER and said, fairly, "I need to
+# know what to do here - are we not outputting the cards for all of these?"
+# We were not. Eight of twenty-six findings printed a problem and no commands,
+# two of them RED. A finding with no remediation is a finding that reads as
+# noise, and the operator learns to skim the whole report.
+#
+# The three network findings build their fix lines into a buffer earlier in the
+# file (so that severity groups print together), so they carry $FIXHDR rather
+# than a fixhdr call. Both spellings count.
+gap=$(python3 - "$ROOT" <<'PY'
+import io, re, sys, os
+src = io.open(os.path.join(sys.argv[1], 'linux', 'triage.sh'), encoding='utf-8').read().split('\n')
+found = []
+for i, l in enumerate(src):
+    m = re.match(r'\s*(red|amber)\s+"(.*?)"', l)
+    if m:
+        found.append((i + 1, m.group(1), m.group(2)))
+out = []
+for n, (ln, sev, txt) in enumerate(found):
+    end = found[n + 1][0] - 1 if n + 1 < len(found) else len(src)
+    block = '\n'.join(src[ln - 1:end])
+    if 'fixhdr' not in block and 'FIXHDR' not in block:
+        out.append('%s line %d: %s' % (sev.upper(), ln, txt))
+print('\n'.join(out))
+PY
+)
+# The buffered three are the only permitted absentees, and only because their
+# commands are assembled with $FIXHDR where the buffer is built.
+gap=$(printf '%s\n' "$gap" | grep -vE 'CARD 12' | grep -v '^$')
+if [ -z "$gap" ]; then
+  ok 'every triage finding carries a "run this" block'
+else
+  no 'a triage finding states a problem and gives no commands'
+  printf '%s\n' "$gap" | sed 's/^/    /'
+fi
+if grep -q 'entry="$entry$FIXHDR"' "$ROOT/linux/triage.sh"; then
+  ok 'and the buffered network findings build theirs into the buffer'
+else
+  no 'the buffered network findings lost their FIXHDR'
+fi
+
+# The sudoers listing must name the FILE. `grep -h` suppresses it, which is why
+# two identical-looking NOPASSWD lines - one planted, one shipped with the image
+# - were indistinguishable on screen.
+if grep -q "nopw=\$(grep -rIHn '\^\[\^#\]\*NOPASSWD'" "$ROOT/linux/triage.sh"; then
+  ok 'the NOPASSWD scan keeps filenames and line numbers (-H, not -h)'
+else
+  no 'the NOPASSWD scan is back to suppressing filenames'
+  grep -n 'NOPASSWD' "$ROOT/linux/triage.sh" | head -3 | sed 's/^/    /'
+fi
+
+# Helpers must be defined before the first section that calls them. Shell
+# functions are not hoisted: defining newer_than_box down in section 7 made
+# section 6 print "newer_than_box: command not found" at runtime, which no
+# syntax check catches.
+for fn in pkg_owns newer_than_box identical_to; do
+  def=$(grep -n "^$fn()" "$ROOT/linux/triage.sh" | head -1 | cut -d: -f1)
+  use=$(grep -nE "(^|[^a-z_])$fn " "$ROOT/linux/triage.sh" | grep -v "^$def:" | head -1 | cut -d: -f1)
+  if [ -n "$def" ] && { [ -z "$use" ] || [ "$def" -lt "$use" ]; }; then
+    ok "$fn is defined before it is used"
+  else
+    no "$fn is used at line $use but defined at line $def"
+  fi
+done
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
