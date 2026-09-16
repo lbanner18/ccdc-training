@@ -310,7 +310,7 @@ do_audit() {
       detail "/etc/shadow. The hash only changes when the password is changed."
       fixhdr
       fixline "grep ENCRYPT_METHOD $login_defs      # should be SHA512 or YESCRYPT"
-      fixline "sudo passwd <user>                   # re-hashes on change"
+      fixline "sudo passwd USER                     # re-hashes on change"
     else
       okline "no obsolete password hashes in /etc/shadow"
     fi
@@ -341,7 +341,7 @@ EOF
       detail "routine expiry, and injects/responses/password-policy.md commits"
       detail "to that standard. Expire a credential when it is COMPROMISED."
       detail "If the packet demands expiry, this is the command:"
-      fixline "sudo chage -M 90 <user>"
+      fixline "sudo chage -M 90 USER"
     fi
   fi
 

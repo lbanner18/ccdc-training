@@ -223,9 +223,9 @@ EOF
     printf '    A detection is a claim, not a verdict. Web shells and admin tools\n'
     printf '    share signatures, and the file may be part of the scored service.\n\n'
     printf '    1. preserve it:   sudo ./linux/preserve.sh --config '"$qconfig"'\n'
-    printf '    2. read it:       sudo less <the file>\n'
+    printf '    2. read it:       sudo less FILE\n'
     printf '    3. find out what it belongs to:\n'
-    printf '                      dpkg -S <file> 2>/dev/null || rpm -qf <file>\n'
+    printf '                      dpkg -S FILE 2>/dev/null || rpm -qf FILE\n'
     printf '    4. only then decide. If it is a payload, CARD 6 and CARD 12 apply.\n'
   fi
 }

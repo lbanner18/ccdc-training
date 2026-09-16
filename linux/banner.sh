@@ -188,7 +188,7 @@ do_install() {
   fi
   printf '\n  Evidence for the inject response:\n'
   printf '      cat /etc/issue.net\n'
-  printf '      ssh <user>@<this box>      # from another machine: the banner shows first\n'
+  printf '      ssh USER@%s      # from another machine: the banner shows first\n' "$(hostname -I 2>/dev/null | awk '{print $1}')"
 }
 
 do_revert() {

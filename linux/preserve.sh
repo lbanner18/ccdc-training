@@ -88,6 +88,28 @@ fi
 if [ "$freeze" -eq 1 ]; then
   [ -n "$target_pid" ] || ccdc_die "--freeze needs --pid"
   [ "$apply" -eq 1 ] || ccdc_die "--freeze changes system state (SIGSTOP); pass --apply to mean it"
+
+  pid_unit=$(ps -o unit= -p "$target_pid" 2>/dev/null | tr -d ' ')
+  case "$pid_unit" in ''|'-'|'?') pid_unit='' ;; esac
+  if [ -n "$pid_unit" ]; then
+    pid_base=${pid_unit%.service}
+    for __p in ${CCDC_SYSTEMD_SERVICES:-} ${CCDC_PROTECT_SERVICES:-} ${CCDC_SCORED_UNITS:-}; do
+      __p=${__p##*/}; __p=${__p%.service}
+      [ "$__p" = "$pid_base" ] || continue
+      [ "${CCDC_PRESERVE_FREEZE_SCORED:-0}" = 1 ] && break
+      ccdc_die "refusing to SIGSTOP pid $target_pid: it belongs to $pid_unit,
+  which your config lists as scored or protected.
+
+  A stopped scored service is downtime that looks like a crash to the engine,
+  and the watchdog cannot fix it - SIGSTOP leaves the unit \"active\".
+
+  Capture WITHOUT stopping it (everything except the frozen-process guarantee):
+      sudo $0 --config $config --pid $target_pid
+
+  If this service really is the compromised thing and you accept the outage:
+      sudo CCDC_PRESERVE_FREEZE_SCORED=1 $0 --config $config --pid $target_pid --freeze --apply"
+    done
+  fi
 fi
 
 case_name="case-$(ccdc_now)-$$${target_pid:+-pid$target_pid}"

@@ -59,6 +59,7 @@ ccdc_load_config "$config"
 # an operator hit on the lab box. Paths are absolute so they work from any cwd.
 printf -v qconfig '%q' "$config"
 printf -v qself '%q' "$SCRIPT_DIR/triage.sh"
+printf -v qcard '%q' "$SCRIPT_DIR/card.sh"
 printf -v qsshd '%q' "$SCRIPT_DIR/sshd.sh"
 
 
@@ -1896,7 +1897,10 @@ else
   printf '  Write down what you found and when. That is the incident-report\n'
   printf '  inject, already half-composed.\n'
   printf '\n  EXACT COMMANDS for each [CARD n] above:\n'
-  printf '      ./linux/card.sh <n> <name-or-path>     e.g. ./linux/card.sh 1 backupsvc\n'
+  printf '      %s N SUBJECT --config %s          # N is the card number\n' "$qcard" "$qconfig"
+  printf '      e.g. %s 1 backupsvc --config %s\n' "$qcard" "$qconfig"
+  printf '  Pass --config and card.sh will stop you before it renders a\n'
+  printf '  disable-and-delete block around your own scored service.\n'
   printf '  Reads the card in this terminal with the real value filled in. Do NOT\n'
   printf '  cat or paste playbooks/remediation-cards.md - it is markdown, and bash\n'
   printf '  will try to execute the prose.\n'

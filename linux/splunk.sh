@@ -355,7 +355,7 @@ EOF
     finding "the forwarder has NO output target configured"
     detail "it is running, and it is sending to nowhere"
     fixline "sudo cat $splunk_home/etc/system/local/outputs.conf"
-    fixline "sudo $splunk_home/bin/splunk add forward-server <indexer>:9997"
+    fixline "sudo $splunk_home/bin/splunk add forward-server INDEXER:9997"
   fi
 
   # --- what is it watching ---

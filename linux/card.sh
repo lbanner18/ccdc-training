@@ -25,23 +25,95 @@ set -u
 # and so that pasting a whole card back in is obviously not the intended use.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+# Sourced only for ccdc_load_config, which --config needs. card.sh runs fine
+# without a config; this must not become a hard dependency for printing a card.
+[ -r "$SCRIPT_DIR/lib/common.sh" ] && . "$SCRIPT_DIR/lib/common.sh"
 CARDS="$SCRIPT_DIR/../playbooks/remediation-cards.md"
 [ -f "$CARDS" ] || CARDS="$SCRIPT_DIR/remediation-cards.md"
 [ -f "$CARDS" ] || { printf 'card.sh: cannot find remediation-cards.md\n' >&2; exit 1; }
 
 list_cards() {
-  printf '\nRemediation cards - ./linux/card.sh <n> to read one\n\n'
+  printf '\nRemediation cards - card.sh N SUBJECT --config FILE to read one\n\n'
   grep -n '^## CARD ' "$CARDS" | sed -E 's/^[0-9]+:## CARD /  /; s/ — / - /'
   printf '\n  triage.sh prints [CARD n] beside each finding.\n'
   printf '  Each card is: kill the access, find the way back in, verify.\n\n'
 }
 
 [ "$#" -ge 1 ] || { list_cards; exit 0; }
+# --config FILE may appear anywhere; everything else stays positional so the
+# footer triage.sh prints keeps working unchanged.
+__args=""
+__cfg=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --config) __cfg=${2:-}; shift 2 || shift ;;
+    *) __args="$__args $1"; shift ;;
+  esac
+done
+# shellcheck disable=SC2086
+set -- $__args
+[ "$#" -gt 0 ] || { list_cards; exit 0; }
+
 case "$1" in
   -h|--help) list_cards; exit 0 ;;
   ''|*[!0-9]*) printf 'card.sh: give a card number. Run with no arguments to list them.\n' >&2; exit 1 ;;
 esac
 n=$1
+
+# --config is OPTIONAL and, when given, is used for exactly one thing: deciding
+# whether the subject you passed is something the packet says you are scored on.
+#
+# CARD 4 prints, among other lines,
+#
+#     sudo systemctl disable --now "$U"
+#     sudo rm -f "/etc/systemd/system/$U"
+#     sudo rm -rf "/etc/systemd/system/$U.d"
+#
+# and `card.sh 4 scored-web.service` rendered that with the scored unit
+# substituted in, with nothing anywhere saying so. The card is printed and
+# never run, but the whole point of a card is that you paste from it.
+#
+# This does NOT refuse. A scored service really can be the compromised thing,
+# and a tool that blocks the one card you need at the moment you need it is
+# worse than the risk. It makes the consequence impossible to miss instead.
+card_config=''
+protected_note=''
+
+subject_is_protected() {
+  local needle=${1##*/} item base
+  [ -n "$needle" ] || return 1
+  base=$needle
+  for suffix in .service .timer .socket .path .mount; do base=${base%$suffix}; done
+  for item in ${CCDC_SYSTEMD_SERVICES:-} ${CCDC_PROTECT_SERVICES:-} ${CCDC_SCORED_UNITS:-}; do
+    item=${item##*/}
+    for suffix in .service .timer .socket .path .mount; do item=${item%$suffix}; done
+    if [ "$item" = "$base" ]; then protected_note="a scored/protected SERVICE"; return 0; fi
+  done
+  for item in ${CCDC_ALLOWED_USERS:-}; do
+    if [ "$item" = "$needle" ]; then protected_note="an account your config ALLOWS"; return 0; fi
+  done
+  return 1
+}
+
+warn_if_protected() {
+  subject_is_protected "$subject" || return 0
+  printf '\n' >&2
+  printf '  ================================================================\n' >&2
+  printf '   STOP AND READ. "%s" is %s\n' "$subject" "$protected_note" >&2
+  printf '   according to %s\n' "$card_config" >&2
+  printf '\n' >&2
+  printf '   This card contains commands that STOP, DISABLE or DELETE its\n' >&2
+  printf '   subject. Pasting them takes it off the scoreboard until you put\n' >&2
+  printf '   it back, and the scoring engine will not wait.\n' >&2
+  printf '\n' >&2
+  printf '   If it really is compromised you may still have to. Before you do:\n' >&2
+  printf '     - know how you are putting it back (backup.sh --restore)\n' >&2
+  printf '     - expect the watchdog to restart it while you work\n' >&2
+  printf '     - prefer the narrowest fix: the payload, the drop-in, the key -\n' >&2
+  printf '       not the unit, unless the unit itself is the finding\n' >&2
+  printf '  ================================================================\n\n' >&2
+}
+
 
 # The second argument is the thing the finding is ABOUT - a username, a unit, a
 # file - and it is substituted into the card before printing.
@@ -109,6 +181,17 @@ else
 PLACEHOLDER WARNING: this card contains \$U / \$F placeholders. Either pass the
 value - ./linux/card.sh $n <name-or-path> - or set it first with U=<name>.
 An unset placeholder does not error; it matches EVERYTHING."
+fi
+
+if [ -n "$__cfg" ]; then
+  card_config=$__cfg
+  if command -v ccdc_load_config >/dev/null 2>&1; then
+    ccdc_load_config "$__cfg"
+  else
+    # shellcheck disable=SC1090
+    set -a; . "$__cfg" || card_config=''; set +a
+  fi
+  warn_if_protected
 fi
 
 printf '\n'
