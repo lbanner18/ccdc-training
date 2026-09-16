@@ -5,6 +5,22 @@ Linux *and* Windows.
 
 **Read the trap at the bottom before you apply anything.**
 
+**The audit that fills in section 2 of this memo:**
+
+```bash
+sudo ./linux/sshd.sh --config <cfg>          # read-only; the EFFECTIVE config
+```
+
+It reports what the daemon will actually do rather than what `sshd_config`
+says - drop-ins in `sshd_config.d` override it, and that difference is exactly
+what this inject is asking you to find. It also reports the access paths no
+`authorized_keys` review can see: `AuthorizedKeysCommand`, `TrustedUserCAKeys`,
+and `Match` blocks.
+
+Changes go through `--apply`, which validates with `sshd -t` and arms a timed
+rollback before reloading. **Test the new login in a second terminal before
+running `--confirm`.**
+
 ---
 
 ```text

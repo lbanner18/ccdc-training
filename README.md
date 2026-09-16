@@ -72,12 +72,37 @@ hand-edit the root-owned installed copies: the guardian intentionally rejects
 an unpinned config, and a manual edit can leave monitoring on different
 assumptions.
 
-`arm.sh` deliberately leaves two things to you, because both can take a scored
-service off the board if you get them wrong:
+`arm.sh` deliberately leaves these to you, because each one can take a scored
+service off the board if you get it wrong:
 
 ```bash
 ./linux/services.sh --config /tmp/ccdc-linux.env --review   # what should not run
 ./linux/fw.sh       --config /tmp/ccdc-linux.env            # what should not be reachable
+./linux/sshd.sh     --config /tmp/ccdc-linux.env            # what the daemon will ACTUALLY do
+./linux/policy.sh   --config /tmp/ccdc-linux.env            # what a password has to be
+```
+
+## The four that answer a question nothing else does
+
+```bash
+sudo ./linux/triage.sh   --config <cfg>   # who is holding a socket right now
+sudo ./linux/audit.sh    --config <cfg>   # can this box still prove what happened?
+     ./linux/splunk.sh   --config <cfg>   # are the logs actually leaving?
+sudo ./linux/preserve.sh --config <cfg> --pid N   # take it BEFORE you kill it
+```
+
+The first three all answer "no" in ways that look like "yes" from a normal
+check: a reverse shell over port 443 is a permitted connection, an `auditd`
+restart clears every runtime watch while the disk looks untouched, and a
+forwarder can be running, green, and shipping nothing. The fourth exists
+because the evidence an incident report needs — the socket, the parent
+process, an unlinked binary — stops existing the moment you remediate.
+
+Two produce the table an inject asks for directly:
+
+```bash
+./linux/surface.sh --config <cfg> --table   # ports, owners, "needed?"
+./linux/policy.sh  --config <cfg> --table   # the password-policy findings row
 ```
 
 ## Before any mutation
@@ -100,14 +125,21 @@ linux/                    Bash tools for Linux boxes:
   card.sh                 read one remediation card in the terminal
   watch.sh                detection sweep; folded into sentry, also runnable alone
   canary.sh               decoy files + auditd tripwires
+  audit.sh                persistent audit rules; catches a wiped log
   watchdog.sh             restarts a dead scored service (run via guardian)
   guardian.sh             keeps the watchdog alive against an attacker w/ root
   services.sh             review and reversibly disable unneeded daemons
   fw.sh                   firewall with an automatic lockout rollback
+  sshd.sh                 SSH audit + transactional change with a rollback
+  splunk.sh               is this box actually shipping its logs?
+  preserve.sh             volatile evidence, before you remediate
+  surface.sh              every reachable port, with an owner and a verdict
+  policy.sh               password policy audit (report-only, no --apply)
+  scan.sh banner.sh       AV/YARA wrapper; login-banner inject
   users.sh backup.sh      accounts; restore points
   diff-evidence.sh        compare two evidence snapshots
 windows/                  PowerShell first-pass tools
-redteam/self-test.sh      fast non-root regression suite
+redteam/self-test.sh      fast non-root regression suite (199 assertions)
 splunk/                   starter searches and field notes
 injects/                  memo and incident-report templates
 injects/responses/        pre-written drafts for the known injects

@@ -27,6 +27,16 @@ framework.
 - `linux/backup.sh`: explicit-path backups with checksums and guarded restore.
 - `linux/fw.sh`: generated firewall rules with dry-run output and an automatic
   rollback window.
+- `linux/sshd.sh`: effective-config audit (drop-ins, Match blocks, alternate
+  key sources) and transactional policy changes behind a timed rollback.
+- `linux/audit.sh`: persistent audit rules that survive an `auditd` restart,
+  log-tampering detection, and an evidence capture of the logs.
+- `linux/splunk.sh`: forwarder health and an end-to-end delivery probe.
+- `linux/preserve.sh`: volatile evidence capture before remediation.
+- `linux/surface.sh`, `linux/policy.sh`: the two inject tables, with the
+  judgement column filled in from the config rather than guessed.
+- `linux/scan.sh`, `linux/banner.sh`: use an installed AV/YARA honestly;
+  the login-banner inject.
 - `linux/diff-evidence.sh`: compare two recon snapshots.
 - `windows/recon.ps1` and `windows/watchdog.ps1`: read-only first-pass Windows
   equivalents for the post-training phase.
@@ -48,7 +58,15 @@ framework.
 - Root-run tools validate dedicated state/install paths before mkdir/chmod/rm,
   and status or dry-run modes must not change ownership or permissions.
 - SSH/firewall changes must have a rollback path and must be tested in a lab
-  snapshot before competition use.
+  snapshot before competition use. The rollback must be armed BEFORE the change
+  is applied, and owned by something that outlives the session making it.
+- A tool that reports must never state something it did not check. Where a
+  value could not be read (no privileges, no such file), it says so instead of
+  printing a plausible default — these reports are submitted as injects.
+- Repair of the kit's OWN detection (audit rules, guardian's units, sentry's
+  tree) is automatic, because restoring our tooling to its declared state is
+  not a change to the box's security posture. Anything that changes the BOX
+  goes through sentry and a human.
 - Scripts use POSIX-ish shell commands and fallbacks because the target may be
   an old Linux distribution with a minimal userland.
 

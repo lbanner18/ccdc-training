@@ -54,7 +54,7 @@ check (it logs state CHANGES, so silence afterwards is success, not failure).
 
 ```
 [ ] sudo ./redteam/plant.sh
-[ ] Read the printed GROUND TRUTH list (11 artifacts, all tagged RT_LAB_PLANT).
+[ ] Read the printed GROUND TRUTH list (up to 16 artifacts, all tagged RT_LAB_PLANT).
     That list is your answer key. Do not peek at it again until you score.
 ```
 
@@ -62,6 +62,13 @@ check (it logs state CHANGES, so silence afterwards is success, not failure).
 root SSH key, a `cron.d` entry, a root crontab entry, a disguised systemd timer
 ("System Logging Helper"), the implant binary, a `profile.d` hook, a `.bashrc`
 hook, a SUID root shell (`rootbash`), and a `/dev/shm` payload.
+
+**Then five that leave no file to find**, which is the harder half of the drill:
+a bash process holding an outbound connection on 443, an `auditctl -D` that
+clears every runtime audit rule, an SSH drop-in enabling root logins with
+`sshd_config` untouched, a UDP listener under no systemd unit, and a truncated
+`auth.log`. Some may print `skipped:` — the plant refuses to take port 443 from
+a scored service, and skips what the VM cannot do.
 
 ---
 
@@ -92,6 +99,34 @@ Note: the `.bashrc` hook is caught by the extended `hunt.sh` sweep but is NOT on
 of `score.sh`'s checks — verify it by eye so you learn to catch what the grep
 misses. If a decoy trip fired in `canary.sh --check`, treat that as the first
 alarm you would have seen live, before you ever ran a sweep.
+
+### Phase 2b — the five with no file to find
+
+`hunt.sh` and `score.sh` cannot see any of these, by construction. Different
+tools, and the order matters:
+
+```
+[ ] sudo ./linux/triage.sh --config /tmp/ccdc-linux.env
+    Look for RED "process(es) on the network that should not be on the network".
+    The finding is NOT the port - 443 is allowed. It is that bash is holding it.
+[ ] Before killing it: sudo ./linux/preserve.sh --config <cfg> --pid <PID> --freeze --apply
+    Read 00-CASE.txt and ancestry.txt. What STARTED it? That is the way back in.
+[ ] sudo ./linux/audit.sh --config <cfg>      # rules gone from the kernel?
+    Then --apply, then restart auditd and check `auditctl -l | grep ccdc`.
+    Surviving that restart is the entire point of the persistent ruleset.
+[ ] sudo ./linux/sshd.sh --config <cfg>       # PermitRootLogin yes - from WHERE?
+    Then look at /etc/ssh/sshd_config yourself. It still says no. That is the
+    lesson: reading the obvious file is not an audit.
+[ ] sudo ./linux/surface.sh --config <cfg>    # the UDP listener, under no unit
+[ ] The wiped auth.log: audit.sh reports SHRANK only if it had a baseline from
+    an earlier pass. If it did not, that IS the finding - run --capture early,
+    every time, or you cannot prove a wipe happened at all.
+```
+
+**Pass:** you found all five, and for the reverse shell you captured the
+evidence *before* killing it. Killing first and reporting "we found and removed
+a reverse shell" is worth a fraction of naming the peer address, the parent
+process, and the time it started.
 
 ---
 
@@ -214,8 +249,10 @@ Already proven with two real lockout tests, but worth one rep so it is reflex:
 You are ready when, under a timer and without notes:
 
 - Phase 0 (arm defenses) done in **under 15 minutes**.
-- Phase 2 catches **all 11** planted footholds, including the `.bashrc` hook
-  that `score.sh` does not check.
+- Phase 2 catches **all** the planted file footholds, including the `.bashrc`
+  hook that `score.sh` does not check.
+- Phase 2b catches all five of the live ones, and you preserved the reverse
+  shell's context *before* killing it.
 - Phase 3 eradication leaves a clean box **and** the scored service stays up
   throughout — you never took down your own service to remove a foothold.
 - You produced a timestamped timeline good enough to drop into the

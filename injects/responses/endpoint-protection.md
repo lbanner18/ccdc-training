@@ -6,6 +6,19 @@ server. Two artifacts per box, not one.
 **Check the network first.** This inject assumes you can download signatures.
 On an isolated competition network you often cannot — see the notes.
 
+**What this box can already do, and how old its signatures are:**
+
+```bash
+./linux/scan.sh --config <cfg>            # capability + signature age
+./linux/scan.sh --config <cfg> --scan     # scan the drop directories
+```
+
+Signature age belongs in the memo. A clean result from a database with no
+signatures reads exactly like a clean box, and saying so is a better answer
+than a screenshot of a green tick. `scan.sh` never quarantines or deletes:
+`clamscan --remove` on a web root deletes the file it disliked, and the scored
+service that served it starts returning 500.
+
 ---
 
 ```text

@@ -6,6 +6,24 @@ That is a scored sentence. The answer is NIST SP 800-63B-4.
 **This is the inject with the lockout trap.** Read the bottom section before
 you set a lockout threshold anywhere.
 
+**Section 2's table generates itself, one row per host:**
+
+```bash
+./linux/policy.sh --config <cfg> --table    # the row
+./linux/policy.sh --config <cfg>            # the full audit behind it
+```
+
+It reads the effective settings rather than the obvious file - a `minlen` passed
+as an argument to `pam_pwquality` in the PAM stack beats the one in
+`pwquality.conf`, and reporting the file value puts a wrong number in a graded
+document. It prints no password hashes, deliberately: this report gets pasted
+into a memo.
+
+`policy.sh` has **no `--apply`**. Every fix it suggests is a hand edit to PAM or
+`login.defs`, a broken PAM stack locks out every account including root, and the
+way back is single-user mode - which is a reboot, which is scored downtime. Keep
+a second root shell open, change one thing, test a login in a third session.
+
 ---
 
 ```text

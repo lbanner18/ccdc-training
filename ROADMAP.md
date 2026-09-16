@@ -28,6 +28,29 @@
 - Supervised sentry installed by `arm.sh`: current structured approval queue,
   approval-time revalidation, unique pre-removal evidence, and integrated
   canary/hunt/recon change events without occupying the operator terminal.
+- **The attacks that leave the disk looking normal** (2026-09-15). Everything
+  before this line finds an artifact in a file. These find the ones that do not
+  have one:
+  - `triage.sh` now asks who HOLDS each socket, not which port is open, so a
+    memory-only reverse shell over an allowed 443 is RED on the owner (a shell,
+    an interpreter, a deleted or unpackaged binary). Plus UDP listeners, with
+    the kernel's ephemeral range excluded so the check stays readable.
+  - `audit.sh`: persistent rules in `rules.d` that survive the `auditd` restart
+    which silently cleared every runtime watch, repaired every tick by guardian
+    from its own hash-pinned copy; and log-tamper detection by size/inode that
+    tells truncation from a real logrotate.
+  - `splunk.sh`: forwarder health and a token probe, because a forwarder can be
+    running, green, and shipping nothing.
+  - `sshd.sh`: the effective config (drop-ins win over the file you would read),
+    alternate key sources no `authorized_keys` check can see, and transactional
+    changes behind fw.sh's dead man's switch.
+  - `preserve.sh`, `surface.sh`, `policy.sh`, `scan.sh`, `banner.sh`.
+  - `plant.sh`/`drill.sh` gained the five matching attacks, including proving
+    the audit rules survive a real `auditd` restart.
+  - Non-root suite: 199 assertions across ten sub-suites.
+  - Found while doing it: `guardian-sentry-self-test.sh` had been failing 9 of
+    18 assertions silently (no writable `/etc/cron.d` in its sandbox), so
+    "guardian protects sentry" was not actually being tested.
 - External agent review of the whole kit, plus the hardening pass it produced:
   arm-before-apply in `fw.sh`, an independent `.repair` source tree and drop-in
   defence in `guardian.sh`, collision/interruption handling in `canary.sh`,
@@ -36,6 +59,17 @@
 
 ## Next lab session
 
+0. **Run the new drill on a real VM.** Everything in the 2026-09-15 block above
+   passes its own non-root suite and NONE of the mutating paths have run on
+   real systemd. Specifically unproven until that happens:
+   - `sshd.sh --apply` against a real sshd: the drop-in, `sshd -t`, the armed
+     rollback, and a reload that does not drop the session running it. **Test
+     this from a second SSH connection, and do not skip the login test.**
+   - `audit.sh --apply` against a real auditd, and the drill assertion that the
+     rules survive `systemctl restart auditd`.
+   - guardian's new audit-repair tick phase on a live chain.
+   - `plant.sh`'s five live attacks, including that it refuses to take port 443
+     when a scored service already has it.
 1. Boot the Ubuntu target and take a clean snapshot.
 2. Copy `config/example.env` outside the repo and fill in only the packet's
    scored users, services, ports, and addresses.

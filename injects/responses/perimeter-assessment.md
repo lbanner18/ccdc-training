@@ -4,6 +4,18 @@
 output, plus a table of host → service → "should this be exposed?" The table is
 the graded artifact.
 
+**The host half of that table generates itself, per box:**
+
+```bash
+sudo ./linux/surface.sh --config <cfg> --table
+```
+
+Every listening port with its process, systemd unit, owning package, and a
+verdict (scored / local only / REVIEW) taken from the packet values in your
+config. Run it on each box and paste the rows in. It reads local state only -
+the external scan the inject asks for still has to come from the workstation
+it names.
+
 **Scope discipline:** run this only from the workstation the inject names,
 against only the range the inject names. Scanning outside your assigned network
 is the one thing in CCDC that gets a team disqualified rather than penalized.

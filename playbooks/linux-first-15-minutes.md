@@ -22,10 +22,49 @@ Use the team packet to fill the bracketed values before competition day.
        Never run either loop by hand; systemd keeps both alive and your one
        terminal remains free.
 [ ] Check the current queue: sudo ./linux/sentry.sh --config <cfg> --status
-[ ] Check Splunk forwarding and record the result.
+[ ] sudo ./linux/audit.sh --config <cfg> --apply
+    Persistent audit rules, so the next `systemctl restart auditd` does not
+    silently clear every watch canary.sh loaded. Then --capture, which is the
+    log baseline that makes "they wiped the logs" provable later.
+[ ] ./linux/splunk.sh --config <cfg>          # is it actually shipping?
+    then: sudo ./linux/splunk.sh --config <cfg> --test-event --apply
+    and FIND THE TOKEN IN SPLUNK. A forwarder can be running and shipping
+    nothing; only the token proves delivery. Record the token and the time.
+[ ] sudo ./linux/sshd.sh --config <cfg>       # what the daemon will ACTUALLY do
+    Reads drop-ins and Match blocks. sshd_config saying PermitRootLogin no
+    means nothing if a file in sshd_config.d says yes.
 [ ] Review the packet's scored users, ports, and firewall exceptions.
+[ ] sudo ./linux/surface.sh --config <cfg>    # every port, with an owner
 [ ] sudo ./linux/services.sh --config <cfg> --review, then disable deliberately.
 [ ] Apply one change at a time with --dry-run first.
 [ ] Verify the scored service after every change.
 [ ] Run recon.sh again and note the evidence path in the incident report.
+```
+
+## When you find something live
+
+Not a file on disk — a process, a connection, a login. The order matters, and
+it is the opposite of the instinct:
+
+```text
+[ ] DO NOT KILL IT YET.
+[ ] sudo ./linux/preserve.sh --config <cfg> --pid <PID> --freeze --apply
+    Stops it, then takes the socket, the parent chain, the open files, and a
+    copy of the binary recovered through /proc (which works even when the file
+    was deleted). All of that is gone the moment you kill it.
+[ ] Read 00-CASE.txt. The three sentences it names ARE the incident report.
+[ ] Find what STARTED it before you kill it: ancestry.txt. ppid 1 means the
+    real parent already exited, so something scheduled it — work CARD 3 and
+    CARD 4 before killing, or it comes back in 60 seconds.
+[ ] Then: kill -9 <PID>, and re-run triage to confirm the finding CLEARS.
+```
+
+## The three questions nothing else on the box answers
+
+```text
+[ ] sudo ./linux/triage.sh --config <cfg>   who is holding a socket right now?
+    A reverse shell over 443 is a permitted connection on an allowed port.
+    The finding is never the port; it is that bash is on the end of it.
+[ ] sudo ./linux/audit.sh --config <cfg>    can this box still prove anything?
+[ ]      ./linux/splunk.sh --config <cfg>   are the logs leaving the box?
 ```

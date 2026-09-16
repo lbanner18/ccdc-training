@@ -38,12 +38,32 @@ looks like, or you will not be able to tell your own change from an intrusion.
 
 ```
 [ ] sudo ./linux/triage.sh --config /tmp/ccdc-linux.env  # WHAT IS ALREADY WRONG
-    Twelve high-confidence checks, ranked, ~25 lines. Run this FIRST: the red
-    team's access is usually pre-placed, and it is the only tool here that
-    judges rather than collects. Each finding names a remediation card.
+    High-confidence checks, ranked, ~25 lines. Run this FIRST: the red team's
+    access is usually pre-placed, and it is the only tool here that judges
+    rather than collects. Each finding names a remediation card.
+    Run it with sudo. Without it, the check that finds a reverse shell can
+    only see YOUR OWN processes, and it says so instead of printing "clean".
 [ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline snapshot
 [ ] ./linux/hunt.sh  --config /tmp/ccdc-linux.env      # persistence sweep (ro)
 [ ] Note the evidence path both printed. It is your before-picture.
+[ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env  # what SSH will ACTUALLY do
+    Reads drop-ins. sshd_config saying PermitRootLogin no proves nothing.
+[ ]      ./linux/splunk.sh --config /tmp/ccdc-linux.env # are logs leaving?
+```
+
+Three things that are only true until someone changes them, so do them early
+and write down the time:
+
+```
+[ ] sudo ./linux/audit.sh --config /tmp/ccdc-linux.env --apply
+    Persistent audit rules: they survive the `systemctl restart auditd` that
+    silently clears every runtime watch.
+[ ] sudo ./linux/audit.sh --config /tmp/ccdc-linux.env --capture
+    The log baseline. Without it, "they wiped the logs" is something you
+    believe rather than something you can show.
+[ ] sudo ./linux/splunk.sh --config /tmp/ccdc-linux.env --test-event --apply
+    Then FIND THE TOKEN IN SPLUNK. Write the token and the time in your notes:
+    "forwarding verified at 10:14 with token X" is an inject answer.
 ```
 
 Read, by hand, in this order — this is where the red team's pre-placed access

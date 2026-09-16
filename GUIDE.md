@@ -81,6 +81,14 @@ These are consistent across the Linux tools; a reviewer can assume them.
 | `fw.sh` | `--apply` only | Firewall renderer (nft/iptables) with a **dead man's switch**: snapshots, arms a systemd-owned auto-rollback that survives your SSH session dying, **verifies it is armed, and only then applies** — requiring `--confirm` to keep the rules. Refuses to start a second change while one is pending. Three real lockout tests passed, the most recent against the arm-before-apply rewrite. |
 | `backup.sh` | `--apply` only | Explicit-path backup, checksum, diff, and guarded restore. |
 | `guardian.sh` | `--install`/`--uninstall`/`--tick` | Keeps `watchdog.sh` alive against a root-level attacker: three layers that each restart the watchdog and rebuild the other two. It also independently hashes and repairs sentry's unit, config, and complete installed file tree from a private `.repair/sentry` copy. Manifest-tracked; repairs tampered artifacts and systemd drop-in overrides; disarm sentinel makes `--uninstall` exact. Each layer can be named independently, and `CCDC_GUARDIAN_STATE_DIR` lets N fully independent chains run side by side. |
+| `audit.sh` | `--apply`/`--repair`/`--uninstall` | Persistent audit rules in `/etc/audit/rules.d`, so the watches survive the `auditd` restart that clears every runtime rule `canary.sh` loaded. `--repair` is idempotent and silent when nothing is wrong, which is why guardian can run it every tick from its own hash-pinned copy. Also detects log tampering without auditd at all, by size and inode: a log that shrank without rotating is truncation, and a replaced inode with no rotated sibling is someone starting the record over. Never sets `-e 2` — it would lock out its own repair until a reboot. |
+| `sshd.sh` | `--apply`/`--confirm`/`--rollback` | Audits the EFFECTIVE config (`sshd -T`, which resolves every `Include`) and names the file that set each value, so a drop-in enabling root logins is found while `sshd_config` still says no. Reports the access paths no `authorized_keys` check can see: `AuthorizedKeysCommand`, `TrustedUserCAKeys`, non-default `AuthorizedKeysFile`, and `Match` blocks (which `sshd -T` does not evaluate — it says so rather than implying it checked). Changes go through fw.sh's dead man's switch: snapshot, write a drop-in, `sshd -t`, arm the rollback, **then** reload. Refuses a policy that would certainly lock you out. |
+| `splunk.sh` | `--test-event` only | Forwarder health: output targets across system and app configs, reachability, `monitor://` inputs that are disabled or point at deleted files, blocked queues. `--test-event` writes one tagged token and prints the search that finds it — the only part that proves delivery, because everything else reads local configuration and configuration is a claim. `--inventory` emits the logging inject's table. |
+| `preserve.sh` | evidence only (`--freeze` needs `--apply`) | Takes what stops existing when you remediate: sockets with owners, the parent chain, executables recovered through `/proc` (the only copy of an unlinked payload), file descriptors, namespaces, environment, and a hashed manifest. `--freeze` SIGSTOPs the target first so it holds still. Run it BEFORE the kill, not after. |
+| `surface.sh` | no | Every listening socket joined to its PID, systemd unit (read from the cgroup, not matched by name), owning package, and a verdict: scored / local only / client socket / REVIEW. Also socket-activated units, containers, and inetd. `--table` is the network-audit inject. Without root it prints `? (need root)` rather than inventing an owner. |
+| `policy.sh` | **never** | Password policy: `login.defs`, pwquality (including PAM arguments, which override the file), faillock, hash schemes in `/etc/shadow`, per-account aging, credential files. `--table` is the password-policy inject row. It has no `--apply` on purpose — a broken PAM stack locks out every account including root, and the way back is a reboot. |
+| `scan.sh` | no | Wrapper for a ClamAV/YARA that is already installed, with signature age reported: a clean result from an empty database reads exactly like a clean box. Never installs, quarantines, moves or deletes. |
+| `banner.sh` | `--apply`/`--revert` | `/etc/issue` and `/etc/issue.net` with exact restore. The SSH half goes through `CCDC_SSH_BANNER` in `sshd.sh`, behind that tool's rollback, because sshd refuses to start with a `Banner` it cannot read. |
 
 `recon.sh`, `hunt.sh`, triage, and watch change no system configuration, but
 they write evidence. Everything destructive is dry-run first, `--apply`
@@ -278,7 +286,7 @@ how the defensive tools get scored against ground truth.
 
 | Script | What it does |
 |---|---|
-| `plant.sh` | Plants 11 realistic footholds on a **lab VM you own**, every one tagged `RT_LAB_PLANT`, and prints the ground-truth list. `--clean` removes exactly what it planted. Standard CCDC red-team moves, nothing novel or weaponized. |
+| `plant.sh` | Plants 16 realistic footholds on a **lab VM you own**, every one tagged `RT_LAB_PLANT`, and prints the ground-truth list. `--clean` removes exactly what it planted. Standard CCDC red-team moves, nothing novel or weaponized. |
 | `score.sh` | Greps the newest evidence directory for each planted artifact's signature and prints CAUGHT/MISSED per technique. |
 | `drill.sh` | The full destructive loop, as root: arm → plant → detect → eradicate → nine guardian/sentry attacks → uninstall, with a PASS/FAIL assertion at every step. It exits non-zero on any failed assertion and has a safe `--self-test`. |
 | `self-test.sh` | Fast non-root entry point: syntax-checks every shell script, tests guardian helpers, runs guardian→sentry repair/ownership attacks, then runs sentry queue/stale-approval/injection regressions in user-namespace sandboxes. |
@@ -290,6 +298,23 @@ A rogue user (`rtsvc`), a sudoers `NOPASSWD` backdoor, an extra root SSH key, an
 "System Logging Helper", the implant binary, a `/etc/profile.d` hook, a
 `/root/.bashrc` hook, a SUID root shell, and a `/dev/shm` payload.
 
+Then the five that leave the disk looking normal, which are the ones the newest
+checks exist for: a **bash process holding an outbound connection on 443**, an
+**`auditctl -D`** (what a service restart does to runtime rules), an **SSH
+drop-in enabling root logins with `sshd_config` untouched**, a **UDP listener
+under no systemd unit**, and a **truncated `auth.log`** with the attacker still
+on the box.
+
+The reverse shell deliberately does **not** read commands from its socket. The
+detector's input — bash owning an established outbound socket on an allowed
+port — is identical either way, so leaving out the loop that would execute what
+the far end sent costs the fixture nothing and keeps a working remote shell out
+of this repository. If you extend it, keep it that way.
+
+Each of the five skips rather than fails when it cannot run: the plant refuses
+to take port 443 from a scored service, and a drill that fails because the VM is
+configured differently teaches the wrong lesson.
+
 ### What drill.sh asserts
 
 Read [`redteam/drill.sh`](redteam/drill.sh). The assertions are the interesting
@@ -300,7 +325,8 @@ part, not the plumbing.
 | 0 — arm | scored service answers before we start; recon baseline captured; canary decoys laid |
 | 1 — land | `plant.sh` reports ≥10 footholds |
 | 2 — detect | one assertion per planted technique, scored against the **union** of the recon and hunt evidence; then `score.sh`'s own output and a `canary.sh --check` for comparison |
-| 3 — eradicate | sudoers edit leaves a file `visudo -c` still accepts; rogue user gone; attacker key gone; all file footholds gone; a re-hunt is clean; **and the scored service survived the whole eradication** |
+| 2b — the live attacks | the outbound shell is found by socket owner and reaches the machine-readable queue; `preserve.sh` captures its ancestry and socket **while it is alive**; the dropped audit rules are reported, repaired, and then **survive a real `systemctl restart auditd`**; the SSH drop-in override is found and its file named while `sshd_config` still reads clean; the rogue UDP listener appears in both triage and the surface report; the truncated auth log is reported as tampering |
+| 3 — eradicate | sudoers edit leaves a file `visudo -c` still accepts; rogue user gone; attacker key gone; all file footholds gone; a re-hunt is clean; the live half (socket, listener, drop-in) is removed and **the detectors go quiet again** — a finding that cannot be cleared is indistinguishable from a broken check; **and the scored service survived the whole eradication** |
 | 4 — guardian/sentry | all three layers active + cron entry + manifest; then nine attacks (below), including independent sentry repair and real drop-in approval/removal |
 | 4b — removal | reinstall works; guardian uninstall leaves zero guardian artifacts but preserves sentry; sentry then removes its own unit/tree; no stray watchdog; systemd knows no leftover guardian units |
 
@@ -427,7 +453,7 @@ what keeps even a hidden guardian legible to its owner.
 | Sentry approval loop, end to end as root | **exercised on the lab VM**: a planted `/etc/cron.d/... -> /usr/local/bin/...` reverse shell was detected, queued, approved and removed; a healthy armed box reports zero RED. Two sign-off defects were found doing this (see below). |
 | Guardian → sentry independent repair | Implemented here: unit, config, ownership marker, and every installed regular file are hash-paired with a private repair copy; sentry drop-ins/runtime shadows are quarantined and the service is restarted after repair. The disposable root/systemd drill now contains payload/config/unit and drop-in attacks; **not yet executed on that VM**. |
 | `unitdropin` / `unitdropindeep` handling | Wired end to end in this review: direct malicious drop-ins and clean-looking drop-ins that launch a malicious script receive distinct findings, so approval removes only the drop-in (and deep payload when applicable), including on a protected/scored unit. Non-root regression coverage is included. Both real removal/reload/restart paths are now assertions in `redteam/drill.sh`; **the expanded root/systemd drill has not yet been executed**. |
-| Fast non-root regression suite | `redteam/self-test.sh`: syntax clean; guardian helper tests **24/24**; guardian→sentry repair/ownership sandbox **18/18**; canary/watch health and firewall-drift tests **16/16**; sentry queue identity, drop-in, timeout, stale-health, paste-safety, and failure-isolation tests **27/27** |
+| Fast non-root regression suite | `redteam/self-test.sh`, **199 assertions across ten sub-suites, 0 failures**: guardian helpers 24/24; guardian→sentry repair/ownership sandbox **21/21**; canary/watch health, firewall drift and audit-change reporting **20/20**; audit rules **20/20**; banner **13/13**; policy **16/16**; surface+preserve **25/25**; sshd **32/32**; splunk **19/19**; live reverse-shell detection **6/6**; sentry queue **27/27** |
 | `fw.sh` dead man's switch, **rewritten** arm-before-apply path | **retested on the lab VM 2026-09-13**, five cases: dry-run changes nothing; safe apply arms a real systemd timer; `--status` distinguishes armed from broken; a second apply while one is pending is refused; `--confirm` keeps rules and disarms |
 | `fw.sh` **real lockout** (port 22 removed from the allow list) | **passed** — a new SSH connection was refused, the switch fired unattended, and access was restored ~60s later with the baseline ruleset intact and the scored service still up |
 | `watchdog.sh` state-change logging | **lab VM** — 60s quiet went from ~84 log lines to 6, and an incident is 4 lines. Four defects found and fixed doing it, listed in the commit |
@@ -441,6 +467,16 @@ what keeps even a hidden guardian legible to its owner.
 | `hunt.sh` extended sweep | run read-only, new section emits correctly |
 | `hunt.sh` / `recon.sh` full runs | exercised previously against the lab VM |
 | `fw.sh` dead man's switch | two real lockout tests passed (prior session) |
+| Outbound/C2 detection (`triage.sh` 9-iii) | **exercised against real sockets** on this workstation: a bash process holding an outbound connection and an interpreter bound to an unaccounted port were both reported RED, and the finding cleared when they exited. `redteam/triage-net-self-test.sh` **6/6** |
+| `audit.sh` install / drop / repair / immutable / truncate / rotate / uninstall | `redteam/audit-self-test.sh` **20/20** against a fake kernel rule table. The fake is honest about what it proves: audit.sh's decisions, not auditd itself. **Real auditd, and the drill assertion that rules survive `systemctl restart auditd`, are pending on the lab VM.** |
+| `sshd.sh` audit (drop-in override, AuthorizedKeysCommand, CA keys, Match) | `redteam/sshd-self-test.sh` **32/32** against a fake `sshd -T`, including that the rollback is armed BEFORE the reload, that a second apply is refused while one is pending, and that rollback restores a pre-existing drop-in rather than quietly meaning "clean up" |
+| `sshd.sh --apply` against a REAL sshd | **not run.** This is the highest-risk untested path in the kit: it reloads the daemon you are logged in through. Test it from a second SSH connection on the lab VM, and do not skip the login test inside the rollback window. |
+| `splunk.sh` | `redteam/splunk-self-test.sh` **19/19** against a fixture forwarder tree. Found a real bug being written: a mistyped `CCDC_SPLUNK_HOME` was taken on trust, hiding "nothing here forwards logs at all". No real Splunk indexer has been involved; `--test-event` delivery is unproven by definition until someone runs the search. |
+| `policy.sh` | `redteam/policy-self-test.sh` **16/16** against a fixture PAM stack, including that a PAM argument overrides `pwquality.conf` and that no password hash appears in the output |
+| `surface.sh` / `preserve.sh` | `redteam/report-tools-self-test.sh` **25/25**; preserve tested against a real process because ancestry cannot be faked. Asserts a non-root run never asserts an owner it could not read |
+| `banner.sh` | `redteam/banner-self-test.sh` **13/13**, including byte-for-byte revert. Writing it surfaced a real portability bug: staging beside `/etc/issue` fails on a read-only `/etc` and renaming over it breaks on a bind-mounted `/etc/issue` (every container runtime) |
+| guardian → `audit.sh` repair enrollment | payload installed, hash-pinned, and rebuilt after deletion: 3 new assertions in the guardian suite (**21/21**). The tick phase has **not** run on a live chain on real systemd. |
+| The five live attacks in `plant.sh`/`drill.sh` | **written, not yet run.** They need real root, real auditd and real systemd. This is item 0 of the next lab session. |
 | Windows PowerShell | not exercised |
 | Inject drafts | every cited URL checked live (200/redirect resolved) |
 
