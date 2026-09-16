@@ -41,6 +41,24 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== password policy audit ==\n'
+rc=0
+bash "$ROOT/redteam/policy-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - policy self-test (bwrap unavailable)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
+printf '\n== surface and evidence reports ==\n'
+rc=0
+bash "$ROOT/redteam/report-tools-self-test.sh" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  printf 'SKIP - report tools self-test (ss unavailable)\n'
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
 printf '\n== ssh policy and rollback ==\n'
 rc=0
 bash "$ROOT/redteam/sshd-self-test.sh" || rc=$?
