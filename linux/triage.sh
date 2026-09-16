@@ -248,13 +248,23 @@ for _hk in /etc/ssh/ssh_host_*_key; do
 done
 unset _hk _m
 
-# Is this file newer than the box it is on? 10 minutes of slack so the files
-# written during first boot are not all flagged.
+# Is this file newer than the box it is on?
+#
+# The slack was 10 minutes and that was too tight. Host keys are written early
+# in first boot; cloud-init then provisions users, keys and packages for a good
+# while afterwards. On the lab box the operator's OWN authorized_keys landed 27
+# minutes after the host keys and got reported as "written AFTER this box was
+# built" - a false positive on the one file they were certain about, which is
+# precisely how an operator learns to stop believing this signal.
+#
+# Two hours covers a provisioning run and is still far short of the gap that
+# makes this interesting, which is the days between a box being built and an
+# event starting.
 newer_than_box() {
   local m
   [ -n "$BOX_BUILT" ] || return 1
   m=$(stat -c '%Y' "$1" 2>/dev/null) || return 1
-  [ "$((m - BOX_BUILT))" -gt 600 ]
+  [ "$((m - BOX_BUILT))" -gt 7200 ]
 }
 
 # A renamed shell is still byte-for-byte the shell. This is the one check that
@@ -456,8 +466,11 @@ if [ "${#keyfiles[@]}" -gt 0 ]; then
           esac
           printf -v qf '%q' "$f"
           printf -v qbak '%q' "$f.bak"
-          printf -v qsed '%q' "\\|$slice|d"
-          fix "sudo cp -- $qf $qbak && sudo sed -i $qsed $qf"
+          # Single-quoted, not %q. `printf %q` produced \\\| ... \| which is
+          # correct bash and round-trips perfectly - and which an operator read
+          # as a corrupted command and declined to run, which makes it useless.
+          # A command nobody will paste is not remediation.
+          fix "sudo cp -- $qf $qbak && sudo sed -i '\\|$slice|d' $qf"
         fi
       done < <(grep '^[[:space:]]*[^#[:space:]]' "$f" 2>/dev/null)
     done
@@ -718,6 +731,7 @@ if [ -n "$nopw" ]; then
   amber "passwordless sudo is configured - confirm each line is the packet's   [CARD 7]"
   emit AMBER nopasswd "sudoers" "passwordless sudo is configured"
   nopw_late=''
+  nopw_files=''
   while IFS= read -r l; do
     [ -n "$l" ] || continue
     nfile=${l%%:*}
@@ -725,6 +739,7 @@ if [ -n "$nopw" ]; then
     nline=${rest%%:*}
     ntext=${rest#*:}
     detail "$(printf '%s' "$ntext" | cut -c1-96)"
+    nopw_files="$nopw_files $nfile"
     if newer_than_box "$nfile"; then
       detail "   $nfile   line $nline   - written $(date -d "@$(stat -c '%Y' "$nfile" 2>/dev/null)" '+%Y-%m-%d %H:%M' 2>/dev/null), AFTER this box was built"
       nopw_late="$nopw_late $nfile"
@@ -740,11 +755,30 @@ EOF
     detail "account for. That is not proof - it is where to look first."
   fi
   fixhdr
-  fix "sudo cat /etc/sudoers.d/*                     # read every line, not just the grep hit"
-  fix "ls -lt /etc/sudoers.d/                        # newest first"
-  fix "# a line that is not the packet's goes away with the file it is in:"
-  fix "sudo cp -p -- FILE $(printf '%q' "$state_dir")/   # keep it first"
-  fix "sudo rm -- FILE"
+  # `sudo cat /etc/sudoers.d/*` does not work and looks like it should. The
+  # glob is expanded by YOUR shell, before sudo runs, and your shell cannot
+  # read a 0750 root-owned directory - so the literal "/etc/sudoers.d/*" is
+  # handed to cat and it reports No such file or directory. The sudo has to
+  # cover the expansion, not just the command.
+  fix "sudo sh -c 'cat /etc/sudoers.d/*'             # read every line, not just the grep hit"
+  fix "sudo ls -lt /etc/sudoers.d/                   # newest first"
+  fix "# a line that is not the packet's goes away with the file it is in."
+  fix "# ONLY the files that postdate this box are offered here:"
+  nopw_offered=0
+  for nf in $(printf '%s\n' "$nopw_late" | tr ' ' '\n' | sort -u); do
+    [ -n "$nf" ] || continue
+    printf -v qnf '%q' "$nf"
+    fix "sudo cp -p -- $qnf $(printf '%q' "$state_dir")/ && sudo rm -- $qnf"
+    nopw_offered=1
+  done
+  if [ "$nopw_offered" -eq 0 ]; then
+    fix "#   (none - every NOPASSWD file here is as old as the box)"
+  fi
+  for nf in $(printf '%s\n' "$nopw_files" | tr ' ' '\n' | sort -u); do
+    [ -n "$nf" ] || continue
+    case " $nopw_late " in *" $nf "*) continue ;; esac
+    fix "#   NOT offered: $nf predates the box - deleting it may remove YOUR sudo"
+  done
   fix "sudo visudo -c                                # MUST say 'parsed OK' before you walk away"
   fix "# a broken sudoers file locks EVERYONE out of sudo, including you."
   fix "# Keep this shell open until visudo -c passes."
@@ -875,11 +909,12 @@ if [ -n "$suid_odd" ]; then
     detail "$(ls -l "$f" 2>/dev/null)"
   done
   fixhdr
-  fix "# confirm once. If these three agree it is stock, it is stock:"
-  fix "dpkg -S FILE || dpkg -S \$(echo FILE | sed 's|^/usr||')   # merged-/usr spelling"
-  fix "file -- FILE && sha256sum -- FILE"
-  fix "# and nothing needs doing. If it is a copy of a shell, it is not stock:"
-  fix "cmp -s -- FILE /bin/dash && echo 'THIS IS DASH - treat as RED'"
+  fix "# confirm each one once. If these agree it is stock, nothing needs doing:"
+  for f in $suid_odd; do
+    printf -v qf '%q' "$f"
+    fix "dpkg -S $qf || dpkg -S $(printf '%q' "${f#/usr}")   # merged-/usr spelling"
+    fix "cmp -s -- $qf /bin/dash && echo 'THIS IS DASH - treat as RED'"
+  done
 fi
 
 # --- 8. Processes running from a world-writable directory ---------------------
@@ -891,17 +926,18 @@ if [ -n "$tmpproc" ]; then
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $tmpproc
 EOF
-  detail ""
-  detail "the PID is the number in the /proc path above."
   fixhdr
   fix "# FREEZE first. A killed process takes its memory, its open sockets and"
   fix "# its parent with it, and the parent is how it comes back."
-  fix "sudo kill -STOP PID"
-  fix "sudo cp -- /proc/PID/exe $(printf '%q' "$state_dir")/exe-PID   # works even if unlinked"
-  fix "sudo tr '\\0' ' ' < /proc/PID/cmdline; echo"
-  fix "sudo ls -l /proc/PID/cwd /proc/PID/fd"
-  fix "ps -o pid,ppid,user,lstart,cmd -p PID \$(ps -o ppid= -p PID)   # WHO STARTED IT"
-  fix "sudo kill -9 PID                             # only after the five above"
+  for tp in $(printf '%s\n' "$tmpproc" | grep -oE '/proc/[0-9]+/' | grep -oE '[0-9]+' | sort -un); do
+    fix ""
+    fix "sudo kill -STOP $tp"
+    fix "sudo cp -- /proc/$tp/exe $(printf '%q' "$state_dir")/exe-$tp   # works even if unlinked"
+    fix "sudo tr '\\0' ' ' < /proc/$tp/cmdline; echo"
+    fix "sudo ls -l /proc/$tp/cwd /proc/$tp/fd"
+    fix "ps -o pid,ppid,user,lstart,cmd -p $tp \$(ps -o ppid= -p $tp)   # WHO STARTED IT"
+    fix "sudo kill -9 $tp                           # only after the five above"
+  done
 else
   clean "no process runs from a world-writable directory"
 fi
@@ -919,9 +955,12 @@ EOF
   fixhdr
   fix "# /proc/PID/exe still resolves after the file is unlinked, so the binary"
   fix "# is recoverable from memory for exactly as long as the process lives."
-  fix "sudo cp -- /proc/PID/exe $(printf '%q' "$state_dir")/exe-PID   # DO THIS FIRST"
-  fix "sudo dpkg -S \$(readlink /proc/PID/exe | sed 's/ (deleted)//') 2>/dev/null"
-  fix "ps -o pid,ppid,user,lstart,cmd -p PID"
+  for tp in $(printf '%s\n' "$deleted" | grep -oE '/proc/[0-9]+/' | grep -oE '[0-9]+' | sort -un); do
+    fix ""
+    fix "sudo cp -- /proc/$tp/exe $(printf '%q' "$state_dir")/exe-$tp   # DO THIS FIRST"
+    fix "sudo dpkg -S \$(readlink /proc/$tp/exe | sed 's/ (deleted)//') 2>/dev/null"
+    fix "ps -o pid,ppid,user,lstart,cmd -p $tp"
+  done
   fix "# a package mid-upgrade looks exactly like this and is harmless. The"
   fix "# question the ps line answers: did apt start it, or did something else?"
 else
@@ -951,8 +990,10 @@ EOF
       detail "$(ss -tlnpH "sport = :$p" 2>/dev/null | head -1 | cut -c1-100)"
     done
     fixhdr
-    fix "sudo ss -tlnp 'sport = :PORT'                 # what holds it"
-    fix "sudo systemctl status \$(ss -tlnpH 'sport = :PORT' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 | xargs -r ps -o unit= -p)"
+    for p in $unexpected; do
+      fix "sudo ss -tlnp 'sport = :$p'                 # what holds port $p"
+      fix "sudo systemctl status \$(ss -tlnpH 'sport = :$p' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 | xargs -r ps -o unit= -p)"
+    done
     fix "# THEN decide, and the order matters:"
     fix "#  - it is a scored service on a port you forgot    -> add it to CCDC_ALLOWED_TCP_PORTS"
     fix "#  - it is a service you do not need                -> services.sh --review, not kill"
@@ -1676,14 +1717,18 @@ if [ -n "$recent" ]; then
   detail "if you did not change these, someone else did"
   for f in $recent; do detail "$(date -r "$f" '+%H:%M') $f"; done
   fixhdr
+  fix "# pick the one you cannot account for and put it in F:"
+  first_recent=$(printf '%s\n' "$recent" | head -1)
+  fix "F=$(printf '%q' "$first_recent")"
+  fix ""
   fix "# what changed, against the copy the package shipped:"
-  fix "sudo dpkg -S FILE && sudo dpkg --verify \$(dpkg -S FILE | cut -d: -f1)"
+  fix "sudo dpkg -S \"\$F\" && sudo dpkg --verify \$(dpkg -S \"\$F\" | cut -d: -f1)"
   fix "# or against YOUR restore point, which is usually the better answer:"
   fix "sudo ls -la $(printf '%q' "${CCDC_BACKUP_DIR:-/var/backups/ccdc}")/"
-  fix "sudo diff -u $(printf '%q' "${CCDC_BACKUP_DIR:-/var/backups/ccdc}")/latest/FILE FILE"
+  fix "sudo diff -u $(printf '%q' "${CCDC_BACKUP_DIR:-/var/backups/ccdc}")/latest\"\$F\" \"\$F\""
   fix "# and who was on the box when it happened:"
   fix "sudo last -F | head -20"
-  fix "sudo ausearch -f FILE 2>/dev/null | tail -20     # if audit.sh --apply ran"
+  fix "sudo ausearch -f \"\$F\" 2>/dev/null | tail -20   # if audit.sh --apply ran"
 else
   clean "no /etc changes in the last 30 minutes"
 fi

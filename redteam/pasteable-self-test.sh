@@ -340,5 +340,64 @@ for fn in pkg_owns newer_than_box identical_to; do
   fi
 done
 
+# ---------------------------------- commands that run, not just commands that parse
+# The earlier checks here catch placeholders bash treats as syntax (<cfg>) and
+# variables that never expanded. They do not catch a command that parses fine,
+# runs, and fails - which is what an operator got from three separate blocks:
+#
+#   sudo cat /etc/sudoers.d/*   ->  No such file or directory
+#   sudo cp -p -- FILE ...      ->  cannot stat 'FILE'
+#   sed -i \\\|KEY\|d           ->  correct bash, read as corruption, not run
+tri=$ROOT/linux/triage.sh
+
+# sudo does not cover a glob: YOUR shell expands it first, and it cannot read
+# a 0750 root-owned directory, so the literal string reaches the command.
+if grep -qE '^\s*fix "sudo (cat|ls|grep|head|tail)[^"]*/\*' "$tri"; then
+  no 'a printed command puts a glob after sudo (your shell expands it, unprivileged)'
+  grep -nE '^\s*fix "sudo (cat|ls|grep|head|tail)[^"]*/\*' "$tri" | sed 's/^/    /'
+else
+  ok 'no printed command relies on a glob sudo cannot reach'
+fi
+
+# A bare uppercase placeholder is not a syntax error, which is worse than one
+# that is: it runs and fails, and reads as the tool being broken.
+# A trailing "# ... by PID ..." is prose, not a placeholder, so cut each line
+# at its comment before matching.
+ph=$(grep -nE '^\s*fix "' "$tri" | grep -v '^\s*[0-9]*:\s*fix "#' \
+     | sed 's/[[:space:]]#[^"]*"[[:space:]]*$/"/' \
+     | grep -E '[^A-Z$/"](FILE|PORT|PID|USER)([^A-Za-z_]|")')
+if [ -n "$ph" ]; then
+  no 'a printed command contains a bare FILE/PORT/PID placeholder'
+  printf '%s\n' "$ph" | head -5 | sed 's/^/    /'
+else
+  ok 'placeholders appear only in comments, never in a runnable line'
+fi
+
+# printf %q round-trips correctly and prints \\\| for a sed address. It works.
+# It also looks broken enough that it did not get pasted, and a command nobody
+# runs is not remediation.
+if grep -q "printf -v qsed" "$tri"; then
+  no 'the key-deletion sed is built with %q again (prints \\\| and reads as corrupt)'
+else
+  ok 'the key-deletion sed is single-quoted and legible'
+fi
+
+# Offering to delete a sudoers file that predates the box means offering to
+# delete the operator's own sudo rule.
+if grep -q 'NOT offered: .* predates the box' "$tri"; then
+  ok 'only NOPASSWD files that postdate the box are offered for deletion'
+else
+  no 'the NOPASSWD block offers every file, including ones granting YOUR sudo'
+fi
+
+# The build-time window has to clear a provisioning run, or it fires on the
+# operator's own key and teaches them to ignore the signal.
+slack=$(grep -oE 'BOX_BUILT\)\)" -gt [0-9]+' "$tri" | grep -oE '[0-9]+$')
+if [ -n "$slack" ] && [ "$slack" -ge 3600 ]; then
+  ok "the box-built window is ${slack}s - wide enough for a provisioning run"
+else
+  no "the box-built window is ${slack:-unset}s, tight enough to flag first-boot files"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
