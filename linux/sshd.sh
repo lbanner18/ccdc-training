@@ -203,6 +203,102 @@ policy_check() {
   return 0
 }
 
+# A drop-in carries two facts that its contents never mention: when it was
+# written, and whether anything on this box claims to own it. Stock Ubuntu ships
+# this directory empty or with one cloud-init file; RHEL ships a couple from
+# openssh-server. Anything else arrived some other way.
+#
+# Neither fact proves hostility. "Written ninety minutes ago, owned by no
+# package" is not a verdict - it is the difference between a file you skim and a
+# file you read, which on the lab box was the whole difference.
+file_provenance() {
+  local path=$1 mtime now age when owner=''
+  mtime=$(stat -c '%Y' "$path" 2>/dev/null) || return 0
+  now=$(date +%s)
+  age=$(( (now - mtime) / 60 ))
+  when=$(date -d "@$mtime" '+%Y-%m-%d %H:%M' 2>/dev/null || printf 'unknown')
+  if [ "$age" -lt 120 ]; then
+    printf 'written %s (%s minutes ago)' "$when" "$age"
+  elif [ "$age" -lt 2880 ]; then
+    printf 'written %s (%s hours ago)' "$when" "$((age / 60))"
+  else
+    printf 'written %s (%s days ago)' "$when" "$((age / 1440))"
+  fi
+  if ccdc_have dpkg-query; then
+    owner=$(dpkg-query -S "$path" 2>/dev/null | head -1 | cut -d: -f1)
+  elif ccdc_have rpm; then
+    owner=$(rpm -qf "$path" 2>/dev/null | head -1)
+    case "$owner" in *'not owned'*|*'No such file'*) owner='' ;; esac
+  fi
+  if [ -n "$owner" ]; then
+    printf ', from package %s\n' "$owner"
+  else
+    printf ', NO package owns it\n'
+  fi
+}
+
+# The question an operator cannot answer at hour one is "is this file a plant?"
+# You cannot tell. A drop-in raising MaxAuthTries to 30 is either an attacker or
+# a lazy admin, and nothing in the file says which. Watched on the lab box, an
+# operator read a planted drop-in, correctly fixed the one line that was RED,
+# and left the rest of the file in place - because nothing told them the rest of
+# it disagreed with anything.
+#
+# The answerable question is the one the packet already settled two days ago:
+# does this box match the policy I wrote down? Anything that disagrees is either
+# something I do and should fix, or something someone else did and I should
+# remove. Attribution is optional. Agreement is not.
+#
+# So this prints that delta, naming the file and line that wins. It is the
+# first thing in the audit because it is the only section that knows what this
+# particular box is supposed to look like.
+policy_delta() {
+  local name key want actual sources shown=0
+  set -- \
+    CCDC_SSH_PERMIT_ROOT_LOGIN      permitrootlogin \
+    CCDC_SSH_PASSWORD_AUTH          passwordauthentication \
+    CCDC_SSH_PERMIT_EMPTY_PASSWORDS permitemptypasswords \
+    CCDC_SSH_PERMIT_USER_ENV        permituserenvironment \
+    CCDC_SSH_MAX_AUTH_TRIES         maxauthtries \
+    CCDC_SSH_LOGIN_GRACE            logingracetime \
+    CCDC_SSH_X11_FORWARDING         x11forwarding \
+    CCDC_SSH_ALLOW_TCP_FORWARDING   allowtcpforwarding \
+    CCDC_SSH_CLIENT_ALIVE_INTERVAL  clientaliveinterval \
+    CCDC_SSH_ALLOW_USERS            allowusers \
+    CCDC_SSH_BANNER                 banner
+  while [ "$#" -gt 1 ]; do
+    name=$1; key=$2; shift 2
+    eval "want=\${$name:-}"
+    [ -n "$want" ] || continue
+    actual=$(effective_value "$key")
+    [ -n "$actual" ] || continue
+    [ "$actual" = "$want" ] && continue
+    if [ "$shown" -eq 0 ]; then
+      shown=1
+      amber "this box does not match the SSH policy you wrote in your config"
+      detail "on the left is what you decided from the packet; on the right is"
+      detail "what sshd will actually do."
+    fi
+    printf '\n'
+    detail "$key: your config says \"$want\", this box has \"$actual\""
+    sources=$(setting_sources "$key")
+    if [ -n "$sources" ]; then
+      printf '%s\n' "$sources" | sed -E 's|^([^:]+):([0-9]+):[[:space:]]*|           \1   line \2:  |'
+    else
+      detail "  no file sets it - that is sshd's compiled-in default"
+    fi
+  done
+  if [ "$shown" -eq 1 ]; then
+    fixhdr
+    fixline "sudo $qself --config $qconfig --apply    # make the box match your config"
+    fixline "# any line named above that you did not write is someone else's"
+    fixline "# change. You do not have to prove it was hostile to remove it:"
+    fixline "# preserve the file, delete it, then --apply."
+  else
+    okline "the box matches every SSH setting your config specifies"
+  fi
+}
+
 do_audit() {
   local value sources match_files match_body dropin count started conf_mtime
 
@@ -242,6 +338,10 @@ do_audit() {
   fi
 
   if [ -n "$EFFECTIVE" ]; then
+    # 1b. Your policy versus this box, first - it is the only section that
+    # knows what this particular box was supposed to look like.
+    policy_delta
+
     # 2. The settings that hand out access.
     policy_check permitrootlogin no RED \
       "root can log in over SSH directly"
@@ -333,13 +433,24 @@ do_audit() {
       detail "while sshd_config still says PermitRootLogin no."
       for dropin in "$dropin_dir"/*.conf; do
         [ -f "$dropin" ] || continue
-        detail "$(ls -l -- "$dropin" 2>/dev/null | cut -c1-100)"
-        grep -inE '^[[:space:]]*(PermitRootLogin|PasswordAuthentication|PermitEmptyPasswords|AuthorizedKeysCommand|AuthorizedKeysFile|TrustedUserCAKeys|Match|AllowUsers|DenyUsers|PermitUserEnvironment)' \
-          "$dropin" 2>/dev/null | sed 's/^/             /'
+        printf '\n'
+        detail "$dropin"
+        detail "   $(file_provenance "$dropin")"
+        # Every directive, not only the access-granting ones. The filtered
+        # version of this listing printed PermitRootLogin out of a planted file
+        # and silently dropped the "MaxAuthTries 30" one line below it, so the
+        # operator fixed the line they were shown and left the rest of the
+        # attacker's file in place. These files are a handful of lines long.
+        # Print all of them.
+        grep -nE '^[[:space:]]*[A-Za-z]' "$dropin" 2>/dev/null \
+          | sed -E 's|^([0-9]+):[[:space:]]*|           line \1:  |'
       done
       fixhdr
       fixline "sudo $(sshd_bin) -T | grep -E 'permitrootlogin|passwordauth'   # what WINS"
-      fixline "ls -lt -- $(printf '%q' "$dropin_dir")                    # newest first: recent = suspicious"
+      fixline "ls -lt -- $(printf '%q' "$dropin_dir")                    # newest first"
+      fixline "# a file you did not write goes away whole, not line by line:"
+      fixline "#   sudo cp FILE $(printf '%q' "$state_dir")/ && sudo rm FILE"
+      fixline "#   sudo $qself --config $qconfig --apply"
     else
       okline "no SSH drop-in files"
     fi

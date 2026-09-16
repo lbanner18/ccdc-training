@@ -165,6 +165,45 @@ fi
 has 'OVERRIDE the main config' "$test_root/audit.out" \
   'the audit explains that drop-ins override'
 
+# --------------------------------------------- the packet policy versus the box
+# The defect this covers, found by an operator on the lab box: a planted drop-in
+# set MaxAuthTries 30 next to a PermitRootLogin the audit flagged. They fixed the
+# flagged line and left the rest of the attacker's file, because nothing ever put
+# the number they chose from the packet beside the number the box was using.
+cat >>"$cfg" <<EOF
+CCDC_SSH_MAX_AUTH_TRIES="4"
+CCDC_SSH_X11_FORWARDING="no"
+EOF
+printf '# performance tuning\nPermitRootLogin no\nMaxAuthTries 30\n' >"$dropins/49-tuning.conf"
+rm -f "$dropins/99-tuning.conf"
+"$sshd_sh" --config "$cfg" >"$test_root/delta.out" 2>&1 || true
+has 'does not match the SSH policy you wrote' "$test_root/delta.out" \
+  'the audit compares the box against the packet policy'
+has 'your config says "4", this box has "30"' "$test_root/delta.out" \
+  'and names both numbers, so the mismatch is not a judgement call'
+has '49-tuning.conf   line 3:  MaxAuthTries 30' "$test_root/delta.out" \
+  'pointing at the file and line that wins'
+# The old listing filtered to access-granting directives only, so MaxAuthTries
+# never appeared under the drop-in at all.
+if awk '/SSH drop-in file/,/Match block|no Match/' "$test_root/delta.out" \
+     | grep -q 'MaxAuthTries 30'; then
+  ok 'every directive in a drop-in is listed, not just the access-granting ones'
+else
+  no 'a drop-in directive was filtered out of the drop-in listing'
+fi
+has 'NO package owns it' "$test_root/delta.out" \
+  'a drop-in no package owns is called out as such'
+if grep -qE 'written [0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2} \([0-9]+ (minute|hour|day)s? ago\)' \
+     "$test_root/delta.out"; then
+  ok 'and dated in both absolute and relative terms'
+else
+  no 'the drop-in was not dated'
+  sed 's/^/    /' "$test_root/delta.out" | head -20
+fi
+rm -f "$dropins/49-tuning.conf"
+base_env
+printf 'PermitRootLogin yes\n' >"$dropins/99-tuning.conf"
+
 # ------------------------------------------------------- alternate key sources
 printf 'AuthorizedKeysCommand /usr/local/bin/keys.sh\nAuthorizedKeysCommandUser root\n' \
   >"$dropins/98-keys.conf"
