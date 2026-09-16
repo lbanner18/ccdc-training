@@ -143,10 +143,53 @@ did not set the directive at all and a drop-in had turned root logins back on.
 [ ] Read every drop-in it lists. One of them may be why a scored login works.
 ```
 
+**"Is this file a plant?" is a question you cannot answer, so do not spend the
+event on it.** A drop-in that raises `MaxAuthTries` to 30 is either an attacker
+or a lazy admin, and nothing in the file says which. Watched on the lab VM, an
+operator found a planted `49-tuning.conf`, correctly fixed the one line the
+audit called RED, and left the rest of the attacker's file in place — because
+proving the file hostile was the bar they set themselves, and it is not a bar
+anyone can clear in the first hour.
+
+The question the packet already settled two days ago is the answerable one:
+**does this box match the policy I wrote down?** The audit's first section is
+now that delta and nothing else —
+
+```
+AMBER  this box does not match the SSH policy you wrote in your config
+       maxauthtries: your config says "4", this box has "30"
+         /etc/ssh/sshd_config.d/49-tuning.conf   line 3:  MaxAuthTries 30
+```
+
+— and a line you did not write is someone else's change. You do not have to
+prove it was hostile to remove it. Preserve the file, delete it *whole*, and
+`--apply` your own policy over the top. Editing the one line you were shown
+leaves the rest of their file behind, which is exactly what happened.
+
+Two supporting facts the audit now prints for every drop-in, because the file
+contents never mention either:
+
+- **When it was written, relative to the box's own birthday.** SSH host keys
+  are generated once at first boot and never touched again, so anything in
+  `/etc/ssh` newer than they are arrived after the box existed. On the lab VM
+  that separated three files instantly: the base image's drop-in predated the
+  host keys, cloud-init's matched them to the second, the plant was three days
+  later.
+- **Whether a package ships it** — reported only when one does. Do not read
+  anything into its absence: cloud-init writes its files at runtime, so on that
+  same box *all three* drop-ins were unowned, the legitimate ones included.
+
+Neither is proof. Together they tell you which file you have no account for,
+and that is the one to read all of rather than only the line some other check
+flagged.
+
 Then apply policy, behind the same dead man's switch as the firewall:
 
 ```
-[ ] Set in the config: CCDC_SSH_PERMIT_ROOT_LOGIN="no", MAX_AUTH_TRIES="4".
+[ ] Set in the config: CCDC_SSH_PERMIT_ROOT_LOGIN="no",
+    CCDC_SSH_MAX_AUTH_TRIES="4". Both names in full — a CCDC_SSH_* variable
+    the tool does not recognise is not an error, it is a setting that never
+    gets applied and never says so.
     LEAVE CCDC_SSH_PASSWORD_AUTH EMPTY unless the packet says key-only - the
     scorer may log in with a password, and "hardening" that away is downtime.
 [ ] sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --dry-run   # read the plan

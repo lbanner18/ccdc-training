@@ -203,6 +203,39 @@ policy_check() {
   return 0
 }
 
+# Every CCDC_SSH_* name this tool reads. A config is just a sourced shell file,
+# so a typo or a half-remembered name is not a syntax error and not a runtime
+# error - it is a variable nothing ever looks at, and a policy line that is
+# silently never written. The playbook itself carried "MAX_AUTH_TRIES" for a
+# while, which would have done exactly that to anyone who copied it.
+known_ssh_vars='CCDC_SSH_PERMIT_ROOT_LOGIN
+CCDC_SSH_PASSWORD_AUTH
+CCDC_SSH_PERMIT_EMPTY_PASSWORDS
+CCDC_SSH_PERMIT_USER_ENV
+CCDC_SSH_MAX_AUTH_TRIES
+CCDC_SSH_LOGIN_GRACE
+CCDC_SSH_X11_FORWARDING
+CCDC_SSH_ALLOW_TCP_FORWARDING
+CCDC_SSH_CLIENT_ALIVE_INTERVAL
+CCDC_SSH_ALLOW_USERS
+CCDC_SSH_BANNER
+CCDC_SSH_ROLLBACK_SECONDS
+CCDC_SSHD_CONFIG
+CCDC_SSHD_DROPIN_DIR'
+
+# Names the config assigns that this tool would never read. Scans the file
+# rather than the environment, because by the time the config is sourced an
+# unknown name is indistinguishable from any other variable.
+unknown_ssh_vars() {
+  local name
+  [ -r "$config" ] || return 0
+  grep -oE '^[[:space:]]*(export[[:space:]]+)?CCDC_SSHD?_[A-Z0-9_]+' "$config" 2>/dev/null \
+    | grep -oE 'CCDC_SSHD?_[A-Z0-9_]+' | sort -u \
+    | while IFS= read -r name; do
+        printf '%s\n' "$known_ssh_vars" | grep -qx -- "$name" || printf '%s\n' "$name"
+      done
+}
+
 # When was this box built? The SSH host keys are generated once, at first boot,
 # and never touched again, which makes them the most reliable day-zero marker
 # available without trusting a package database.
@@ -327,7 +360,7 @@ policy_delta() {
 
 do_audit() {
   local value sources match_files match_body dropin count started conf_mtime
-  local prov late_dropins=''
+  local prov late_dropins='' unknown
 
   if ! have_sshd; then
     printf '  sshd is not installed on this box; nothing to audit.\n'
@@ -367,6 +400,15 @@ do_audit() {
   if [ -n "$EFFECTIVE" ]; then
     # 1b. Your policy versus this box, first - it is the only section that
     # knows what this particular box was supposed to look like.
+    unknown=$(unknown_ssh_vars)
+    if [ -n "$unknown" ]; then
+      amber "your config sets SSH variable(s) this tool does not read"
+      printf '%s\n' "$unknown" | sed 's/^/           /'
+      detail "these are not errors and not applied - they are simply ignored,"
+      detail "so the policy you think you set is not the policy on the box."
+      detail "check the spelling against config/example.env."
+    fi
+
     policy_delta
 
     # 2. The settings that hand out access.

@@ -212,6 +212,25 @@ rm -f "$dropins/49-tuning.conf"
 base_env
 printf 'PermitRootLogin yes\n' >"$dropins/99-tuning.conf"
 
+# ------------------------------------------- a config name nothing ever reads
+# The playbook shipped "MAX_AUTH_TRIES" instead of "CCDC_SSH_MAX_AUTH_TRIES" for
+# a while. A sourced shell file makes that neither a syntax error nor a runtime
+# error - just a policy line that is never written and never mentioned.
+cp "$cfg" "$cfg.keep"
+printf 'CCDC_SSH_MAXAUTHTRIES="4"\n' >>"$cfg"
+"$sshd_sh" --config "$cfg" >"$test_root/unknown.out" 2>&1 || true
+has 'does not read' "$test_root/unknown.out" \
+  'a CCDC_SSH_ variable the tool does not read is reported'
+has 'CCDC_SSH_MAXAUTHTRIES' "$test_root/unknown.out" \
+  'and the misspelled name is printed'
+mv "$cfg.keep" "$cfg"
+"$sshd_sh" --config "$cfg" >"$test_root/known.out" 2>&1 || true
+if grep -q 'does not read' "$test_root/known.out"; then
+  no 'a config with only known variables was flagged anyway'
+else
+  ok 'and a config with only known variables is not flagged'
+fi
+
 # ------------------------------------------------------- alternate key sources
 printf 'AuthorizedKeysCommand /usr/local/bin/keys.sh\nAuthorizedKeysCommandUser root\n' \
   >"$dropins/98-keys.conf"
