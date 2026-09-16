@@ -399,5 +399,42 @@ else
   no "the box-built window is ${slack:-unset}s, tight enough to flag first-boot files"
 fi
 
+# ------------------------- never print a removal for something we must not remove
+# Three separate findings have now offered an operator a command that would have
+# damaged their own box: userdel -r on an account homed at /root, rm on the
+# sudoers file granting their own sudo, and systemctl disable --now on the
+# SCORED SERVICE. The last one matched its detection perfectly - the scored
+# unit really is unpackaged and really is newer than the image - and the
+# detection was right. Printing a removal for it was not.
+if grep -q 'unit_is_ours()' "$tri" && grep -q 'unit_is_ours "$uf"' "$tri"; then
+  ok 'the rogue-unit listing excludes units the config names'
+else
+  no 'the rogue-unit listing does not guard scored/protected units'
+fi
+if grep -q 'NOT offered for removal' "$tri"; then
+  ok 'and says so, rather than silently omitting them'
+else
+  no 'protected units are omitted with no explanation'
+fi
+
+# `cat` on an ELF binary dumps control characters and can leave a terminal
+# unusable - a real cost mid-incident, for no information.
+if grep -qE "head -c2 -- \"\\\$target\".*'#!'" "$tri"; then
+  ok 'an ExecStart target is only cat-ed when it is a script'
+else
+  no 'a printed command cats an ExecStart target without checking it is text'
+fi
+
+# The structural check itself: a unit with innocuous contents, an innocuous
+# name, and nothing in /tmp passes all three content-based unit checks. What it
+# cannot pass is "no package shipped this, and it is newer than the box".
+for marker in 'no package shipped, written after this box was built' 'unit_rogue'; do
+  if grep -qF "$marker" "$tri"; then
+    ok "triage carries the structural unit check ($marker)"
+  else
+    no "triage lost the structural unit check ($marker)"
+  fi
+done
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

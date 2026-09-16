@@ -714,6 +714,121 @@ else
   clean "no systemd unit executes from /tmp, /var/tmp or /dev/shm"
 fi
 
+# Is this unit one the packet says we are scored on, or one we told the kit to
+# protect? Matched on the bare name so "scored-web", "scored-web.service" and a
+# full path all agree.
+#
+# This exists because the first version of the check below offered
+#
+#     sudo systemctl disable --now -- scored-web.service
+#     sudo cp -p -- /etc/systemd/system/scored-web.service ... && sudo rm -- ...
+#
+# in the same paste-ready block as the rogue timer. The scored service's unit
+# was hand-installed on the lab box, so it is genuinely unpackaged and genuinely
+# newer than the image - it matches the detection perfectly, and the detection
+# is right. What was wrong was printing a removal for it. Third time a
+# remediation list has included something that must never be run, so: the guard
+# lives in the listing, not in the operator's memory.
+unit_is_ours() {
+  local needle=${1##*/} item
+  needle=${needle%.service}; needle=${needle%.timer}
+  needle=${needle%.socket}; needle=${needle%.path}
+  for item in ${CCDC_SCORED_UNITS:-} ${CCDC_SYSTEMD_SERVICES:-} \
+              ${CCDC_PROTECT_SERVICES:-} ${CCDC_DISABLE_SERVICES:-}; do
+    item=${item##*/}; item=${item%.service}; item=${item%.timer}
+    item=${item%.socket}; item=${item%.path}
+    [ "$item" = "$needle" ] && return 0
+  done
+  return 1
+}
+
+# --- 5c. Unit files nothing shipped and nobody here installed ------------------
+#
+# The three unit checks above are all CONTENT checks: does the unit match a
+# reverse-shell pattern, does it execute out of /tmp, does its ExecStart script
+# contain a shell. A timer named sysstat-collect, running a script in
+# /usr/local/sbin that appends a date to a file, passes all three - and
+# sysstat is a real Ubuntu package with real timers, so the name survives a
+# glance at `systemctl list-timers`.
+#
+# On the lab box that timer was invisible to triage for everything except the
+# "/etc changed in the last 30 minutes" check, which aged out after half an
+# hour and took the only mention of it with it. hunt.sh did record it, in a
+# 154 KB persistence.txt, which is evidence rather than a finding.
+#
+# What does not age out and does not depend on the payload being recognisable:
+# no package shipped this unit, and it is newer than the box. That is the same
+# pair of questions the drop-in and SUID checks ask, because on a machine you
+# were handed an hour ago it is the only pair you can answer.
+begin
+unit_rogue=''
+unit_ours=''
+for udir in /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system; do
+  [ -d "$udir" ] || continue
+  for uf in "$udir"/*.service "$udir"/*.timer "$udir"/*.socket "$udir"/*.path; do
+    # A symlink here is what `systemctl enable` creates; the real unit it points
+    # at is a package file and gets judged on its own.
+    [ -f "$uf" ] && [ ! -L "$uf" ] || continue
+    own_payload "$uf" && continue
+    case "$(basename -- "$uf")" in
+      "${CCDC_GUARDIAN_NAME:-node-health}"*|"${CCDC_SENTRY_NAME:-ccdc-sentry}"*) continue ;;
+    esac
+    pkg_owns "$uf" && continue
+    newer_than_box "$uf" || continue
+    if unit_is_ours "$uf"; then
+      unit_ours="$unit_ours $uf"
+      continue
+    fi
+    unit_rogue="$unit_rogue $uf"
+  done
+done
+
+if [ -n "$unit_rogue" ]; then
+  amber "systemd unit(s) no package shipped, written after this box was built   [CARD 4]"
+  detail "a unit does not have to contain anything incriminating to be persistence."
+  detail "These are the ones nothing on the box accounts for."
+  for uf in $unit_rogue; do emit AMBER rogueunit "$uf" "unpackaged systemd unit newer than the box"; done
+  fixhdr
+  for uf in $unit_rogue; do
+    ubase=$(basename -- "$uf")
+    printf -v quf '%q' "$uf"
+    printf -v qub '%q' "$ubase"
+    fix ""
+    fix "# $ubase - written $(date -d "@$(stat -c '%Y' "$uf" 2>/dev/null)" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+    fix "systemctl cat -- $qub                        # read it before you stop it"
+    fix "systemctl list-timers --all | grep -F -- ${qub%.*}"
+    # The unit is half of it. What the unit RUNS is the other half, and
+    # removing the unit while leaving the payload means it comes back with the
+    # next unit somebody writes.
+    for target in $(awk -F= '/^Exec[A-Za-z]*=/ {print $2}' "$uf" 2>/dev/null \
+                    | awk '{print $1}' | sed 's/^[@+!-]*//' | sort -u); do
+      case "$target" in
+        /*) printf -v qt '%q' "$target"
+            # `cat` on an ELF binary dumps control characters into the terminal
+            # and can leave it unusable. Ask what it is first.
+            if [ -f "$target" ] && head -c2 -- "$target" 2>/dev/null | grep -q '#!'; then
+              fix "ls -l -- $qt && cat -- $qt            # what it actually runs"
+            else
+              fix "ls -l -- $qt && file -- $qt           # what it actually runs"
+            fi ;;
+      esac
+    done
+    fix "sudo systemctl disable --now -- $qub"
+    fix "sudo cp -p -- $quf $(printf '%q' "$state_dir")/ && sudo rm -- $quf"
+    fix "sudo systemctl daemon-reload"
+  done
+  detail "confirm against the packet first: a unit YOU or a teammate wrote today"
+  detail "looks exactly like this."
+else
+  clean "no unpackaged systemd unit is newer than the box"
+fi
+if [ -n "$unit_ours" ]; then
+  for uf in $unit_ours; do
+    detail "(also unpackaged and newer than the box, but your config names it:"
+    detail " $uf - NOT offered for removal)"
+  done
+fi
+
 # --- 6. Passwordless sudo -----------------------------------------------------
 # `grep -h` suppresses the filename, and that is the whole problem with the way
 # this used to print. An operator got
