@@ -11,6 +11,16 @@ set -u
 #   sudo ./guardian.sh --config FILE --uninstall   remove every layer (uses the manifest)
 #   sudo ./guardian.sh --config FILE --tick        one reconcile pass (what the layers call)
 #   add --dry-run to print actions without making changes (this is the default)
+#   add --apply to actually make the changes
+#
+# Two flags exist for the installed layers to call themselves with and are not
+# meant for a person, but are documented because they appear in /etc/cron.d and
+# in unit files, where an operator WILL read them while deciding whether the
+# line is ours or an attacker's:
+#   --fallback-config FILE   the pinned copy to use if the operator's config
+#                            is missing or has been edited out from under us
+#   --config-sha256 HASH     what that config must hash to; a mismatch makes
+#                            the tick use the fallback instead of trusting it
 #
 # Naming: every layer derives from CCDC_GUARDIAN_NAME (default "node-health"),
 # but each can be named independently:
@@ -110,6 +120,9 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE --install|--status|--uninstall|--tick [--apply|--dry-run]\n' "$0"
+      printf '       internal, used by the installed layers and visible in cron.d:\n'
+      printf '         --fallback-config FILE  pinned config to use if yours is gone or edited\n'
+      printf '         --config-sha256 HASH    what yours must hash to, or the fallback wins\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

@@ -740,5 +740,74 @@ else
   printf '%s\n' "$hoist" | sed 's/^/    /' | head -6
 fi
 
+# 10. Every flag a tool ACCEPTS must appear in its --help and in the comment
+#     block at the top. A flag you can pass but cannot discover is a flag
+#     nobody uses correctly under pressure. recon.sh accepted --config,
+#     --output-dir and --dry-run while its --help printed eighty lines of its
+#     own source; card.sh had no usage line at all, so --config - which is what
+#     arms the scored-service warning - was undiscoverable.
+undoc=$(python3 - "$ROOT" <<'PY'
+import io, re, sys, glob, os
+rows = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
+    src = io.open(f, encoding='utf-8').read()
+    lines = src.split('\n')
+    start = None
+    for i, l in enumerate(lines):
+        if re.search(r'case\s+"\$1"\s+in', l):
+            start = i
+            break
+    if start is None:
+        continue
+    depth = 0
+    end = None
+    for i in range(start, len(lines)):
+        if re.search(r'\bcase\b.*\bin\b', lines[i]):
+            depth += 1
+        if re.search(r'^\s*esac\b', lines[i]):
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end is None:
+        continue
+    block = '\n'.join(lines[start:end + 1])
+    flags = set()
+    for m in re.finditer(r'^\s*([^)\n]*?)\)\s', block, re.M):
+        if '--' in m.group(1):
+            for g in re.findall(r'--[a-z][a-z0-9-]*', m.group(1)):
+                flags.add(g)
+    if not flags:
+        continue
+    helpblob = ''.join(m.group(1) for m in re.finditer(r"printf '([^']*--[^']*)'", src))
+    header = '\n'.join(lines[:62])
+    miss = [fl for fl in sorted(flags)
+            if fl != '--help' and (fl not in helpblob or fl not in header)]
+    if miss:
+        rows.append('%s: %s' % (os.path.basename(f), ' '.join(miss)))
+print('\n'.join(rows))
+PY
+)
+if [ -z "$undoc" ]; then
+  ok 'every flag every tool accepts is in its --help and its header'
+else
+  no 'a tool accepts a flag it does not document'
+  printf '%s\n' "$undoc" | sed 's/^/    /' | head -6
+fi
+
+# 11. --help must print documentation, not source. recon.sh ran
+#     `sed -n '1,80p' "$0"`, which prints eighty lines of shell.
+srchelp=''
+for t in $all_tools; do
+  h=$(timeout 15 "$t" --help 2>&1 | head -40)
+  printf '%s' "$h" | grep -qE '^\s*(SCRIPT_DIR=|set -u|#!/|\. "\$SCRIPT_DIR)' \
+    && srchelp="$srchelp $(basename "$t")"
+done
+if [ -z "$srchelp" ]; then
+  ok 'no tool answers --help with its own source code'
+else
+  no "a tool prints source for --help:$srchelp"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

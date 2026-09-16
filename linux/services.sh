@@ -14,6 +14,11 @@ set -u
 #   sudo ./services.sh --config FILE --revert  --apply
 #   ./services.sh --config FILE --status
 #
+#   --apply    actually disable or revert. Without it this is a dry run.
+#   --dry-run  the default; accepted explicitly.
+#   --mask     also `systemctl mask`, so a dependency cannot pull the unit
+#              back up. Recorded, and undone by --revert like everything else.
+#
 # The default mode changes nothing. It sorts what is running into four buckets
 # and shows you the listening ports for each, because "should this be off" is a
 # question about THIS box and this packet, and no list shipped in a repo can
@@ -45,7 +50,7 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
     --mask) mask=1; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--review|--disable|--revert|--status] [--apply] [--mask]\n' "$0"
+      printf 'usage: %s --config FILE [--review|--disable|--revert|--status] [--apply|--dry-run] [--mask]\n' "$0"
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

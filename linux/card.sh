@@ -55,7 +55,18 @@ set -- $__args
 [ "$#" -gt 0 ] || { list_cards; exit 0; }
 
 case "$1" in
-  -h|--help) list_cards; exit 0 ;;
+  -h|--help)
+      printf 'usage: %s N SUBJECT [--config FILE]\n\n' "$0"
+      printf '  N          the card number triage.sh printed, e.g. [CARD 5] -> 5\n'
+      printf '  SUBJECT    the thing the finding is about: the username, unit,\n'
+      printf '             path or PID. Substituted into the card for $U / $F,\n'
+      printf '             so there is no variable left to forget to set.\n'
+      printf '  --config   optional, and worth passing. With it, card.sh checks\n'
+      printf '             SUBJECT against the scored and protected services in\n'
+      printf '             your config and warns before rendering a card whose\n'
+      printf '             commands would stop or delete your own scored service.\n\n'
+      printf '  card.sh PRINTS a card. It never runs one, and it has no other options.\n\n'
+      list_cards; exit 0 ;;
   ''|*[!0-9]*) printf 'card.sh: give a card number. Run with no arguments to list them.\n' >&2; exit 1 ;;
 esac
 n=$1

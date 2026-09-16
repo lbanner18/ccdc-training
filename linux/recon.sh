@@ -1,6 +1,39 @@
 #!/usr/bin/env bash
 set -u
 
+# recon.sh - photograph the box before you change anything.
+#
+# This is the FIRST thing to run on a machine you were just handed, and it is
+# the only tool here whose value is entirely in the past tense: it writes down
+# what the box looked like at a moment you can never get back. Every later
+# "was that always there?" is answered from this directory or it is not
+# answered at all.
+#
+# It makes no judgements and flags nothing - that is triage.sh's job. This
+# collects, hashes, and stops. Read-only: it never changes a thing.
+#
+#   ./recon.sh --config FILE                  collect into a timestamped dir
+#   ./recon.sh --config FILE --output-dir DIR collect somewhere specific
+#   ./recon.sh --help                         this text
+#
+#   --config FILE      the env file; optional here, used only for
+#                      CCDC_EVIDENCE_DIR (where the snapshot lands)
+#   --output-dir DIR   write here instead of a timestamped directory under
+#                      CCDC_EVIDENCE_DIR. Useful for a named baseline you
+#                      intend to diff against later.
+#   --dry-run          accepted and ignored: this tool is already read-only,
+#                      and the flag exists so a habit of adding it costs
+#                      nothing. There is no --apply.
+#
+# What it records: os-release, identity/uptime, accounts and groups, sudoers,
+# ssh config and keys, scheduled tasks, listening sockets, SUID/SGID and file
+# capabilities across the whole filesystem, /etc files changed in the last
+# week, service list, and the firewall ruleset. Each file carries the command
+# that produced it, so the snapshot documents its own method.
+#
+# Pair it with hunt.sh (the persistence sweep) and diff-evidence.sh (what
+# changed between two snapshots).
+
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 # shellcheck source=lib/common.sh
 . "$SCRIPT_DIR/lib/common.sh"
@@ -17,7 +50,11 @@ while [ "$#" -gt 0 ]; do
     --output-dir) output_dir=${2:?missing output path}; shift 2 ;;
     --dry-run) CCDC_DRY_RUN=1; shift ;;
     -h|--help)
-      sed -n '1,80p' "$0"
+      printf 'usage: %s [--config FILE] [--output-dir DIR] [--dry-run]\n\n' "$0"
+      awk 'NR<=2 { next }
+           /^#/ { started = 1; sub(/^# ?/, ""); print; next }
+           started && NF == 0 { exit }
+           started { exit }' "$0"
       exit 0
       ;;
     *) ccdc_die "unknown argument: $1" ;;
@@ -105,7 +142,7 @@ else
   ccdc_record "$evidence/processes.txt" ps auxww
 fi
 
-ccdc_record_shell "$evidence/suid-capabilities.txt" 'printf "%s\n" "--- SUID/SGID files ---"; for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && find "$scan_root" -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null; done; printf "%s\n" "--- file capabilities ---"; if command -v getcap >/dev/null 2>&1; then for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/local/bin /usr/local/sbin /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && getcap -r "$scan_root" 2>/dev/null; done; fi'
+ccdc_record_shell "$evidence/suid-capabilities.txt" 'printf "%s\n" "--- SUID/SGID files ---"; find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null; printf "%s\n" "--- file capabilities ---"; if command -v getcap >/dev/null 2>&1; then for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && getcap -r "$scan_root" 2>/dev/null; done; fi'
 ccdc_record_shell "$evidence/etc-changes.txt" 'find /etc -xdev -type f -mtime -7 -ls 2>/dev/null | sort -k11'
 ccdc_record_shell "$evidence/services.txt" 'systemctl list-units --type=service --all --no-pager 2>/dev/null || service --status-all 2>&1 || true'
 ccdc_record_shell "$evidence/firewall.txt" 'if command -v nft >/dev/null 2>&1; then nft list ruleset; elif command -v iptables-save >/dev/null 2>&1; then iptables-save; else echo "no nft or iptables-save"; fi'

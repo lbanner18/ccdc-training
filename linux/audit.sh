@@ -28,6 +28,10 @@ set -u
 #   ./audit.sh --config FILE --status             what is installed
 #   sudo ./audit.sh --config FILE --uninstall --apply   exact removal
 #
+#   --apply    actually make the change. Without it every mutating mode is a
+#              dry run that prints what it WOULD do and changes nothing.
+#   --dry-run  the default, and accepted explicitly so the habit is free.
+#
 # Exit: 0 healthy, 3 findings, 4 the check itself could not run.
 #
 # What it deliberately does NOT do:

@@ -19,6 +19,9 @@ set -u
 #   ./splunk.sh --config FILE                  read-only health check
 #   ./splunk.sh --config FILE --inventory      markdown table for the inject
 #   sudo ./splunk.sh --config FILE --test-event --apply
+#
+#   --apply    actually write the test event. Without it, a dry run.
+#   --dry-run  the default; accepted explicitly.
 #                                              end-to-end proof, with the search
 #
 # Exit: 0 healthy, 3 findings, 4 the check could not run.
@@ -45,7 +48,7 @@ while [ "$#" -gt 0 ]; do
     --apply) apply=1; shift ;;
     --dry-run) apply=0; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--check|--inventory|--test-event] [--apply]\n' "$0"
+      printf 'usage: %s --config FILE [--check|--inventory|--test-event] [--apply|--dry-run]\n' "$0"
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
