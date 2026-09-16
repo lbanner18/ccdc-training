@@ -67,7 +67,12 @@ fi
 # Never assert an owner that was not actually looked up.
 if [ "$(id -u)" -ne 0 ]; then
   if ! grep -qE '^  (tcp|udp)[[:space:]]' "$test_root/surface.out"; then
-    ok 'no visible listeners: no owner cells to verify in a non-root run'
+    if ss -tulnH 2>/dev/null | grep -q .; then
+      no 'this box HAS listening sockets but surface.sh listed none'
+      ss -tulnH 2>/dev/null | head -3 | sed 's/^/    /'
+    else
+      ok 'no visible listeners: no owner cells to verify in a non-root run'
+    fi
   elif grep -q 'need root' "$test_root/surface.out"; then
     ok 'unknown owners are reported as unknown, not guessed'
   else

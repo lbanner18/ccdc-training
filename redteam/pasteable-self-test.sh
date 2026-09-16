@@ -819,6 +819,7 @@ import io, re, sys, glob, os
 bad = []
 files = [os.path.join(sys.argv[1], 'README.md'), os.path.join(sys.argv[1], 'GUIDE.md')]
 files += sorted(glob.glob(os.path.join(sys.argv[1], 'playbooks', '*.md')))
+files += sorted(glob.glob(os.path.join(sys.argv[1], 'injects', 'responses', '*.md')))
 for p in files:
     if not os.path.exists(p):
         continue
