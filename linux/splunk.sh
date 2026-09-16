@@ -53,6 +53,15 @@ done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/splunk.sh"
+printf -v qfw '%q' "$SCRIPT_DIR/fw.sh"
+
+
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 case "$state_dir" in */) state_dir=${state_dir%/} ;; esac
@@ -336,7 +345,7 @@ do_check() {
       finding "indexer $host:$port is NOT REACHABLE from this box"
       detail "a forwarder that cannot reach its indexer queues, then drops"
       fixline "ping -c1 $host; nc -vz $host $port"
-      fixline "sudo ./linux/fw.sh --config <cfg> --status   # did we firewall ourselves off?"
+      fixline "sudo $qfw --config $qconfig --status   # did we firewall ourselves off?"
     fi
   done <<EOF
 $(configured_targets | sort -u)
@@ -420,7 +429,7 @@ EOF
   else
     finding "no end-to-end test event has ever been sent from this box"
     detail "every check above reads local configuration; only a test event proves delivery"
-    fixline "sudo ./linux/splunk.sh --config <cfg> --test-event --apply"
+    fixline "sudo $qself --config $qconfig --test-event --apply"
   fi
 }
 
@@ -525,7 +534,7 @@ do_test_event() {
   printf '  of that proves it.\n\n'
   printf '  If it returns nothing, work in this order:\n'
   printf '    1. is the file the logger wrote to actually a monitored input?\n'
-  printf '         sudo ./linux/splunk.sh --config <cfg> --check\n'
+  printf '         sudo ./linux/splunk.sh --config '"$qconfig"' --check\n'
   printf '    2. can this box reach the indexer at all?\n'
   printf '    3. is the event in a different index than you searched?  index=*\n'
   printf '    4. is the forwarder queue blocked? (splunkd.log)\n\n'

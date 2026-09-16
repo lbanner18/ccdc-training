@@ -43,6 +43,14 @@ done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/surface.sh"
+
+
 ccdc_have ss || ccdc_die "ss is required (iproute2)"
 
 # --- joining a socket to the thing that owns it -------------------------------
@@ -252,7 +260,7 @@ EOF
     printf '  The standard is "nothing but scored services answers an nmap scan".\n'
     printf '  Decide each one, then act with services.sh - which needs an explicit\n'
     printf '  list and will not choose for you:\n'
-    printf '      ./linux/services.sh --config <cfg> --review\n'
+    printf '      ./linux/services.sh --config '"$qconfig"' --review\n'
   fi
 
   printf '\n  SOCKET-ACTIVATED UNITS\n'
@@ -344,7 +352,7 @@ case "$mode" in
     printf 'surface.sh - everything reachable on %s\n' "${CCDC_BOX_NAME:-this box}"
     printf 'read-only. %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     do_report
-    printf '\n  The inject table: ./linux/surface.sh --config <cfg> --table\n'
+    printf '\n  The inject table: ./linux/surface.sh --config '"$qconfig"' --table\n'
     ;;
 esac
 exit 0

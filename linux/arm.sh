@@ -45,6 +45,12 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+
+# Commands this tool prints get pasted, so they carry the real config path.
+# "<cfg>" is a shell redirect, not a placeholder: pasting it is a syntax error.
+printf -v qconfig '%q' "$config"
+printf -v qkit '%q' "$SCRIPT_DIR"
+
 if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 
 step=0
@@ -231,21 +237,21 @@ cat <<'NEXT'
     - canary:   decoys are laid and their trips feed sentry
 
   Your short check-in loop (the terminal stays free):
-    sudo ./linux/sentry.sh --config <cfg> --status
-    sudo ./linux/sentry.sh --config <cfg> --approve --apply
+    sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --status
+    sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve --apply
     and verify the scored service FROM OFF THE BOX, which no on-box tool can do
 
   What still needs you, once, as a judgement call:
-    ./linux/services.sh --config <cfg> --review    what should not be running
-    ./linux/fw.sh       --config <cfg>             what should not be reachable
+    '"$qkit"'/services.sh --config '"$qconfig"' --review    what should not be running
+    '"$qkit"'/fw.sh       --config '"$qconfig"'             what should not be reachable
   Neither runs here. Both can take a scored service off the board if you get
   them wrong, so they stay a decision you make with the packet in front of you,
   not something a setup script does on your behalf.
 
   Disarm everything:
-    sudo ./linux/guardian.sh --config <cfg> --uninstall --apply
-    sudo ./linux/sentry.sh  --config <cfg> --uninstall --apply
-    sudo ./linux/canary.sh   --config <cfg> --remove    --apply
+    sudo '"$qkit"'/guardian.sh --config '"$qconfig"' --uninstall --apply
+    sudo '"$qkit"'/sentry.sh  --config '"$qconfig"' --uninstall --apply
+    sudo '"$qkit"'/canary.sh   --config '"$qconfig"' --remove    --apply
 NEXT
 [ "$failed" -eq 0 ] || exit 1
 exit 0

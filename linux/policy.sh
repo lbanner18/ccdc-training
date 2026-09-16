@@ -42,6 +42,14 @@ done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/policy.sh"
+
+
 findings=0
 red()     { findings=$((findings + 1)); printf '\n  \033[1;31mRED\033[0m    %s\n' "$1"; }
 amber()   { findings=$((findings + 1)); printf '\n  \033[1;33mAMBER\033[0m  %s\n' "$1"; }
@@ -415,7 +423,7 @@ case "$mode" in
       printf '  and the way back is single-user mode - which is a reboot, which is\n'
       printf '  scored downtime.\n'
     fi
-    printf '\n  The inject table: ./linux/policy.sh --config <cfg> --table\n'
+    printf '\n  The inject table: ./linux/policy.sh --config '"$qconfig"' --table\n'
     [ "$findings" -gt 0 ] && exit 3
     ;;
 esac

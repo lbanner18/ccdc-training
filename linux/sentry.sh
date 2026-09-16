@@ -58,6 +58,12 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+
+# Commands this tool prints get pasted, so they carry the real config path.
+# "<cfg>" is a shell redirect, not a placeholder: pasting it is a syntax error.
+printf -v qconfig '%q' "$config"
+printf -v qkit '%q' "$SCRIPT_DIR"
+
 # A sourced config must not be able to turn a CLI dry-run into an apply.
 if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 
@@ -453,8 +459,8 @@ write_alerts() {
       printf '  Nothing waiting for your sign-off.\n\n'
     else
       printf '  %s current action(s) WAITING FOR SIGN-OFF. Freeze a reviewed snapshot, then approve it:\n' "$n"
-      printf '      sudo ./linux/sentry.sh --config <cfg> --status\n'
-      printf '      sudo ./linux/sentry.sh --config <cfg> --approve [N] --apply\n\n'
+      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --status\n'
+      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve [N] --apply\n\n'
       while IFS='|' read -r sev check subject; do
         [ -n "${sev:-}" ] || continue
         i=$((i + 1)); action=$(render_action "$check" "$subject")
@@ -503,9 +509,9 @@ write_alerts() {
     if [ "$watch_count" -gt 0 ]; then
       printf '\n  %s unacknowledged change/canary event(s):\n' "$watch_count"
       tail -n 80 "$watch_pending" | sed 's/^/    /'
-      printf '\n  After review: sudo ./linux/sentry.sh --config <cfg> --ack\n'
+      printf '\n  After review: sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --ack\n'
     fi
-    printf '\n  Full ranked detail: sudo ./linux/triage.sh --config <cfg>\n'
+    printf '\n  Full ranked detail: sudo '"$qkit"'/triage.sh --config '"$qconfig"'\n'
     printf '  Verify scored services FROM OFF THE BOX; an on-box probe cannot see scorer reachability.\n'
   } >"$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$alerts" || { rm -f -- "$tmp"; return 1; }

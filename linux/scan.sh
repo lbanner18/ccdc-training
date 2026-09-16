@@ -42,6 +42,14 @@ done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/scan.sh"
+
+
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 case "$state_dir" in */) state_dir=${state_dir%/} ;; esac
@@ -159,7 +167,7 @@ do_scan() {
 
   if ! ccdc_have clamscan && ! ccdc_have clamdscan && ! ccdc_have yara; then
     printf '  nothing to scan with. See the capability report:\n'
-    printf '      ./linux/scan.sh --config <cfg>\n'
+    printf '      ./linux/scan.sh --config '"$qconfig"'\n'
     return 0
   fi
 
@@ -214,7 +222,7 @@ EOF
     printf '\n  BEFORE YOU DELETE ANYTHING A SCANNER NAMED:\n'
     printf '    A detection is a claim, not a verdict. Web shells and admin tools\n'
     printf '    share signatures, and the file may be part of the scored service.\n\n'
-    printf '    1. preserve it:   sudo ./linux/preserve.sh --config <cfg>\n'
+    printf '    1. preserve it:   sudo ./linux/preserve.sh --config '"$qconfig"'\n'
     printf '    2. read it:       sudo less <the file>\n'
     printf '    3. find out what it belongs to:\n'
     printf '                      dpkg -S <file> 2>/dev/null || rpm -qf <file>\n'

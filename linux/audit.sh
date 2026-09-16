@@ -65,6 +65,14 @@ done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/audit.sh"
+
+
 # --apply with no mode means "install", which is the one mode that is not a
 # verb on the command line. Spelling it out keeps --apply from ever silently
 # meaning something different depending on argument order.
@@ -188,7 +196,7 @@ generate_rules() {
   local path skipped=0
   printf '# Managed by ccdc audit.sh. Do not edit by hand: --repair rewrites it\n'
   printf '# from the config, and an edit here is reported as tampering.\n'
-  printf '# Regenerate with: sudo ./linux/audit.sh --config <cfg> --apply\n'
+  printf '# Regenerate with: sudo ./linux/audit.sh --config '"$qconfig"' --apply\n'
   printf '#\n'
   printf '# Deliberately absent: -e 2 (immutable). It would block our own repair\n'
   printf '# until a reboot, and a reboot is scored downtime.\n\n'
@@ -457,13 +465,13 @@ do_check() {
     if [ -n "$disk_sha" ] && [ -n "$wanted" ] && [ "$disk_sha" != "$wanted" ]; then
       finding "the persistent rules file does not match what the config asks for"
       detail "either the config changed, or someone edited the rules on disk"
-      fixline "sudo diff -- $(printf '%q' "$rules_file") <(sudo ./linux/audit.sh --config <cfg> --status --dry-run)"
-      fixline "sudo ./linux/audit.sh --config <cfg> --repair --apply"
+      fixline "sudo diff -- $(printf '%q' "$rules_file") <(sudo ./linux/audit.sh --config '"$qconfig"' --status --dry-run)"
+      fixline "sudo $qself --config $qconfig --repair --apply"
     fi
   else
     finding "NO persistent audit rules - every watch dies on the next auditd restart"
     detail "runtime rules loaded with auditctl -w live only in the kernel"
-    fixline "sudo ./linux/audit.sh --config <cfg> --apply"
+    fixline "sudo $qself --config $qconfig --apply"
   fi
 
   if audit_immutable; then
@@ -488,7 +496,7 @@ do_check() {
 $(generated_watches)
 EOF
     if [ "$loaded_missing" -eq 1 ]; then
-      fixline "sudo ./linux/audit.sh --config <cfg> --repair --apply"
+      fixline "sudo $qself --config $qconfig --repair --apply"
       fixline "sudo augenrules --load && sudo auditctl -l | head"
     else
       okline "every persistent rule is loaded in the kernel"
@@ -510,7 +518,7 @@ check_evidence_posture() {
   else
     finding "no log evidence has ever been captured on this box"
     detail "if the logs are wiped now, there is nothing to compare them against"
-    fixline "sudo ./linux/audit.sh --config <cfg> --capture"
+    fixline "sudo $qself --config $qconfig --capture"
   fi
 
   # Journald keeps its log in memory unless /var/log/journal exists, so on a
@@ -553,7 +561,7 @@ do_install() {
   ccdc_is_dry_run && return 0
   printf '\n  Installed. Verify with:\n'
   printf '      sudo auditctl -l | grep ccdc\n'
-  printf '      sudo ./linux/audit.sh --config <cfg> --check\n'
+  printf '      sudo ./linux/audit.sh --config '"$qconfig"' --check\n'
   printf '\n  Then prove it survives the thing that used to clear it:\n'
   printf '      sudo systemctl restart auditd && sudo auditctl -l | grep -c ccdc\n'
 }
@@ -740,7 +748,7 @@ case "$mode" in
       exit 0
     fi
     printf '  %s audit/logging finding(s) above.\n' "$findings"
-    printf '  Repair what is repairable: sudo ./linux/audit.sh --config <cfg> --repair --apply\n'
+    printf '  Repair what is repairable: sudo ./linux/audit.sh --config '"$qconfig"' --repair --apply\n'
     exit 3
     ;;
   install) do_install ;;

@@ -53,6 +53,15 @@ done
 readonly __ccdc_triage_cli_findings __ccdc_triage_cli_findings_set
 ccdc_load_config "$config"
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/triage.sh"
+printf -v qsshd '%q' "$SCRIPT_DIR/sshd.sh"
+
+
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 case "$state_dir" in */) state_dir=${state_dir%/} ;; esac
@@ -1393,7 +1402,7 @@ if [ "$(id -u)" -eq 0 ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
           | sed "s|^|           $sshd_src:|"
       done
       fixhdr
-      fix "sudo ./linux/sshd.sh --config <cfg>          # the full SSH audit"
+      fix "sudo $qsshd --config $qconfig          # the full SSH audit"
       fix "sudo grep -rn PermitRootLogin /etc/ssh/sshd_config /etc/ssh/sshd_config.d/"
       fix "# remove the offending line, then:"
       fix "sudo sshd -t && sudo systemctl reload ssh"
@@ -1404,7 +1413,7 @@ if [ "$(id -u)" -eq 0 ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
       red "SSH accepts EMPTY PASSWORDS   [CARD 2]"
       emit RED sshemptypw "permitemptypasswords" "sshd permits empty passwords"
       fixhdr
-      fix "sudo ./linux/sshd.sh --config <cfg>"
+      fix "sudo $qsshd --config $qconfig"
     fi
   else
     clean "SSH policy check skipped (sshd -T produced nothing)"

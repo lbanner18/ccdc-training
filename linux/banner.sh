@@ -40,6 +40,14 @@ while [ "$#" -gt 0 ]; do
 done
 [ -n "$config" ] || ccdc_die "--config is required"
 ccdc_load_config "$config"
+
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/banner.sh"
+
 [ "$apply" -eq 1 ] && ccdc_require_root
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
@@ -131,7 +139,7 @@ do_show() {
     printf '  sees nothing before the password prompt. The directive belongs in\n'
     printf '  the SSH policy, behind its rollback:\n'
     printf '      CCDC_SSH_BANNER="/etc/issue.net"   in your config, then\n'
-    printf '      sudo ./linux/sshd.sh --config <cfg> --apply\n'
+    printf '      sudo ./linux/sshd.sh --config '"$qconfig"' --apply\n'
   fi
   printf '\n  /etc/issue is the CONSOLE banner; /etc/issue.net is the network one.\n'
   printf '  A box that sets only the first passes a visual check and fails the\n'
@@ -176,7 +184,7 @@ do_install() {
     printf '  Add this to your config and apply it through sshd.sh, which validates\n'
     printf '  and arms a rollback before touching the daemon:\n\n'
     printf '      CCDC_SSH_BANNER="/etc/issue.net"\n'
-    printf '      sudo ./linux/sshd.sh --config <cfg> --apply\n'
+    printf '      sudo ./linux/sshd.sh --config '"$qconfig"' --apply\n'
   fi
   printf '\n  Evidence for the inject response:\n'
   printf '      cat /etc/issue.net\n'

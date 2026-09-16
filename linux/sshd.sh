@@ -69,6 +69,14 @@ ccdc_load_config "$config"
 # competition.
 EFFECTIVE=''
 
+# Every command this tool PRINTS is meant to be pasted, so it carries the real
+# values rather than a placeholder. "<cfg>" is not a placeholder to bash, it is
+# a redirect - pasting `--config <cfg>` is a syntax error, which is exactly what
+# an operator hit on the lab box. Paths are absolute so they work from any cwd.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/sshd.sh"
+
+
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 case "$state_dir" in */) state_dir=${state_dir%/} ;; esac
@@ -459,7 +467,7 @@ validate_policy_values() {
         [ -f "$CCDC_SSH_BANNER" ] \
           || ccdc_die "CCDC_SSH_BANNER names a file that does not exist: $CCDC_SSH_BANNER
   sshd will refuse to start with a Banner it cannot read. Create it first:
-      sudo ./linux/banner.sh --config <cfg> --apply"
+      sudo ./linux/banner.sh --config '"$qconfig"' --apply"
         ;;
       *) ccdc_die "CCDC_SSH_BANNER must be an absolute path or \"none\": $CCDC_SSH_BANNER" ;;
     esac
@@ -729,9 +737,9 @@ SCRIPT
   printf '          ssh %s@%s\n\n' "$(current_login_user)" "$(hostname -I 2>/dev/null | awk '{print $1}')"
   printf '  Do not skip it and do not test it in THIS session - this one is already\n'
   printf '  authenticated, and it will keep working no matter how broken the config is.\n\n'
-  printf '  it worked:      sudo %s --config <cfg> --confirm\n' "$0"
+  printf '  it worked:      sudo %s --config '"$qconfig"' --confirm\n' "$0"
   printf '  it did not:     do nothing. The config restores itself in %ss.\n' "$rollback_seconds"
-  printf '  undo it now:    sudo %s --config <cfg> --rollback\n' "$0"
+  printf '  undo it now:    sudo %s --config '"$qconfig"' --rollback\n' "$0"
 }
 
 do_status() {
@@ -742,7 +750,7 @@ do_status() {
       printf 'run --confirm to keep the current config, or --rollback to revert now\n'
     else
       printf 'SSH rollback BROKEN via %s - restore by hand NOW:\n' "$(cat "$pid_file")"
-      printf '  sudo %s --config <cfg> --rollback\n' "$0"
+      printf '  sudo %s --config '"$qconfig"' --rollback\n' "$0"
     fi
   else
     printf 'no SSH rollback pending\n'
