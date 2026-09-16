@@ -87,6 +87,36 @@ rollback_unit=ccdc-sshd-rollback
 
 sshd_config_file=${CCDC_SSHD_CONFIG:-/etc/ssh/sshd_config}
 dropin_dir=${CCDC_SSHD_DROPIN_DIR:-/etc/ssh/sshd_config.d}
+
+# Validate both before anything uses them, because restore runs
+#     rm -f -- "$dropin_dir"/*.conf
+# and an empty or careless CCDC_SSHD_DROPIN_DIR turns that into `rm -f /*.conf`.
+# The same reasoning as ccdc_validate_state_dir in lib/common.sh: a config typo
+# must never become a destructive glob. These are paths to an SSH configuration,
+# so they are also required to look like one.
+validate_ssh_path() {
+  local path=${1:-} label=$2
+  [ -n "$path" ] || ccdc_die "$label is empty"
+  case "$path" in
+    /*) ;;
+    *) ccdc_die "$label must be absolute: $path" ;;
+  esac
+  case "$path" in
+    */) ccdc_die "$label must not end in a slash: $path" ;;
+    *'//'*) ccdc_die "$label contains an empty path component: $path" ;;
+    */./*|*/.|*/../*|*/..) ccdc_die "$label contains path traversal: $path" ;;
+    *[!A-Za-z0-9_./@+-]*) ccdc_die "$label contains unsupported characters: $path" ;;
+  esac
+  # Require at least two components, so no value can ever name a top-level
+  # directory and have a glob expanded against the root of the filesystem.
+  case "${path#/}" in
+    */*) ;;
+    *) ccdc_die "$label must be nested at least two levels deep: $path" ;;
+  esac
+}
+validate_ssh_path "$sshd_config_file" "CCDC_SSHD_CONFIG"
+validate_ssh_path "$dropin_dir" "CCDC_SSHD_DROPIN_DIR"
+
 dropin_file="$dropin_dir/99-ccdc-hardening.conf"
 rollback_seconds=${CCDC_SSH_ROLLBACK_SECONDS:-120}
 case "$rollback_seconds" in
