@@ -98,10 +98,20 @@ done
 [ "$bound" -eq 1 ] || { printf 'SKIP: test listener never bound\n'; exit 77; }
 
 # The attack: a bash process holding an outbound connection, with no file
-# anywhere on disk. `read` keeps bash itself as the process - with a trailing
-# `sleep` instead, bash tail-call-execs and the socket ends up held by
-# /usr/bin/sleep, which is a different (and much less interesting) test.
-bash -c "exec 3<>/dev/tcp/$addr/$port; read -t 55 -u 3 _ ; :" >/dev/null 2>&1 &
+# anywhere on disk.
+#
+# The loop is deliberate, and it is the whole point of this fixture. A real
+# reverse shell spawns a child for every command the attacker runs, and a file
+# descriptor is inherited, so the socket ends up with SEVERAL owners:
+#
+#     users:(("sleep",pid=1306152,fd=3),("bash",pid=1306150,fd=3))
+#
+# ss prints them in an order nobody controls, and the child is frequently
+# first. An earlier version of this test used `read -t 55` so that bash was the
+# only owner - which passed while triage.sh was reading just the first PID and
+# missing every real shell hiding behind its own child. The lab drill caught
+# it. Keep a child in the picture here, or this test proves less than it looks.
+bash -c "exec 3<>/dev/tcp/$addr/$port; while :; do sleep 300; done" >/dev/null 2>&1 &
 shell_pid=$!
 
 connected=0
@@ -132,6 +142,15 @@ else
   else
     no "the outbound bash reverse shell was NOT reported"
     grep '^RED|netproc' "$findings" >&2 || true
+  fi
+
+  # The socket also belongs to the sleep child. Reporting THAT instead is the
+  # bug this fixture exists to catch: /usr/bin/sleep is packaged and ordinary,
+  # so a check that stops at the first owner reports a clean box.
+  if grep -q '^RED|netproc|.*/sleep|' "$findings"; then
+    no "the finding named the sleep child instead of the shell behind it"
+  else
+    ok "the finding named the shell, not its child"
   fi
 
   # The listening half: an interpreter bound to a port the config does not

