@@ -343,12 +343,35 @@ volatile_exec_dir() {
 }
 
 inventory_processes() {
-  local pid raw exe base subject flags arg argi cmdfile sockets
+  local pid raw exe base subject flags arg argi cmdfile sockets pgid
+  local self_pgid self_sid walk sid
   declare -A PROC_PIDS=()
   declare -A PROC_FLAGS=()
 
+  # Do not inventory our own footprint. Running this tool means bash, sudo, the
+  # script itself and every member of whatever pipeline it is in are resident
+  # processes. Under --bless those got written into the baseline, which froze
+  # /usr/bin/sort in as a legitimate long-lived process - and a baseline that
+  # blesses /usr/bin/sort will explain an attacker's /usr/bin/sort forever.
+  #
+  # Scope this by login SESSION, not by walking our ancestry. The ancestry walk
+  # climbs through the sshd that accepted this connection and on into the main
+  # sshd daemon, so blessing over SSH dropped /usr/sbin/sshd from the baseline
+  # entirely - and blessing from the console would then report sshd as drift.
+  # The main daemon is its own session leader, so a session test keeps it while
+  # still dropping the shell, sudo and the tool.
+  self_sid=$(sed 's/.*) //' "/proc/$$/stat" 2>/dev/null | awk '{print $4}')
+  self_pgid=$(sed 's/.*) //' "/proc/$$/stat" 2>/dev/null | awk '{print $3}')
+
   for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
     [ -e "/proc/$pid/exe" ] || continue
+    if [ -n "$self_sid" ] || [ -n "$self_pgid" ]; then
+      walk=$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null)
+      pgid=$(printf '%s' "$walk" | awk '{print $3}')
+      sid=$(printf '%s' "$walk" | awk '{print $4}')
+      [ -n "$self_sid" ] && [ "$sid" = "$self_sid" ] && continue
+      [ -n "$self_pgid" ] && [ "$pgid" = "$self_pgid" ] && continue
+    fi
     raw=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
     [ -n "$raw" ] || continue
     flags=''
@@ -1045,18 +1068,53 @@ do_action() {
     procexe)
       pids=$(printf '%s' "$detail" | sed -n 's/.*pids=\([0-9,]*\).*/\1/p' | tr ',' ' ')
       [ -n "$pids" ] || { ccdc_warn "no PIDs recorded for $subject"; return 1; }
+      # Capture decides whether we kill. The guarantee printed to the operator
+      # is "it will not kill anything it could not capture first", so the kill
+      # loop walks only the PIDs a capture actually succeeded on. An earlier
+      # version ran the two loops over the same list and killed regardless,
+      # which destroyed the evidence while printing that it had not.
+      captured=''; uncaptured=''
       for pid in $pids; do
         printf '    capturing pid %s before killing it\n' "$pid"
-        "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" --freeze --apply \
-          >/dev/null 2>&1 \
-          || ccdc_warn "capture of pid $pid failed; killing it anyway would destroy the evidence, so it was left running"
+        if "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" \
+             --freeze --apply >/dev/null 2>&1; then
+          captured="$captured $pid"
+          continue
+        fi
+        # preserve.sh refuses to SIGSTOP a process inside a scored unit's
+        # cgroup - a stopped scored service is downtime. That refusal is
+        # correct and it is not a reason to skip the capture: everything
+        # except the frozen-process guarantee is still readable while it
+        # runs. Take that, then kill the payload PID - never the unit.
+        if "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" \
+             >/dev/null 2>&1; then
+          printf '    could not freeze pid %s (it is inside a scored unit), captured it running instead\n' "$pid"
+          captured="$captured $pid"
+        else
+          uncaptured="$uncaptured $pid"
+        fi
       done
-      for pid in $pids; do
+      for pid in $captured; do
         [ -d "/proc/$pid" ] || continue
         # By PID, never by name. This box runs a scored python3 web server.
         kill -9 "$pid" 2>/dev/null && printf '    killed pid %s\n' "$pid"
       done
-      ccdc_append_log "$baseline_dir/actions.log" "KILL $subject pids=$pids by=$(id -un)"
+      for pid in $uncaptured; do
+        ccdc_warn "could not capture pid $pid, so it was NOT killed - killing
+  what you could not photograph destroys the only evidence you had.
+
+  It is still running. Capture it by hand, then kill it by PID:
+      sudo $SCRIPT_DIR/preserve.sh --config $qconfig --pid $pid
+      sudo kill -9 $pid"
+      done
+      ccdc_append_log "$baseline_dir/actions.log" \
+        "KILL $subject killed=${captured:-none} left=${uncaptured:-none} by=$(id -un)"
+      # Leave the file if anything is still running out of it: it is both the
+      # live process's backing file and the only copy of the evidence.
+      if [ -n "$uncaptured" ]; then
+        printf '    left %s in place - a process is still running out of it\n' "$subject"
+        return 1
+      fi
       if [ -e "$subject" ]; then remove_file_safely "$subject"; fi
       printf '    now find what STARTED it, or it comes back. The captured case\n'
       printf '    has its ancestry:  sudo %q/preserve.sh --config %s --list\n' \

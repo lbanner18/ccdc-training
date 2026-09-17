@@ -316,5 +316,44 @@ else
   no '--bless does not warn what it is about to make permanent'
 fi
 
+# A kill the tool could not photograph first destroys the only evidence there
+# was. The printed guarantee is "it will not kill anything it could not capture
+# first", and for a while that was only true in the prose: the capture loop and
+# the kill loop walked the SAME pid list, so a refused capture warned that the
+# process "was left running" and then killed it on the next line.
+if awk '/^    procexe\)/,/^    \*\)/' "$BASE" | grep -q 'for pid in \$captured'; then
+  ok 'the kill loop walks only the PIDs a capture succeeded on'
+else
+  no 'the kill loop walks every PID regardless of whether capture worked'
+fi
+
+# The same bug, from the other side: nothing may be deleted out from under a
+# process that is still alive, because that file is both the running code and
+# the last copy of the evidence.
+if awk '/^    procexe\)/,/^    \*\)/' "$BASE" | grep -q 'if \[ -n "\$uncaptured" \]'; then
+  ok 'a file is left in place while a process is still running out of it'
+else
+  no 'the file is deleted even when a process was left running'
+fi
+
+# Blessing must not freeze the tool's own footprint. Running it means bash,
+# sudo, the script and every member of its pipeline are resident processes; an
+# earlier bless wrote /usr/bin/sort into the baseline, and a baseline that
+# blesses /usr/bin/sort explains an attacker's /usr/bin/sort forever.
+if grep -q 'self_sid=' "$BASE" && grep -q 'sid" = "\$self_sid' "$BASE"; then
+  ok 'the inventory skips the session the tool is running in'
+else
+  no 'the tool inventories its own shell, sudo and pipeline as resident processes'
+fi
+
+# ...but scoping that by walking our ancestry climbs through the sshd that
+# accepted the connection and drops /usr/sbin/sshd from the baseline, so
+# blessing over SSH and checking from the console disagree about sshd.
+if ! grep -q 'PPid:/{print \$2}.*proc/\$walk/status' "$BASE"; then
+  ok 'self-exclusion is not scoped by walking the process ancestry'
+else
+  no 'ancestry walk will drop sshd from a baseline blessed over SSH'
+fi
+
 printf 'baseline self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
