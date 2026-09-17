@@ -24,6 +24,9 @@ umask 077
 
 config=''
 mode=loop
+mute_check=''
+mute_subject=''
+mute_reason=''
 interval=''
 watch_interval=''
 triage_timeout=''
@@ -41,6 +44,17 @@ while [ "$#" -gt 0 ]; do
     --status) mode=status; shift ;;
     --approve) mode=approve; shift
       case "${1:-}" in ''|-*) ;; *) item=$1; shift ;; esac ;;
+    # Named, never numbered. A held finding has no row number to give, and a
+    # numbered one re-sorts between reading the screen and typing the command -
+    # the same reason --remove-key names a key by fingerprint.
+    --mute) mode=mute; shift
+      mute_check=${1:?missing check name: --mute CHECK SUBJECT --reason "..."}; shift
+      mute_subject=${1:?missing subject: --mute CHECK SUBJECT --reason "..."}; shift ;;
+    --unmute) mode=unmute; shift
+      mute_check=${1:?missing check name: --unmute CHECK SUBJECT}; shift
+      mute_subject=${1:?missing subject: --unmute CHECK SUBJECT}; shift ;;
+    --muted) mode=muted; shift ;;
+    --reason) mute_reason=${2:?missing reason text}; shift 2 ;;
     --ack) mode=ack; shift ;;
     --revert) mode=revert; shift ;;
     --once) mode=once; shift ;;
@@ -836,16 +850,63 @@ held_reason() {
       return 0 ;;
 
     netprocsvc)
-      printf '\n       An interpreter is holding a listening port. That is normal for a\n'
-      printf '       scored service written in python or php, and it is also exactly\n'
-      printf '       what a web shell looks like. The two are indistinguishable from\n'
-      printf '       the process name alone, which is why this needs you.\n\n'
-      printf '       Read the command line and the unit that owns it:\n\n'
-      printf '         sudo ss -tulnp | grep -i %q\n' "$(basename -- "$subject")"
-      printf '         sudo ps -o pid,ppid,unit,cmd -C %q\n\n' "$(basename -- "$subject")"
-      printf '       If the command line matches what the packet says you serve, it is\n'
-      printf '       your service. If it serves a directory you do not recognise, or it\n'
-      printf '       has no unit at all, it is not.\n'
+      pid=$(subject_pid "$subject" 2>/dev/null) || pid=''
+      unit=$(pid_service "${pid:-0}" 2>/dev/null) || unit=''
+      payload=$(mute_subject_of "$subject")
+      printf '\n       An interpreter is holding a listening port on a port the packet\n'
+      printf '       DOES account for. That is normal for a scored service written in\n'
+      printf '       python or php, and it is also the best place on this box to hide\n'
+      printf '       a web shell, because every port-based check waves it through.\n\n'
+      if [ -n "$unit" ]; then
+        printf '       It is held rather than offered because a unit owns it:\n\n'
+        printf '         %s\n\n' "$unit"
+        printf '       Sentry acts on processes nothing owns. A unit is something\n'
+        printf '       somebody installed, and stopping it is your call.\n\n'
+      else
+        printf '       It is held here because sentry could not establish that this\n'
+        printf '       process is safe to touch.\n\n'
+      fi
+      printf '       WHAT IT IS - the command line settles it. A scored service serves\n'
+      printf '       what the packet says you serve; a web shell serves a directory you\n'
+      printf '       do not recognise:\n\n'
+      if [ -n "$pid" ]; then
+        printf '         sudo ps -o pid,ppid,user,unit,cmd -p %s\n' "$pid"
+        printf '         sudo ss -tulnp | grep -w %s\n' "$pid"
+        printf '         sudo ls -l /proc/%s/cwd    # the directory it is serving FROM\n\n' "$pid"
+      else
+        printf '         sudo ss -tulnp | grep -i %q\n\n' "$(basename -- "${payload%% *}")"
+      fi
+      printf '       IF IT IS NOT YOURS\n\n'
+      if [ -n "$unit" ]; then
+        printf '       Stop the unit, not the process - the unit starts it again:\n\n'
+        printf '         sudo systemctl cat %s          # read it FIRST\n' "$unit"
+        printf '         sudo %s/preserve.sh --config %s --pid %s --freeze --apply\n' "$qkit" "$qconfig" "${pid:-PID}"
+        printf '         sudo systemctl disable --now %s\n\n' "$unit"
+        printf '       Then check the scored services from OFF the box, and work the\n'
+        printf '       unit itself as a finding - it is one, further up this list.\n\n'
+      else
+        printf '       Capture it before you kill it, and kill it BY PID - this box runs\n'
+        printf '       a scored python web server under the same executable:\n\n'
+        printf '         sudo %s/preserve.sh --config %s --pid %s --freeze --apply\n' "$qkit" "$qconfig" "${pid:-PID}"
+        printf '         sudo kill -9 %s\n\n' "${pid:-PID}"
+      fi
+      printf '       Leave the interpreter itself alone either way. It is package-owned\n'
+      printf '       and the scored service shares it; what the attacker put here is the\n'
+      printf '       script it was told to run, and that is the cwd above.\n\n'
+      printf '       IF IT IS YOURS\n\n'
+      if [ -n "$unit" ]; then
+        printf '       Name the unit in the packet list and it stops being reported at\n'
+        printf '       all - a declared service is explained, not silenced:\n\n'
+        printf '         CCDC_SYSTEMD_SERVICES="%s %s"    # in %s\n\n' \
+          "${CCDC_SYSTEMD_SERVICES:-}" "${unit%.service}" "$qconfig"
+      fi
+      printf '       If it has no unit and no place in the packet, record a standing\n'
+      printf '       exception instead. It stays silenced until you undo it, and the\n'
+      printf '       reason is kept with it:\n\n'
+      printf '         sudo %s/sentry.sh --config %s --mute netprocsvc %q \\\n' "$qkit" "$qconfig" "$payload"
+      printf '              --reason "why this is expected" --apply\n\n'
+      printf '       The count of muted findings is printed at the top of every report,\n'
+      printf '       so this can quiet the list without ever hiding anything from you.\n'
       return 0 ;;
 
     etcchange)
@@ -944,6 +1005,15 @@ held_reason() {
   return 1
 }
 
+# The subject with the pid dropped, which is what a standing exception is keyed
+# on. Printed into the --mute command under every finding, so what the operator
+# pastes is already the stable key and does not stop working at the next restart.
+mute_subject_of() {
+  local key
+  key=$(ccdc_mute_key x "$1")
+  printf '%s' "${key#x|}"
+}
+
 render_action() {
   local check=$1 subject=$2 user group unit target base owner rest dropin pid
   case "$check" in
@@ -978,7 +1048,7 @@ render_action() {
       printf 'preserve %q; stop, disable and remove it, reload systemd, then re-check every scored service and restore the unit if one stopped answering' "$base" ;;
     tmpproc|netproc|netunpackaged)
       pid=$(subject_pid "$subject" 2>/dev/null) || pid=''
-      target=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://')
+      target=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s| \(tcp\|udp\)/[0-9]*$||')
       if [ -n "$pid" ]; then
         printf 'capture pid %s (%s) with preserve.sh - socket, parent and executable - and only then kill it' "$pid" "$target"
         # Say which of the two it will be. "delete the executable afterwards"
@@ -1050,7 +1120,7 @@ publish_review_snapshot() {
 }
 
 write_alerts() {
-  local n=0 sev check subject desc i=0 heldred=0 heldamber=0 action watch_count=0 tmp quoted
+  local n=0 sev check subject desc i=0 heldred=0 heldamber=0 action watch_count=0 tmp quoted muted_count
   tmp=$(new_state_file) || return 1
   [ -f "$queue" ] && n=$(wc -l <"$queue" 2>/dev/null | tr -d ' ') || true
   [ -n "$n" ] || n=0
@@ -1093,6 +1163,15 @@ write_alerts() {
       fi
     fi
     printf '==================================================================\n\n'
+    # Silenced is not invisible. Anyone who can write that file can hide a
+    # finding, so the count is printed here every time, whether or not anything
+    # else is wrong.
+    muted_count=$(ccdc_mute_count)
+    if [ "$muted_count" -gt 0 ]; then
+      printf '  %s finding(s) are NOT listed below: you recorded a standing exception\n' "$muted_count"
+      printf '  for each. Read them, with the reason and date you gave:\n'
+      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --muted\n\n'
+    fi
     if [ -s "$triage_health" ] || [ -s "$watch_health" ]; then
       printf '  MONITOR HEALTH PROBLEM - detection is not current:\n'
       [ ! -s "$triage_health" ] || sed 's/^/    /' "$triage_health"
@@ -1123,7 +1202,9 @@ write_alerts() {
         printf '        approve: sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve %s --apply\n' "$i"
         [ "$sev" = RED ] \
           || printf '        note:  AMBER - this may well be yours, so a bulk approve skips it. It needs its own number.\n'
-        printf '        more:  playbooks/remediation-cards.md  %s\n\n' "$(card_for "$check")"
+        printf '        more:  playbooks/remediation-cards.md  %s\n' "$(card_for "$check")"
+        printf '        mine:  sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --mute %s %q --reason "WHY" --apply\n\n' \
+          "$check" "$(mute_subject_of "$subject")"
       done <"$queue"
     fi
 
@@ -1158,6 +1239,8 @@ write_alerts() {
         fi
         printf '                 more:  playbooks/remediation-cards.md  %s\n' \
           "$(card_for "$check")"
+        printf '                 mine:  sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --mute %s %q --reason "WHY" --apply\n' \
+          "$check" "$(mute_subject_of "$subject")"
         printf '\n'
       done <"$findings"
       [ "$heldred" -eq 1 ] && printf '\n'
@@ -1182,6 +1265,8 @@ write_alerts() {
           printf '                 held: no written guidance for a %s finding yet.\n' "$check"
         printf '                 more:  playbooks/remediation-cards.md  %s\n' \
           "$(card_for "$check")"
+        printf '                 mine:  sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --mute %s %q --reason "WHY" --apply\n' \
+          "$check" "$(mute_subject_of "$subject")"
         printf '\n'
       done <"$findings"
     fi
@@ -1617,7 +1702,8 @@ action_live_process() {
   pid=$(subject_pid "$subject") \
     || { slog "warning: $subject is no longer running"; return 1; }
   path=$(pid_exe "$pid" 2>/dev/null)
-  [ -n "$path" ] || path=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s/ (deleted)$//')
+  [ -n "$path" ] || path=$(printf '%s' "$subject" \
+    | sed 's/^pid[0-9]*://; s/ (deleted)$//; s| \(tcp\|udp\)/[0-9]*$||')
   # Asked again here, a second time, immediately before anything irreversible.
   # can_automate cleared this pid when the queue was built, which can be a
   # minute ago, and pids are recycled: the number that named a dropper then can
@@ -2101,10 +2187,105 @@ do_uninstall() {
   ccdc_info "removed supervised sentry; evidence and approval history remain in $state_dir"
 }
 
+# "That one is mine, stop asking."
+#
+# Without this, the tool's answer to "that is my service" was to report it again
+# on the next pass, and the pass after that, for the rest of the event. An
+# operator who cannot silence a known finding learns to skim the list it is in,
+# and that is the only list that must not be skimmed.
+#
+# Three properties make this safe to have at all:
+#   - a reason is required, so an exception is never indistinguishable from a
+#     thing someone forgot about;
+#   - the count is printed in every ALERTS header and at the end of every triage
+#     run, so a muted finding is silenced and never invisible - including if
+#     someone with root writes the file directly;
+#   - the key drops the pid, because a live-process subject carries the pid it
+#     was found under and that number changes on every restart.
+do_mute() {
+  local f key now
+  ccdc_require_root
+  [ -n "$mute_reason" ] || ccdc_die "--mute needs --reason: why is this one expected?
+  An exception with no reason cannot be told apart from a thing you forgot about.
+  example: --mute netprocsvc /usr/bin/python3.12 --reason 'inject 4: our own API, no unit yet'"
+  key=$(ccdc_mute_key "$mute_check" "$mute_subject")
+  f=$(ccdc_mute_file)
+  if ccdc_is_muted "$mute_check" "$mute_subject"; then
+    ccdc_info "already muted: $key"
+    return 0
+  fi
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would record a standing exception for %s\n' "$key"
+    printf '          reason: %s\n' "$mute_reason"
+    printf '          re-run with --apply to record it\n'
+    return 0
+  fi
+  mkdir -p -- "$(dirname -- "$f")" || ccdc_die "cannot create $(dirname -- "$f")"
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  printf '%s|%s|%s\n' "$key" "$now" "$mute_reason" >>"$f" \
+    || ccdc_die "cannot write $f"
+  chmod 600 -- "$f" 2>/dev/null || true
+  slog "muted $key reason=$mute_reason"
+  printf 'Recorded. %s will not be reported again until you unmute it.\n\n' "$key"
+  printf '  see it:   sudo %s/sentry.sh --config %s --muted\n' "$qkit" "$qconfig"
+  printf '  undo it:  sudo %s/sentry.sh --config %s --unmute %s %s --apply\n\n' \
+    "$qkit" "$qconfig" "$mute_check" "$(printf '%q' "${key#*|}")"
+  printf 'The reason and date are recorded with it, which is also a line you can\n'
+  printf 'paste into the inject response that asked for it.\n'
+}
+
+do_unmute() {
+  local f key tmp
+  ccdc_require_root
+  key=$(ccdc_mute_key "$mute_check" "$mute_subject")
+  f=$(ccdc_mute_file)
+  [ -r "$f" ] || ccdc_die "nothing is muted; there is no $f"
+  ccdc_is_muted "$mute_check" "$mute_subject" \
+    || ccdc_die "not muted: $key
+  what is:  sudo $qkit/sentry.sh --config $qconfig --muted"
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would stop silencing %s. Re-run with --apply.\n' "$key"
+    return 0
+  fi
+  tmp=$(mktemp "$f.XXXXXX") || ccdc_die "cannot create a temporary file next to $f"
+  awk -v k="$key" -F'|' '($1 "|" $2) != k' "$f" >"$tmp" \
+    || { rm -f -- "$tmp"; ccdc_die "cannot rewrite $f"; }
+  mv -f -- "$tmp" "$f" || { rm -f -- "$tmp"; ccdc_die "cannot replace $f"; }
+  chmod 600 -- "$f" 2>/dev/null || true
+  slog "unmuted $key"
+  ccdc_info "$key will be reported again from the next pass"
+}
+
+do_muted() {
+  local f n mcheck msubject when why
+  f=$(ccdc_mute_file)
+  n=$(ccdc_mute_count)
+  if [ "$n" -eq 0 ]; then
+    printf 'Nothing is muted. Every finding this box produces is being reported.\n'
+    return 0
+  fi
+  printf '%s standing exception(s) you recorded. These are NOT reported by\n' "$n"
+  printf 'triage, sentry --status, or the watch loop:\n\n'
+  while IFS='|' read -r mcheck msubject when why; do
+    case "$mcheck" in ''|\#*) continue ;; esac
+    printf '  %-14s %s\n' "$mcheck" "$msubject"
+    printf '  %-14s recorded %s\n' '' "$when"
+    printf '  %-14s because:  %s\n' '' "$why"
+    printf '  %-14s report it again: sudo %s/sentry.sh --config %s --unmute %s %s --apply\n\n' \
+      '' "$qkit" "$qconfig" "$mcheck" "$(printf '%q' "$msubject")"
+  done <"$f"
+  printf 'The file itself is %s, root-owned and 0600. Anyone who can write it can\n' "$f"
+  printf 'silence a finding - so the count is printed in every report, and this\n'
+  printf 'list is the only place it can hide.\n'
+}
+
 case "$mode" in
   status) do_status ;;
   approve) do_approve ;;
   ack) do_ack ;;
+  mute) do_mute ;;
+  unmute) do_unmute ;;
+  muted) do_muted ;;
   revert) do_revert ;;
   once)
     ccdc_require_root; ensure_state

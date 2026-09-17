@@ -280,3 +280,55 @@ is one the packet accounts for — that is the shape of it, and it is the nastie
 place to hide, since every port-based check waves it through. What is asked
 instead is whether a `.service` or `.socket` owns the process. A scored service
 arrives as a unit; an interpreter holding a scored port under no unit is not it.
+
+## D16 — "That one is mine, stop asking" (2026-09-17, Luke's ask)
+
+Verbatim: *"I'm not sure exactly what command I need to run if it isn't legit
+or what to run to make an exception for it so I'm not getting bloated with
+ambers."*
+
+There was no exception mechanism for triage findings at all. The only
+suppressions were config lists — `CCDC_ALLOWED_TCP_PORTS`, `CCDC_ALLOWED_USERS`,
+`CCDC_SYSTEMD_SERVICES` — and nothing covered "this process is mine". The tool's
+answer to a finding the operator had already judged was to report it again on
+the next pass, and the pass after that, for the rest of the event. An operator
+who cannot silence a known finding learns to skim the list it is in, and that
+is the only list that must not be skimmed.
+
+**Three things, in order of how much they matter.**
+
+**1. The biggest source of bloat was a false positive.** `netprocsvc` fired on
+`scored-web` — `python3 -m http.server 8080` — every single pass. It could not
+be acted on (sentry protects the unit, correctly) and could not be silenced. It
+is now suppressed at source: an interpreter holding an accounted-for port, under
+a unit the packet *declares*, is not a coincidence — it IS the scored service,
+and there is nothing left to decide. A declared service is **explained**, not
+silenced, and the held prose now says so and prints the `CCDC_SYSTEMD_SERVICES`
+line to paste, already filled in with the current value plus the new unit.
+
+**2. `sentry.sh --mute CHECK SUBJECT --reason "..."`,** with `--unmute` and
+`--muted`. Named, never numbered: a held finding has no row number to give, and
+a numbered one re-sorts between reading the screen and typing the command. Every
+render path — approvable, RED-held, AMBER-held — prints the exact command with
+the target already filled in.
+
+Three properties make it safe to have at all:
+
+- a reason is required, so an exception is never indistinguishable from a thing
+  someone forgot about;
+- the count is printed in every ALERTS header and at the end of every triage
+  run, whether or not anything else is wrong, so a muted finding is silenced
+  and never invisible — including if someone with root writes the file directly;
+- the key drops the pid, because a live-process subject carries the pid it was
+  found under and that number changes on every restart. Muting the literal
+  string would silence it until the next restart and no longer, which is worse
+  than not offering the option: it looks like it worked.
+
+**3. The key has to carry the port, and finding that out was the close call.**
+With the pid dropped, `pid3304283:/usr/bin/python3.12` and
+`pid3445412:/usr/bin/python3.12` produce the same key. Muting the legitimate
+python service would have silenced a python web shell on a different port,
+permanently and invisibly — the exact hiding place the `netprocsvc` check exists
+to find. Listening socket findings now carry `netid/port` in the subject, so
+the two keys differ. Caught on the lab box by muting one and watching the other
+disappear, before it shipped.

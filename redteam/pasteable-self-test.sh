@@ -667,9 +667,10 @@ else
   no 'the socket dedup key is not the pid; one process can mask another'
   grep -n 'key="' "$tri" | sed 's/^/    /'
 fi
-if grep -q 'emit RED netproc "pid$pid:$exe"' "$tri" \
-  && grep -q 'emit AMBER netprocsvc "pid$pid:$exe"' "$tri" \
-  && [ "$(grep -c 'emit AMBER netunpackaged "pid$pid:$exe"' "$tri")" = 2 ]; then
+# The listening ones carry the port as well: without it, muting your own python
+# service also silences a python web shell on a different port.
+if [ "$(grep -cE 'emit (RED netproc|AMBER netprocsvc|AMBER netunpackaged) "pid\$pid:\$exe' "$tri")" = 4 ] \
+  && [ "$(grep -cE 'emit AMBER (netprocsvc|netunpackaged) "pid\$pid:\$exe \$netid/\$local_port"' "$tri")" = 2 ]; then
   ok 'every socket finding names the pid it is about, not just the binary'
 else
   no 'a socket finding names only an executable, so remediation must guess the pid'

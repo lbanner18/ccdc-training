@@ -77,6 +77,16 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 - [ ] **Remember:** every sentry change needs guardian uninstall -> sentry
       install -> guardian install, or guardian reverts it within a tick.
 
+- [x] **Standing exceptions.** `sentry.sh --mute CHECK SUBJECT --reason "..."`,
+      `--unmute`, `--muted`. Every finding prints its own mute command; the
+      count of silenced findings is in every report header. See D16.
+- [x] **CARD 11 rewritten** to cover `/etc/ld.so.preload` as well as shell
+      start-up files, with a table saying which kinds are approvable as a whole
+      file (`loader`, `profile`, `motd`) and which is held because one line of a
+      legitimate file is theirs (`usershell`) — and what to do after removing
+      `ld.so.preload`, which is find the library it named and restart everything
+      that still has it mapped.
+
 ### What testing found that writing did not (2026-09-17)
 
 Every one of these was live in code that read correctly and had passed the

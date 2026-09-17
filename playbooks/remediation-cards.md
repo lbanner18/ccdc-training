@@ -617,60 +617,123 @@ does nothing. You want `pkill -u www-lab`. This cost real time in a drill.
 
 ---
 
-## CARD 11 — shell start-up file that launches something
+## CARD 11 — something runs on every login, or inside every process
 
-`RED  shell start-up file(s) launching something`
+`RED  loader     /etc/ld.so.preload` · `RED  profile  /etc/profile.d/NAME.sh`
+`RED  motd       /etc/update-motd.d/NAME` · `NOTE  usershell  /home/NAME/.bashrc`
 
-### Find it yourself
+Two different mechanisms live on this card because they are answered the same
+way and found by the same pass.
 
-The command that surfaces this. `triage.sh` runs exactly this internally, so
-if the scripts are gone - or you just want to check by hand - type this:
+**A start-up file** runs every time somebody opens a shell — *including the next
+time you run `sudo -i`*. This is persistence that fires on the defender's own
+hands, and no process or unit listing shows it until after it has run.
+
+**`/etc/ld.so.preload`** is worse. It is not a shell thing at all: the dynamic
+loader reads it before `main()` in **every dynamically linked program on the
+box**, root or not, shell or daemon, including the tools you are about to use
+to investigate. A library listed there can lie to `ls`, `ps`, `ss` and this kit.
+
+### Which one you have decides what you approve
+
+The finding's *kind* tells you, and it is printed on the row:
+
+| kind | what it is | the whole file is the finding? |
+|---|---|---|
+| `loader` | `/etc/ld.so.preload` | **Yes.** Stock Ubuntu does not ship this file. Its existence is the finding. |
+| `profile` | a file in `/etc/profile.d/` | **Yes.** One file per purpose; you are not editing someone else's lines out of it. |
+| `motd` | a file in `/etc/update-motd.d/` | **Yes.** Same shape, and it runs as root on every SSH login. |
+| `usershell` | `~/.bashrc`, `~/.profile`, `/etc/bash.bashrc` | **No.** It is a real file with real content, and one line of it is theirs. |
+
+### Approve it — the first three
+
+`baseline.sh` prints these with a number. Read it, then approve that number:
 
 ```bash
-SHELLS='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
-
-# start-up files that launch something. These run on EVERY login, including
-# your next `sudo -i`.
-for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc \
-         /etc/profile /home/*/.bashrc /home/*/.profile /etc/profile.d/*; do
-  [ -f "$f" ] && grep -HIE "$SHELLS|/usr/local/bin/|/tmp/|/dev/shm/" "$f"
-done
-
-# quick eyeball of the usual suspects
-sudo tail -5 /root/.bashrc /home/*/.bashrc
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --status
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --explain N   # the full case
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --approve N --apply
 ```
 
-`.bashrc`, `.profile`, `.bash_profile` and `/etc/profile.d/*` run every time
-anyone opens a shell — **including the next time you run `sudo -i`**. This is
-persistence that fires on the defender's own hands, and no process or unit
-listing will show it until it has already run.
+It copies the file to evidence, then deletes it. For `loader` that is the right
+answer with no caveat: there is nothing legitimate in that file to keep.
+
+**After removing `/etc/ld.so.preload`, find the library it named.** Deleting the
+list does not delete what was on it, and nothing loads it any more only for
+processes started *after* the change — everything already running still has it
+mapped:
 
 ```bash
-F=/root/.bashrc                    # <- the file triage printed
-
-sudo cp "$F" /var/tmp/evidence-$(basename "$F")   # evidence first
-sudo nano "$F"                     # delete ONLY the offending line
+sudo cat /var/tmp/ccdc-evidence/*/1-ld.so.preload    # what it pointed at
+sudo grep -l . /proc/*/maps 2>/dev/null | head       # or, per process:
+sudo grep -H 'THELIB' /proc/*/maps 2>/dev/null | cut -d/ -f3 | sort -u
+sudo cp -a /path/to/THELIB /var/tmp/ccdc-evidence/ && sudo rm -f /path/to/THELIB
 ```
 
-Follow whatever it launched — the hook is the trigger, not the payload:
+Every process in that list is still running injected code. Restart them, and
+treat anything that will not restart cleanly as a separate finding.
+
+### The fourth one is not approvable, and here is why
+
+`usershell` is held. The file is legitimate; one line in it is not, and there is
+no safe way for a tool to guess which. Delete the wrong line from `/root/.bashrc`
+and you have broken root's shell on a box you are being scored on.
+
+```bash
+F=/home/NAME/.bashrc                     # the path printed on the row
+sudo cp -a "$F" /var/tmp/ccdc-evidence/
+sudo diff <(sudo cat /etc/skel/.bashrc) "$F"    # what is different from stock
+sudo nano "$F"                                  # delete ONLY the offending line
+```
+
+Then follow what it launched — the hook is the trigger, not the payload:
 
 ```bash
 sudo cat /usr/local/bin/NAME
 ```
 
-Then work CARD 4 (units) and CARD 3 (schedulers), because a hook like this is
-almost always paired with a second mechanism that does not need you to log in.
+### If it is yours
+
+Say so once, and stop being asked. `baseline.sh` records it against the blessed
+inventory, with the reason:
 
 ```bash
-# THE WAY BACK IN - every start-up file on the box
-sudo ls -la /etc/profile.d/
-for f in /root/.bashrc /root/.profile /home/*/.bashrc /home/*/.profile; do
-  echo "== $f"; sudo tail -5 "$f" 2>/dev/null
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env \
+     --allow /etc/profile.d/company-motd.sh \
+     --reason "inject 3: the banner they asked for" --apply
+```
+
+For a finding that came from `triage.sh` or `sentry.sh --status` rather than
+from the baseline, the equivalent is a standing exception:
+
+```bash
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --muted     # what is silenced now
+```
+
+Both keep the reason and the date with the entry, and the count of silenced
+findings is printed at the top of every report — so this quiets the list
+without hiding anything.
+
+### Find it yourself
+
+```bash
+sudo ls -la /etc/ld.so.preload /etc/profile.d/ /etc/update-motd.d/
+
+SHELLS='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
+for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc \
+         /etc/profile /home/*/.bashrc /home/*/.profile /etc/profile.d/*; do
+  [ -f "$f" ] && grep -HIE "$SHELLS|/usr/local/bin/|/tmp/|/dev/shm/" "$f"
 done
 ```
 
-**Trap:** your own shell has already sourced it. Removing the line does not
-kill anything it started — check `ps -ef` for the child it spawned.
+### Two traps
+
+**Your own shell has already sourced it.** Removing the line does not kill what
+it started — check `ps -ef` for the child it spawned.
+
+**A hook like this is almost always paired.** Work CARD 4 (units) and CARD 3
+(schedulers) afterwards, because the second mechanism does not need you to log
+in at all.
 
 ---
 

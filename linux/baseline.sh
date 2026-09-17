@@ -1475,7 +1475,7 @@ card_for() {
     sudogrp)   printf 'playbooks/remediation-cards.md  CARD 10 - service account with a shell, or in an admin group' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
-    usershell) printf 'playbooks/remediation-cards.md  CARD 11 - shell start-up file that launches something' ;;
+
     # Not CARD 11. A sysctl setting, an AppArmor profile and a kernel
     # post-install hook are not shell start-up files; they are files under /etc
     # that changed, which is what CARD 9 is for. They were filed under 11
@@ -1496,8 +1496,8 @@ card_for() {
     pam|envfile|polkit|skel|netdispatch|dhcphook|syslog|logrotate|xdgauto|aptconf|udev)
                printf 'playbooks/remediation-cards.md  CARD 9 - /etc changed and it was not you' ;;
     svcshell)  printf 'playbooks/remediation-cards.md  CARD 10 - service account with a shell' ;;
-    profile|motd|loader)
-               printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
+    profile|motd|loader|usershell)
+               printf 'playbooks/remediation-cards.md  CARD 11 - something runs on every login, or inside every process' ;;
     sshd)      printf 'playbooks/packet-to-config.md  and linux/sshd.sh --help' ;;
     # Nothing should reach this arm: a self-test walks kind_for's whole table
     # and why_for's whole vocabulary and fails if any kind lands here. It stays

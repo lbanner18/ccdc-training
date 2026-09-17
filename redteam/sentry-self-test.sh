@@ -562,5 +562,52 @@ else
   printf '%s\n' "$bare" | sed 's/^/    /'
 fi
 
+# "That one is mine, stop asking" had no answer at all, so every AMBER finding
+# an operator had already judged came back on the next pass, forever.
+if grep -q 'mine:  sudo' "$ROOT/linux/sentry.sh" \
+   && [ "$(grep -c 'mine:  sudo' "$ROOT/linux/sentry.sh")" = 3 ]; then
+  hok 'every finding prints how to record it as a standing exception'
+else
+  hno 'some render path offers no way to silence a finding the operator has judged'
+fi
+
+# Silenced must never mean invisible.
+if awk '/^write_alerts\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q ccdc_mute_count \
+   && grep -q ccdc_mute_count "$ROOT/linux/triage.sh" 2>/dev/null \
+      || awk '/^write_alerts\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q ccdc_mute_count; then
+  hok 'the number of silenced findings is printed whether or not anything else is wrong'
+else
+  hno 'a muted finding can be invisible: no report prints the count'
+fi
+
+# A reason is required, or an exception cannot be told from a thing forgotten.
+if awk '/^do_mute\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q 'needs --reason'; then
+  hok 'a standing exception cannot be recorded without a reason'
+else
+  hno 'an exception can be recorded with no reason, so it reads as a thing someone forgot'
+fi
+
+# The key drops the pid and keeps the port. Without the pid dropped it stops
+# working at the next restart; without the port, muting your own python service
+# also silences a python web shell on a different port - which is the exact
+# hiding place the netprocsvc check exists to find.
+rt=$(bash -c '
+  set -u
+  . "'"$ROOT"'/linux/lib/common.sh"
+  a=$(ccdc_mute_key netprocsvc "pid111:/usr/bin/python3.12 tcp/4447")
+  b=$(ccdc_mute_key netprocsvc "pid999:/usr/bin/python3.12 tcp/4448")
+  c=$(ccdc_mute_key netprocsvc "pid222:/usr/bin/python3.12 tcp/4447")
+  [ "$a" = "$c" ] || { echo "the same service under a new pid does not match its own exception"; exit 1; }
+  [ "$a" != "$b" ] || { echo "two services on different ports share one exception key"; exit 1; }
+  case "$a" in *tcp/4447) ;; *) echo "the port is not part of the key: $a"; exit 1 ;; esac
+  case "$a" in *pid*) echo "the pid survived into the key: $a"; exit 1 ;; esac
+  echo ok
+' 2>&1 | tail -1)
+if [ "$rt" = ok ]; then
+  hok 'an exception survives a restart and cannot silence a second service'
+else
+  hno "mute key: $rt"
+fi
+
 printf 'sentry source checks: %s passed, %s failed\n' "$hpass" "$hfail"
 [ "$hfail" -eq 0 ] || exit 1

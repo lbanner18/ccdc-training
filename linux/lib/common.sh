@@ -318,3 +318,57 @@ ${CCDC_HTTP_CHECKS:-}
 OUTER
 }
 
+
+# --- standing exceptions for triage findings ---------------------------------
+#
+# "That one is mine, stop asking." There was no way to say it. The tool's answer
+# to "that is my service" was to report it again on the next pass, and the pass
+# after that, for the rest of the event - and an operator who cannot silence a
+# known finding learns to skim the list it is in, which is the only list that
+# must not be skimmed.
+#
+# Deliberately NOT a config variable. A config edit is invisible afterwards; a
+# muted finding carries who recorded it, when, and why, and the reason is also a
+# line that can be pasted into the inject response that asked for it.
+
+ccdc_mute_file() {
+  printf '%s/muted' "${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}"
+}
+
+# check|subject, with any pid stripped off the front of the subject.
+#
+# A live-process finding's subject carries the pid it was found under -
+# pid1234:/usr/bin/python3.12 - and that number changes every restart. Muting
+# the literal string would silence it until the service next restarts and no
+# longer, which is worse than not offering the option: it looks like it worked.
+ccdc_mute_key() {
+  local check=$1 subject=$2 rest
+  rest=${subject#pid}
+  if [ "$rest" != "$subject" ]; then
+    case "$rest" in
+      [0-9]*:*) subject=${rest#*:} ;;
+    esac
+  fi
+  printf '%s|%s' "$check" "$subject"
+}
+
+ccdc_is_muted() {
+  local key f mcheck msubject rest
+  key=$(ccdc_mute_key "$1" "$2")
+  f=$(ccdc_mute_file)
+  [ -r "$f" ] || return 1
+  while IFS='|' read -r mcheck msubject rest; do
+    case "$mcheck" in ''|\#*) continue ;; esac
+    [ "$mcheck|$msubject" = "$key" ] && return 0
+  done <"$f"
+  return 1
+}
+
+ccdc_mute_count() {
+  local f n
+  f=$(ccdc_mute_file)
+  [ -r "$f" ] || { printf '0'; return 0; }
+  n=$(grep -cvE '^[[:space:]]*(#|$)' "$f" 2>/dev/null) || n=0
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}

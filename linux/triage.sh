@@ -72,6 +72,7 @@ mkdir -p "$state_dir" 2>/dev/null \
   || ccdc_die "triage state is not writable by $(id -un): $state_dir (run with sudo; refusing to split findings)"
 
 findings=0
+muted_n=0
 checks=0
 
 # Severity is about what it means, not how the check is written:
@@ -189,6 +190,14 @@ machine_triple_safe() {
   return 0
 }
 emit() {
+  # A standing exception the operator recorded with `sentry.sh --mute`. The
+  # count is printed at the end of this run and in every ALERTS header, so a
+  # muted finding is silenced but never invisible - nothing here can quietly
+  # blind the box, including anyone who gets root and edits the file.
+  if ccdc_is_muted "$2" "$3"; then
+    muted_n=$((muted_n + 1))
+    return 0
+  fi
   if machine_field_safe "$1" && machine_field_safe "$2" &&
      machine_field_safe "$3" && machine_field_safe "$4"; then
     printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$findings_tmp" \
@@ -1244,6 +1253,14 @@ else
     return 1
   }
 
+  # The systemd unit that owns a pid, or nothing. A .scope is a session, not a
+  # unit someone installed, so it does not count.
+  pid_unit_name() {
+    [ -r "/proc/$1/cgroup" ] || return 1
+    tr '/' '\n' <"/proc/$1/cgroup" 2>/dev/null \
+      | grep -E '\.(service|socket)$' | tail -1
+  }
+
   # Buffer the three groups instead of printing as the loop finds them. A busy
   # box interleaves them - RED, then an AMBER, then another RED - and the
   # remediation block for one finding then sits underneath a different finding's
@@ -1356,9 +1373,36 @@ else
       # /usr/bin/python3.12, both resolving to scored-web, which is protected,
       # so neither could ever be acted on.
       if [ "$severity" = RED ]; then
+        # An outbound connection, or a port the packet does not account for.
+        # This fires even when the process belongs to a scored unit, because a
+        # scored service reaching out is exactly what a compromised scored
+        # service looks like.
         emit RED netproc "pid$pid:$exe" "$direction connection held by a process because $reason"
       else
-        emit AMBER netprocsvc "pid$pid:$exe" "$direction socket held by a process because $reason"
+        # AMBER means: an interpreter, holding a port the packet DOES account
+        # for. If the unit that owns it is one the packet declares, that is not
+        # a coincidence - it IS the scored service, and there is nothing left to
+        # decide.
+        #
+        # scored-web is `python3 -m http.server 8080`, so this fired on it every
+        # single pass, forever. It could not be acted on (sentry protects the
+        # unit, correctly) and there was no way to silence it, which is the
+        # definition of a row that teaches you to skim the list it is in.
+        owner_unit=$(pid_unit_name "$pid" 2>/dev/null) || owner_unit=''
+        if [ -n "$owner_unit" ] && unit_is_ours "$owner_unit"; then
+          clean "listening $exe belongs to $owner_unit, which the packet declares"
+          continue
+        fi
+        # The port is part of the subject, not decoration.
+        #
+        # A standing exception is keyed on the subject with the pid dropped,
+        # because the pid changes on every restart. Without the port, the key
+        # for a legitimate python service and the key for a python web shell on
+        # a different port are the same string - muting the one you own would
+        # silence the one you do not, permanently and invisibly. That is the
+        # exact hiding place this check exists to find.
+        emit AMBER netprocsvc "pid$pid:$exe $netid/$local_port" \
+          "$direction socket held by a process because $reason"
       fi
 
       cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-88)
@@ -1434,7 +1478,8 @@ else
       net_unpkg_buf="$net_unpkg_buf${D}$exe"$'\n'
       net_unpkg_buf="$net_unpkg_buf${D}  pid $pid  outbound $local_addr -> $peer"$'\n'
     else
-      emit AMBER netunpackaged "pid$pid:$exe" "unaccounted listening port served by an unpackaged binary"
+      emit AMBER netunpackaged "pid$pid:$exe $netid/$local_port" \
+        "unaccounted listening port served by an unpackaged binary"
       net_unpkg_buf="$net_unpkg_buf${D}$exe"$'\n'
       net_unpkg_buf="$net_unpkg_buf${D}  pid $pid  listening on $netid port $local_port"$'\n'
     fi
@@ -1880,6 +1925,13 @@ findings_tmp=''
 # found, plus two it did not - the /etc/update-motd.d script and the
 # /etc/ld.so.preload hijack - and named them individually with an action each,
 # where this tool reported them inside a "/etc files modified" bucket.
+if [ "$muted_n" -gt 0 ]; then
+  printf '\n  %s finding(s) were NOT reported above: you recorded a standing exception\n' "$muted_n"
+  printf '  for each one. They are silenced, not invisible - read them, with the\n'
+  printf '  reason and the date you gave:\n'
+  printf '      sudo %s/sentry.sh --config %s --muted\n' "$SCRIPT_DIR" "$config"
+fi
+
 printf '\n  This tool reports what is WRONG. For what has CHANGED since you froze\n'
 printf '  this box - which is most of the above, with a command that fixes each:\n'
 printf '      sudo %s/baseline.sh --config %s --status\n' "$SCRIPT_DIR" "$config"
