@@ -222,3 +222,120 @@ If the rehearsal is boring, the config is right.
 ```
 
 Carry it on the day as a file you copy, not a thing you write.
+
+---
+
+# Changing the config once the event has started
+
+Everything above assumes a desk, two days early, nothing running. Mid-event is
+different, and it has a trap in it that costs you ten minutes and your trust in
+the tool if you meet it cold.
+
+## The trap, measured
+
+The supervised sentry **does not read the file you edit.** `--install` copies
+your config to `/usr/local/lib/ccdc-sentry/sentry.env` and the systemd unit's
+`ExecStart` names that copy. This is deliberate — an attacker who can write to
+your home directory must not be able to steer a loop running as root — but it
+means editing `~/ccdc-real.env` changes nothing, and says nothing.
+
+The obvious second attempt is worse. Edit the installed copy directly and it
+looks like it worked:
+
+```
+15:CCDC_SYSTEMD_SERVICES="scored-web ssh"            # before
+15:CCDC_SYSTEMD_SERVICES="scored-web ssh inventory-api"   # after the edit
+```
+
+Seventy-five seconds later, on the lab box, with nothing printed anywhere:
+
+```
+15:CCDC_SYSTEMD_SERVICES="scored-web ssh"
+```
+
+Guardian holds `sentry.env` in its repair tree and put it back, exactly as it
+would if an attacker had edited it. Guardian cannot tell your legitimate change
+from tampering — that ambiguity is the entire point of guardian — so it wins,
+quietly, every minute.
+
+## The one command
+
+```bash
+# 1. edit YOUR config, the one in your home directory
+nano ~/ccdc-real.env
+
+# 2. make the running tools use it
+sudo ./linux/sentry.sh --config ~/ccdc-real.env --reload-config --apply
+```
+
+Step 2 takes guardian down, reinstalls sentry (which re-copies both the tool
+tree and the config), and puts guardian back so it re-takes its copy including
+your change — in that order, because any other order is undone. It refuses to
+start if the config has a syntax error, and it prints back the three lists that
+decide everything so you can see the change landed:
+
+```
+Done. The running sentry is using /home/banneluk/ccdc-real.env as of now.
+
+  CCDC_SYSTEMD_SERVICES=scored-web ssh inventory-api
+  CCDC_ALLOWED_TCP_PORTS=22 8080
+  CCDC_ALLOWED_USERS=root banneluk www-lab
+```
+
+`--reload-config` with no `--apply` prints the three steps it would take and
+changes nothing.
+
+## Which knob for which finding
+
+A finding is being reported because nothing on this box explains it. There are
+two different ways to explain one, and they are not interchangeable.
+
+| finding | the knob | what it means |
+|---|---|---|
+| `port` / `udpport` / `listener` on a port you serve | `CCDC_ALLOWED_TCP_PORTS`, `CCDC_ALLOWED_UDP_PORTS` | the packet says this port is open |
+| `netprocsvc` — an interpreter holding an accounted-for port | `CCDC_SYSTEMD_SERVICES` | name the **unit**, and the process under it stops being a question at all |
+| `uid0` / `svcshell` / `admingroup` for an account the packet names | `CCDC_ALLOWED_USERS` | this account is supposed to exist |
+| `unit` / `rogueunit` for a service you were told to run | `CCDC_SYSTEMD_SERVICES` or `CCDC_PROTECT_SERVICES` | never remove this unit |
+
+**Prefer the config over a standing exception.** A declared service is
+*explained* — the check stops firing because the box now makes sense — where a
+muted finding is *silenced*, still true, and still there. Use `--mute` for the
+things the config has no word for:
+
+```bash
+sudo ./linux/sentry.sh --config ~/ccdc-real.env \
+     --mute netprocsvc '/usr/bin/python3.12 tcp/4448' \
+     --reason "inject 4: the API they asked for, no unit yet" --apply
+
+sudo ./linux/sentry.sh --config ~/ccdc-real.env --muted      # everything silenced, with reasons
+sudo ./linux/sentry.sh --config ~/ccdc-real.env --unmute netprocsvc '/usr/bin/python3.12 tcp/4448' --apply
+```
+
+The count of silenced findings prints at the top of every report whether or not
+anything else is wrong, so this quiets the list without hiding anything from
+you.
+
+## Baseline is separate, and that is on purpose
+
+`baseline.sh` answers "what changed since I froze this box", against its own
+blessed inventory. Its exceptions live there, not in the config:
+
+```bash
+sudo ./linux/baseline.sh --config ~/ccdc-real.env \
+     --allow /etc/profile.d/company-motd.sh \
+     --reason "inject 3: the banner they asked for" --apply
+```
+
+No reload is needed for that one — `baseline.sh` runs from your tree, reads the
+exceptions file directly, and is not supervised.
+
+## If something goes wrong halfway
+
+`--reload-config` takes guardian down before it touches anything. If the
+reinstall fails, it says so and prints the command to put guardian back. Run it.
+A box with no guardian has no keep-alive, and nothing else is watching for that
+gap:
+
+```bash
+sudo ./linux/guardian.sh --config ~/ccdc-real.env --install --apply
+```

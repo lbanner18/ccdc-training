@@ -87,6 +87,11 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       `ld.so.preload`, which is find the library it named and restart everything
       that still has it mapped.
 
+- [x] **`sentry.sh --reload-config --apply`** — a config edit reaches the
+      running loop. Editing your own config did nothing; editing the installed
+      copy was reverted by guardian in 75 seconds with no message. Both measured.
+      See D17 and `playbooks/packet-to-config.md`.
+
 ### What testing found that writing did not (2026-09-17)
 
 Every one of these was live in code that read correctly and had passed the

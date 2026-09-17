@@ -609,5 +609,38 @@ else
   hno "mute key: $rt"
 fi
 
+# Telling the operator to edit a config the running loop does not read is worse
+# than saying nothing: they do it, nothing changes, and the second attempt -
+# editing the installed copy - is reverted by guardian within a minute with
+# nothing printed. Measured on the lab box at 75 seconds.
+gap=$(for t in sentry.sh baseline.sh triage.sh; do
+  grep -qE 'CCDC_(ALLOWED_TCP_PORTS|SYSTEMD_SERVICES|ALLOWED_USERS)' "$ROOT/linux/$t" || continue
+  grep -q 'reload-config' "$ROOT/linux/$t" || printf ' %s' "$t"
+done)
+if [ -z "$gap" ]; then
+  hok 'every tool that suggests a config edit says how to make it reach the loop'
+else
+  hno "tells the operator to edit a config and stops there:$gap"
+fi
+
+# And the command it names has to do the guardian dance, or it is the same trap
+# one level up.
+if awk '/^do_reload_config\(\)/,/^}/' "$ROOT/linux/sentry.sh" \
+   | grep -q 'guardian_is_armed' \
+   && awk '/^do_reload_config\(\)/,/^}/' "$ROOT/linux/sentry.sh" \
+      | grep -q '"$guardian_sh" --config "$config" --install --apply'; then
+  hok 'the reload takes guardian down and puts it back, in that order'
+else
+  hno 'the reload does not handle guardian, so the change is reverted within a tick'
+fi
+
+# A config with a syntax error takes the loop down, and the loop is what would
+# have told you.
+if awk '/^do_reload_config\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q 'bash -n'; then
+  hok 'the reload refuses a config that does not parse'
+else
+  hno 'a broken config can be installed under the supervised loop'
+fi
+
 printf 'sentry source checks: %s passed, %s failed\n' "$hpass" "$hfail"
 [ "$hfail" -eq 0 ] || exit 1

@@ -1093,6 +1093,8 @@ EOF
     done
     fix "# THEN decide, and the order matters:"
     fix "#  - it is a scored service on a port you forgot    -> add it to CCDC_ALLOWED_TCP_PORTS"
+    fix "#    then: sudo $SCRIPT_DIR/sentry.sh --config $config --reload-config --apply"
+    fix "#    (editing the config alone does not reach the running sentry - packet-to-config.md)"
     fix "#  - it is a service you do not need                -> services.sh --review, not kill"
     fix "#  - nothing accounts for it                        -> CARD 12, freeze before you kill"
     fix "# Do NOT firewall it off as a first move: if it turns out to be scored,"

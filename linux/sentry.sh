@@ -54,6 +54,8 @@ while [ "$#" -gt 0 ]; do
       mute_check=${1:?missing check name: --unmute CHECK SUBJECT}; shift
       mute_subject=${1:?missing subject: --unmute CHECK SUBJECT}; shift ;;
     --muted) mode=muted; shift ;;
+    --reload-config) mode=reload; shift ;;
+    --reload) mode=reload; shift ;;
     --reason) mute_reason=${2:?missing reason text}; shift 2 ;;
     --ack) mode=ack; shift ;;
     --revert) mode=revert; shift ;;
@@ -76,6 +78,17 @@ while [ "$#" -gt 0 ]; do
       printf '      sudo ./sentry.sh --config FILE --install\n'
       printf '      sudo ./sentry.sh --config FILE --status      what is queued now\n'
       printf '      sudo ./sentry.sh --config FILE --approve N   act on one finding\n'
+      printf '\n'
+      printf '  When a finding turns out to be yours:\n'
+      printf '      --reload-config --apply             after editing your config, so the\n'
+      printf '                                          RUNNING loop reads it. Editing the\n'
+      printf '                                          file alone does not reach it, and\n'
+      printf '                                          editing the installed copy is\n'
+      printf '                                          reverted by guardian within a tick.\n'
+      printf '      --mute CHECK SUBJECT --reason T     record a standing exception for\n'
+      printf '                                          something the config has no word for\n'
+      printf '      --muted                             everything silenced, with reasons\n'
+      printf '      --unmute CHECK SUBJECT              report it again\n'
       printf '\n'
       printf '  The queue is rebuilt from current findings rather than replayed from\n'
       printf '  stored shell, and approving re-runs detection before it touches\n'
@@ -896,9 +909,19 @@ held_reason() {
       printf '       IF IT IS YOURS\n\n'
       if [ -n "$unit" ]; then
         printf '       Name the unit in the packet list and it stops being reported at\n'
-        printf '       all - a declared service is explained, not silenced:\n\n'
-        printf '         CCDC_SYSTEMD_SERVICES="%s %s"    # in %s\n\n' \
-          "${CCDC_SYSTEMD_SERVICES:-}" "${unit%.service}" "$qconfig"
+        printf '       all - a declared service is explained, not silenced. Two steps,\n'
+        printf '       and the second one is the one nobody guesses:\n\n'
+        printf '         1. edit %s so the line reads\n\n' "$qconfig"
+        printf '            CCDC_SYSTEMD_SERVICES="%s %s"\n\n' \
+          "${CCDC_SYSTEMD_SERVICES:-}" "${unit%.service}"
+        printf '         2. make the RUNNING sentry use it:\n\n'
+        printf '            sudo %s/sentry.sh --config %s --reload-config --apply\n\n' "$qkit" "$qconfig"
+        printf '       Step 2 is not optional. The supervised loop runs from its own\n'
+        printf '       copy of the config, taken when you installed it, so editing the\n'
+        printf '       file above changes nothing on its own - and editing the copy\n'
+        printf '       instead is put back by guardian within a minute, silently.\n'
+        printf '       That one command does the whole dance in the order that\n'
+        printf '       survives it.  Background: playbooks/packet-to-config.md\n\n'
       fi
       printf '       If it has no unit and no place in the packet, record a standing\n'
       printf '       exception instead. It stays silenced until you undo it, and the\n'
@@ -2187,6 +2210,87 @@ do_uninstall() {
   ccdc_info "removed supervised sentry; evidence and approval history remain in $state_dir"
 }
 
+# A config change reaches the running loop, which it otherwise does not.
+#
+# The supervised sentry executes from its own copy under $install_dir and reads
+# a config COPIED there at install time. That is deliberate - an attacker who
+# can edit the operator's home directory must not be able to steer a root loop
+# - but it means the obvious move, editing your own config file, changes
+# nothing and says nothing.
+#
+# The second attempt is worse. Editing the INSTALLED copy appears to work, and
+# guardian holds sentry.env in its repair tree, so it is silently put back.
+# Measured on the lab box: CCDC_SYSTEMD_SERVICES was edited at 15:22 and was
+# the old value again 75 seconds later, with nothing printed anywhere.
+#
+# So: one command that does the whole dance, in the order that survives it.
+do_reload_config() {
+  local armed=0 guardian_sh
+  ccdc_require_root
+  [ -r "$config" ] || ccdc_die "cannot read $config"
+  # A config that does not parse takes the loop down on the next restart, and
+  # the loop is what would have told you. Check before touching anything.
+  bash -n "$config" 2>/dev/null     || ccdc_die "$config has a syntax error; fix it before reloading (bash -n '$config')"
+  ( set -a; . "$config" ) >/dev/null 2>&1     || ccdc_die "$config could not be loaded; fix it before reloading"
+
+  guardian_sh="$SCRIPT_DIR/guardian.sh"
+  if guardian_is_armed; then armed=1; fi
+
+  if ccdc_is_dry_run; then
+    printf '[dry-run] would make %s the config the running sentry uses:
+
+' "$config"
+    [ "$armed" -eq 0 ] || printf '    guardian --uninstall   (it would otherwise put the old config back)
+'
+    printf '    sentry   --install     (copies the tool tree AND the config, restarts the loop)
+'
+    [ "$armed" -eq 0 ] || printf '    guardian --install     (re-takes its copy, including the new config)
+'
+    printf '
+Re-run with --apply.
+'
+    return 0
+  fi
+
+  if [ "$armed" -eq 1 ]; then
+    [ -x "$guardian_sh" ] || ccdc_die "guardian is armed but $guardian_sh is missing; take it down by hand first"
+    "$guardian_sh" --config "$config" --uninstall --apply >/dev/null 2>&1       || ccdc_die "could not take guardian down; nothing was changed"
+  fi
+
+  if ! do_install; then
+    [ "$armed" -eq 0 ] || printf 'GUARDIAN IS STILL DOWN. Put it back now:
+  sudo %s/guardian.sh --config %s --install --apply
+' "$qkit" "$qconfig" >&2
+    ccdc_die "installing the new config failed"
+  fi
+
+  if [ "$armed" -eq 1 ]; then
+    "$guardian_sh" --config "$config" --install --apply >/dev/null 2>&1 || {
+      printf 'GUARDIAN IS STILL DOWN and did not come back. Put it back now:
+  sudo %s/guardian.sh --config %s --install --apply
+' "$qkit" "$qconfig" >&2
+      ccdc_die "guardian did not reinstall"
+    }
+  fi
+
+  if ! cmp -s -- "$config" "$installed_config"; then
+    ccdc_die "the running sentry's config still does not match $config - look at $installed_config"
+  fi
+  printf '
+Done. The running sentry is using %s as of now.
+
+' "$config"
+  printf '  CCDC_SYSTEMD_SERVICES=%s
+' "${CCDC_SYSTEMD_SERVICES:-(empty)}"
+  printf '  CCDC_ALLOWED_TCP_PORTS=%s
+' "${CCDC_ALLOWED_TCP_PORTS:-(empty)}"
+  printf '  CCDC_ALLOWED_USERS=%s
+
+' "${CCDC_ALLOWED_USERS:-(empty)}"
+  printf 'See what that changed:  sudo %s/sentry.sh --config %s --status
+' "$qkit" "$qconfig"
+}
+
 # "That one is mine, stop asking."
 #
 # Without this, the tool's answer to "that is my service" was to report it again
@@ -2286,6 +2390,7 @@ case "$mode" in
   mute) do_mute ;;
   unmute) do_unmute ;;
   muted) do_muted ;;
+  reload) do_reload_config ;;
   revert) do_revert ;;
   once)
     ccdc_require_root; ensure_state

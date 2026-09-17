@@ -93,6 +93,7 @@ ccdc_load_config "$config"
 
 printf -v qconfig '%q' "$config"
 printf -v qself '%q' "$SCRIPT_DIR/baseline.sh"
+printf -v qkit '%q' "$SCRIPT_DIR"
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
@@ -1215,7 +1216,11 @@ needs_you_for() {
       printf '       If the owning process appears elsewhere on this screen as an\n'
       printf '       unexplained procexe, deal with it there - that finding knows how\n'
       printf '       to capture the process before killing it. If it is a scored\n'
-      printf '       service, add the port to CCDC_ALLOWED_TCP_PORTS in your config.\n' ;;
+      printf '       service, add the port to CCDC_ALLOWED_TCP_PORTS in your config -\n'
+      printf '       and then make the running sentry read it, which editing the file\n'
+      printf '       does not do on its own:\n\n'
+      printf '         sudo %s/sentry.sh --config %s --reload-config --apply\n' "$qkit" "$qconfig"
+      printf '       why: playbooks/packet-to-config.md\n' ;;
 
     module)
       printf '       A loaded kernel module that is not in the blessed baseline.\n\n'

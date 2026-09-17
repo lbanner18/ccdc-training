@@ -332,3 +332,42 @@ permanently and invisibly — the exact hiding place the `netprocsvc` check exis
 to find. Listening socket findings now carry `netid/port` in the subject, so
 the two keys differ. Caught on the lab box by muting one and watching the other
 disappear, before it shipped.
+
+## D17 — A config change has to reach the running loop (2026-09-17, Luke's ask)
+
+Verbatim: *"I'd like somewhere to remind me the process of adding the exception
+to the config. Either a playbook reference or quick commands to get to what I
+need to do."*
+
+Asking exposed a trap worth more than the reminder. The supervised sentry does
+not read the file the operator edits: `--install` copies the config to
+`$install_dir/sentry.env` and the unit's `ExecStart` names that copy. That is
+deliberate — an attacker who can write to a home directory must not be able to
+steer a root loop — but it means editing `~/ccdc-real.env` changes nothing and
+says nothing.
+
+The obvious second attempt is worse. **Measured on the lab box:**
+`CCDC_SYSTEMD_SERVICES` was edited in the INSTALLED copy at 15:22 and was the
+old value again 75 seconds later, with nothing printed anywhere. Guardian holds
+`sentry.env` in its repair tree and cannot tell a legitimate change from
+tampering — that ambiguity is the entire point of guardian — so it wins, every
+minute, silently. Two dead ends and no error message on either.
+
+So: `sentry.sh --reload-config --apply`. It validates the config parses (a
+broken one takes the loop down, and the loop is what would have told you), takes
+guardian down, reinstalls sentry, puts guardian back so it re-takes its copy,
+verifies the installed config now matches, and prints the three lists that
+decide everything. Without `--apply` it prints the three steps and changes
+nothing. If the middle step fails it says guardian is still down and prints the
+command to restore it.
+
+Every place in the kit that tells the operator to edit a config now names that
+command — `sentry.sh`, `baseline.sh` and `triage.sh` — and an assertion fails
+the suite if a tool suggests a config edit without it.
+
+`playbooks/packet-to-config.md` gained a "Changing the config once the event has
+started" section: the trap with the measured timings, the one command, and a
+table of which knob explains which finding. It also records the preference —
+**config over exception**: a declared service is *explained*, so the check stops
+firing because the box now makes sense, where a muted finding is *silenced*,
+still true, and still there.
