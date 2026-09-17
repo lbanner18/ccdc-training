@@ -264,7 +264,7 @@ To add, in order of value:
   the same finding, you learn to ignore it within ten minutes.
 - **A prompt indicator** for everything below RED: `[!3]` in `PS1` when unacked
   items exist.
-- **A dedicated pane** running `watch.sh --loop`.
+- **A dedicated pane** running `watch.sh --config ... ` (it loops until you stop it; `--once` is the single pass).
 
 ---
 

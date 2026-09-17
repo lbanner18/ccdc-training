@@ -1043,5 +1043,90 @@ else
   printf '%s\n' "$ghostflag" | sed 's/^/    /' | head -8
 fi
 
+# The same rule, pointed at the documentation - which is where it was being
+# broken.
+#
+# The scan above covers linux/*.sh only, so three commands that do not exist
+# lived in the playbooks untouched, including `backup.sh --list` inside CARD 9's
+# restore steps: a command written to be pasted during an incident, by someone
+# who has just lost a file and is not in a mood to debug their tooling.
+#
+# Only fenced code blocks are scanned. Prose is full of correct sentences like
+# "policy.sh deliberately has no --apply", and a checker that flags those is a
+# checker people learn to ignore.
+docflag=$(python3 - "$ROOT" <<'SCAN'
+import glob, os, re, sys
+root = sys.argv[1]
+
+accepted = {}
+for f in glob.glob(os.path.join(root, 'linux', '*.sh')):
+    src = open(f, encoding='utf-8', errors='replace').read()
+    fl = set(re.findall(r'^\s*(--[a-z][a-z0-9-]*)\)', src, re.M))
+    fl |= set(re.findall(r'^\s*-[a-z]\|(--[a-z][a-z0-9-]*)\)', src, re.M))
+    fl |= set(re.findall(r'\|(--[a-z][a-z0-9-]*)\)', src))
+    accepted[os.path.basename(f)] = fl
+
+docs = []
+for pat in ('*.md', 'playbooks/*.md', 'injects/*.md', 'injects/**/*.md'):
+    docs += glob.glob(os.path.join(root, pat), recursive=True)
+
+bad = []
+for d in sorted(set(docs)):
+    if os.path.basename(d) == 'open-work.md':
+        continue          # the checklist names broken commands ON PURPOSE
+    infence = False
+    for n, line in enumerate(open(d, encoding='utf-8', errors='replace'), 1):
+        if line.lstrip().startswith('```'):
+            infence = not infence
+            continue
+        if not infence:
+            continue
+        code = line.split('#', 1)[0]          # strip trailing comments
+        # A PATH before the name, because these fences hold prose as well as
+        # commands. README lists "policy.sh  password policy audit (report-only,
+        # no --apply)" in a fenced table, and first-15-minutes explains in a
+        # fenced checklist that audit.sh's --capture comes after the rules
+        # canary.sh loaded. Both name a tool and a flag on one line and both are
+        # correct English. Every real command in this repo is written with a
+        # path: ./linux/foo.sh, or an absolute one.
+        m = re.search(r'(?:^|\s)(?:[\w.~/-]*/)([a-z0-9-]+\.sh)(\s.*)$', code)
+        if not m:
+            continue
+        tool, rest = m.group(1), m.group(2)
+        if tool not in accepted:
+            continue
+        for flag in re.findall(r'(--[a-z][a-z0-9-]{2,})', rest):
+            if flag in accepted[tool] or flag in ('--help',):
+                continue
+            bad.append('%s:%d: %s does not accept %s'
+                       % (os.path.relpath(d, root), n, tool, flag))
+print('\n'.join(bad))
+SCAN
+)
+if [ -z "$docflag" ]; then
+  ok 'no playbook or inject teaches a command flag that does not exist'
+else
+  no 'the documentation teaches a command the tool will reject'
+  printf '%s\n' "$docflag" | sed 's/^/    /' | head -10
+fi
+
+# A suite that the entry point does not run is a suite that does not exist.
+#
+# harden-self-test.sh was written, committed, passing, and absent from
+# self-test.sh - so twenty assertions ran only when someone remembered to
+# invoke them by hand. The README says self-test.sh "runs every suite below".
+# This is what makes that sentence true.
+orphan=''
+for suite in "$ROOT"/redteam/*self-test.sh; do
+  base=$(basename "$suite")
+  [ "$base" = 'self-test.sh' ] && continue
+  grep -q "$base" "$ROOT/redteam/self-test.sh" || orphan="$orphan $base"
+done
+if [ -z "$orphan" ]; then
+  ok 'every self-test suite is run by self-test.sh'
+else
+  no "a suite exists that the entry point never runs:$orphan"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

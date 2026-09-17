@@ -22,10 +22,11 @@ while [ "$#" -gt 0 ]; do
     --config) config=${2:?missing config path}; shift 2 ;;
     --apply) apply=1; CCDC_DRY_RUN=0; shift ;;
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
+    --list) mode=list; shift ;;
     --diff) mode=diff; restore_path=${2:?missing backup file}; shift 2 ;;
     --restore) mode=restore; restore_path=${2:?missing backup file}; shift 2 ;;
     --service-path) source_path=${2:?missing source path}; shift 2 ;;
-    -h|--help) printf 'usage: %s --config FILE [--dry-run|--apply] [--service-path PATH] [--diff|--restore BACKUP]\n' "$0"; exit 0 ;;
+    -h|--help) printf 'usage: %s --config FILE [--dry-run|--apply] [--service-path PATH] [--list|--diff|--restore BACKUP]\n' "$0"; exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done
@@ -151,6 +152,37 @@ EOF
       || ccdc_die "$missing of $requested configured paths were missing; partial backup retained at $backup_dir"
   fi
   ccdc_info "backup directory: $backup_dir"
+elif [ "$mode" = list ]; then
+  # CARD 9 has told the operator to run this since it was written, and the flag
+  # did not exist. It is the step before --restore, and --restore is useless
+  # without it: you cannot name a backup file you have not been shown.
+  if [ ! -d "$backup_base" ]; then
+    printf 'No backups yet. %s does not exist.\n\n' "$backup_base"
+    printf 'Make one now, before you need it:\n'
+    printf '  sudo %s --config %s --apply\n' "$0" "$config"
+    exit 0
+  fi
+  found=0
+  for d in "$backup_base"/ccdc-backup.*; do
+    [ -d "$d" ] || continue
+    found=$((found + 1))
+    printf '%s   (%s, %s file(s))\n' "$d" \
+      "$(date -u -d "@$(stat -c '%Y' "$d")" '+%Y-%m-%d %H:%M:%SZ' 2>/dev/null)" \
+      "$(find "$d" -type f ! -name MANIFEST ! -name SHA256SUMS 2>/dev/null | wc -l)"
+    find "$d" -type f ! -name MANIFEST ! -name SHA256SUMS 2>/dev/null \
+      | sed "s|^$d||" | sort | sed 's/^/      /'
+  done
+  if [ "$found" -eq 0 ]; then
+    printf 'No backups in %s yet.\n\n' "$backup_base"
+    printf 'Make one now, before you need it:\n'
+    printf '  sudo %s --config %s --apply\n' "$0" "$config"
+    exit 0
+  fi
+  printf '\nRestore one of the paths listed above - the path as it appears on the\n'
+  printf 'box, not the path inside the backup:\n'
+  printf '  sudo %s --config %s --diff /etc/ssh/sshd_config\n' "$0" "$config"
+  printf '  sudo %s --config %s --restore /etc/ssh/sshd_config --apply\n' "$0" "$config"
+
 elif [ "$mode" = diff ]; then
   [ -n "$restore_path" ] || ccdc_die "diff requires a backup file"
   [ -n "$source_path" ] || ccdc_die "diff requires --service-path CURRENT_PATH"

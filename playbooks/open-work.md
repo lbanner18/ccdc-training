@@ -65,16 +65,17 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 
 - [ ] 8. `baseline.sh` **and now `harden.sh`** appear in zero playbooks. Add to
       `linux-first-15-minutes.md`, `competition-day-playbook.md`, `GUIDE.md`, `ROADMAP.md`.
-- [ ] 9. `CCDC_BASELINE_ALLOW` is missing from `config/example.env`, so the packet
+- [x] 9. `CCDC_BASELINE_ALLOW` is missing from `config/example.env`, so the packet
       worksheet never teaches that the exception mechanism exists.
-- [ ] 10. Three documented commands that do not exist:
-      - `backup.sh --list` in **remediation-cards.md CARD 9** (pasted mid-incident)
-      - `baseline.sh --explain 2` in `baseline-design.md:143`
-      - `watch.sh --loop` in `baseline-design.md:267` (the flag is `--once`)
-- [ ] 11. Extend the ghost-flag assertion (pasteable-self-test #72) to scan
-      `playbooks/*.md`, `*.md`, `injects/**/*.md`. It only scans `linux/*.sh`, which is
-      exactly why item 10 survived.
-- [ ] 12. README assertion-count check is a `>= 250` floor and cannot detect staleness.
+- [x] 10. Documented commands that do not exist: `backup.sh --list` was real and
+      is now **implemented** (CARD 9 needs it - `--restore` is useless without a
+      way to see what there is to restore). `watch.sh --loop` corrected. The
+      `baseline.sh --explain` reference became true when item 3 shipped.
+
+- [x] 11. Extended the ghost-flag assertion (pasteable-self-test #72) to scan
+      to the docs. Scans only fenced code blocks and only paths-with-a-slash,
+      because prose legitimately says "policy.sh has no `--apply`". Negative-tested.
+- [x] 12. README assertion-count check was a `>= 250` floor and cannot detect staleness.
 
 ## P3 — not code, deadline-bound
 
