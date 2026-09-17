@@ -33,11 +33,11 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 ## P0 — agreed with Luke and not built (found 2026-09-17 by auditing the
 ## transcript instead of my own framing)
 
-- [ ] **A. One approval queue, three sources.** `harden.sh` was agreed to
-      PROPOSE into `baseline.sh`'s numbered list and be actioned by the same
-      `--approve N --apply`. It was built with its own `--cut`/`--undo` instead.
-      Fix: necessity findings appear in baseline's list; `harden.sh` keeps its
-      engine but loses its own action verbs.
+- [x] **A. One approval queue.** ~~harden.sh should propose, not act.~~
+      **Overridden by Luke 2026-09-17: harden.sh keeps `--cut`/`--undo`.** The
+      two actions are different shapes — `--approve` removes one thing that
+      should not exist; `--cut` is a bulk decision about a family that is
+      legitimately present, with a scored check and auto-rollback per cut.
 - [ ] **B. `baseline.sh` prints unexplained AND unnecessary together**, one
       numbered sequence. Today it prints only unexplained.
 - [ ] **C. A denominator.** Report coverage as a fraction of the known

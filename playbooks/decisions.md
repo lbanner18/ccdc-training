@@ -57,8 +57,19 @@ open item.
 > this implant' look and work identically. Three sources feed one approval
 > queue: harden (unnecessary), triage (unexplained), watch (drift)."
 
-**Status:** violated. `harden.sh` was built with its own `--cut` and `--undo`,
-a second action interface alongside `baseline.sh --approve`.
+**AMENDED 2026-09-17 by Luke, after seeing the built tool:** harden.sh KEEPS its
+own `--cut` / `--undo`. Do not remove them.
+
+The original reasoning was one interface for the whole kit. In practice the two
+actions are not the same shape and the difference is worth having: approving a
+finding removes ONE thing that should not be there, while cutting is a bulk
+decision about a whole family that is legitimately present — and it carries a
+scored-service check plus an automatic rollback after every single cut, which
+`--approve` does not need. A shared verb would have had to mean both.
+
+**Still open:** whether `baseline.sh` also LISTS the unnecessary findings, so
+there is one screen that shows everything, even though acting on them happens in
+`harden.sh`.
 
 ## D3b — Get a denominator (2026-09-17) — **NOT BUILT**
 
