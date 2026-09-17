@@ -51,6 +51,7 @@ ccdc_load_config "$config"
 # "<cfg>" is a shell redirect, not a placeholder: pasting it is a syntax error.
 printf -v qconfig '%q' "$config"
 printf -v qkit '%q' "$SCRIPT_DIR"
+printf -v qexample '%q' "$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)/config/example.env"
 
 if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 
@@ -113,13 +114,21 @@ done
 # That is twenty minutes on competition day to learn that a pipe was a space.
 # The shape is checkable in a hundred milliseconds before anything is written.
 check_field_list() {
-  local varname=$1 want=$2 label=$3 value line n bad=0
+  # min/max, not one exact count. The trailing recovery-unit field is OPTIONAL
+  # in both variables: watchdog.sh reads it with `IFS='|' read -r name host
+  # port service`, so a three-field TCP check leaves $service empty and the
+  # runtime loop's `[ -n "$service" ] && restart_service` simply does not fire.
+  # That is the documented "log only" form, and packet-to-config.md hands the
+  # operator exactly that shape. Demanding four fields rejected a config the
+  # worksheet told them to write - a preflight that fails a working config on
+  # competition morning is worse than no preflight.
+  local varname=$1 min=$2 max=$3 label=$4 value line n bad=0
   eval "value=\${$varname:-}"
   [ -n "$value" ] || return 0
   while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
     n=$(printf '%s' "$line" | awk -F'|' '{print NF}')
-    [ "$n" -eq "$want" ] && continue
+    [ "$n" -ge "$min" ] && [ "$n" -le "$max" ] && continue
     if [ "$bad" -eq 0 ]; then
       bad "$varname is not in the documented format"
       bad=1
@@ -132,27 +141,33 @@ check_field_list() {
       # the TCP case ("a space-separated list of host:port"), which reads as
       # nonsense above an HTTP check whose value is a URL - and a diagnosis
       # that does not match what you are looking at is worse than none.
-      printf '             no "|" at all - this needs %s separator(s), and the\n' "$((want - 1))"
-      printf '             value above has none. Write one entry per line.\n'
+      printf '             no "|" at all - this needs at least %s separator(s),\n' "$((min - 1))"
+      printf '             and the value above has none. Write one entry per line.\n'
+    elif [ "$n" -lt "$min" ]; then
+      printf '             %s field(s), needs at least %s\n' "$n" "$min"
     else
-      printf '             %s field(s), needs %s\n' "$n" "$want"
+      printf '             %s field(s), takes at most %s\n' "$n" "$max"
     fi
   done <<EOF
 $value
 EOF
   [ "$bad" -eq 0 ] && return 0
+  # Point at the file that HAS the documentation. A working config is usually a
+  # bare values file with the comments stripped, so "the format is documented
+  # above it" plus a grep of that same file shows the operator the broken line
+  # again and nothing else - an instruction that reads as a dead end.
   fixcmd "\$EDITOR $qconfig"
-  fixcmd "grep -n -A4 $(printf '%q' "$varname") $qconfig"
-  fixcmd "# every value's format is documented above it in config/example.env"
+  fixcmd "grep -n -B6 $(printf '%q' "$varname") $qexample"
+  fixcmd "# ^ the annotated reference; copy its format into $qconfig"
   return 1
 }
 
 if [ -n "${CCDC_TCP_CHECKS:-}" ]; then
-  check_field_list CCDC_TCP_CHECKS 4 'name|host|port|systemd-service' \
+  check_field_list CCDC_TCP_CHECKS 3 4 'name|host|port|systemd-service   (the unit is optional: omit it to log only)' \
     && good "CCDC_TCP_CHECKS parses"
 fi
 if [ -n "${CCDC_HTTP_CHECKS:-}" ]; then
-  check_field_list CCDC_HTTP_CHECKS 3 'name|url|systemd-service' \
+  check_field_list CCDC_HTTP_CHECKS 2 3 'name|url|systemd-service   (the unit is optional: omit it to log only)' \
     && good "CCDC_HTTP_CHECKS parses"
 fi
 

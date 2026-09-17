@@ -516,12 +516,63 @@ fi
 
 # A config value in the wrong SHAPE must fail in preflight, before anything is
 # written - not four steps later inside a restart-looping unit's journal.
-if grep -q 'check_field_list CCDC_TCP_CHECKS 4' "$armsh" \
-   && grep -q 'check_field_list CCDC_HTTP_CHECKS 3' "$armsh"; then
-  ok 'arm.sh validates the shape of the pipe-delimited config lists up front'
+#
+# Run it, do not grep it. The previous version of this assertion matched the
+# literal string "check_field_list CCDC_TCP_CHECKS 4", which pinned the field
+# COUNT rather than the behaviour - and that count was wrong: the trailing
+# recovery-unit field is optional, so the three-field log-only form that
+# packet-to-config.md documents was rejected as malformed. A test that pins an
+# argument cannot tell you the argument is incorrect.
+shape_dir=$(mktemp -d "${TMPDIR:-/tmp}/ccdc-shape.XXXXXX")
+cat >"$shape_dir/good.env" <<EOF
+CCDC_BOX_NAME="shape"
+CCDC_ALLOWED_USERS="root"
+CCDC_SYSTEMD_SERVICES=""
+CCDC_EVIDENCE_DIR="$shape_dir"
+CCDC_TCP_CHECKS="
+ssh|10.0.0.25|22
+db|10.0.0.25|3306|mysql
+"
+CCDC_HTTP_CHECKS="
+web|http://10.0.0.25:80/|nginx
+"
+EOF
+cat >"$shape_dir/bad.env" <<EOF
+CCDC_BOX_NAME="shape"
+CCDC_ALLOWED_USERS="root"
+CCDC_SYSTEMD_SERVICES=""
+CCDC_EVIDENCE_DIR="$shape_dir"
+CCDC_TCP_CHECKS="127.0.0.1:8080 127.0.0.1:22"
+CCDC_HTTP_CHECKS="a|b|c|d"
+EOF
+
+"$ROOT/linux/arm.sh" --config "$shape_dir/good.env" >"$shape_dir/good.out" 2>&1
+if grep -q 'ok: CCDC_TCP_CHECKS parses' "$shape_dir/good.out" \
+   && grep -q 'ok: CCDC_HTTP_CHECKS parses' "$shape_dir/good.out"; then
+  ok 'the documented check format - including the optional log-only unit - passes preflight'
+else
+  no 'preflight rejects the check format that packet-to-config.md documents'
+  grep -E 'CHECKS|field' "$shape_dir/good.out" | sed 's/^/    /' | head -8
+fi
+
+"$ROOT/linux/arm.sh" --config "$shape_dir/bad.env" >"$shape_dir/bad.out" 2>&1
+if grep -q 'PROBLEM: CCDC_TCP_CHECKS is not in the documented format' "$shape_dir/bad.out" \
+   && grep -q 'PROBLEM: CCDC_HTTP_CHECKS is not in the documented format' "$shape_dir/bad.out"; then
+  ok 'a space-separated list and a too-many-fields line are both caught in preflight'
 else
   no 'arm.sh does not validate config list format in preflight'
+  grep -E 'CHECKS|field' "$shape_dir/bad.out" | sed 's/^/    /' | head -8
 fi
+
+# The fix instruction has to point at a file that actually holds the format.
+# A working config is a bare values file; telling the operator the format is
+# "documented above it" there is a dead end.
+if grep -q 'config/example.env' "$shape_dir/bad.out"; then
+  ok 'the fix hint points at the annotated reference, not the stripped config'
+else
+  no 'the fix hint sends the operator back to their own comment-free config'
+fi
+rm -rf "$shape_dir"
 
 # Prose inside an EXPANDING heredoc is code. A backtick pair in a comment ran
 # `grep -rl` with no arguments on every guardian install, printed grep's usage
