@@ -437,9 +437,40 @@ check() {
   fi
 
   # 3. auditd hits against decoys or sensitive files - the real signal.
+  #
+  # Bounded, because ausearch can block indefinitely. On the lab box a
+  # `ausearch -k ccdc-canary -ts recent` sat for minutes against a log grown
+  # large by repeated drills, and because canary.sh is the FIRST thing
+  # watch.sh runs each pass, the whole detection loop stopped with it. A
+  # detector that hangs looks exactly like a detector that has nothing to
+  # report, which is the most dangerous way for this to fail.
+  #
+  # A timeout here degrades to "could not read the audit log this pass" and
+  # says so, which is a state the operator can see and act on.
   if ccdc_have ausearch; then
-    hits=$(ausearch -k ccdc-canary -ts recent 2>/dev/null | grep -c 'type=SYSCALL' || true)
-    shits=$(ausearch -k ccdc-sensitive -ts recent 2>/dev/null | grep -c 'type=SYSCALL' || true)
+    ausearch_bounded() {
+      if ccdc_have timeout; then
+        timeout "${CCDC_AUSEARCH_TIMEOUT:-20}" ausearch -k "$1" -ts recent 2>/dev/null
+      else
+        ausearch -k "$1" -ts recent 2>/dev/null
+      fi
+    }
+    # Capture the output first, THEN count it. `x=$(cmd | grep -c ...); rc=$?`
+    # reads grep's exit status, not the command's - so a timeout would have
+    # reported cleanly as zero events every time. This kit has shipped that
+    # mistake before with `head`.
+    canary_raw=$(ausearch_bounded ccdc-canary); ausearch_rc=$?
+    sens_raw=$(ausearch_bounded ccdc-sensitive); sens_rc=$?
+    hits=$(printf '%s\n' "$canary_raw" | grep -c 'type=SYSCALL' || true)
+    shits=$(printf '%s\n' "$sens_raw" | grep -c 'type=SYSCALL' || true)
+    if [ "${ausearch_rc:-0}" -eq 124 ] || [ "${sens_rc:-0}" -eq 124 ]; then
+      ccdc_warn "ausearch timed out: the audit log could not be read this pass.
+  This is NOT 'no events' - it is 'no answer'. Check the log size and the daemon:
+    sudo ls -lh /var/log/audit/audit.log
+    sudo systemctl status auditd
+  Raise the limit with CCDC_AUSEARCH_TIMEOUT if the box is just slow."
+      health_failed=1
+    fi
     [ "${hits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on decoy files\n' "$hits"; ccdc_append_log "$alertlog" "TRIP kind=audit_decoy events=$hits"; tripped=1; }
     [ "${shits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on sensitive files\n' "$shits"; ccdc_append_log "$alertlog" "TRIP kind=audit_sensitive events=$shits"; tripped=1; }
     if [ "${hits:-0}" -gt 0 ] || [ "${shits:-0}" -gt 0 ]; then
