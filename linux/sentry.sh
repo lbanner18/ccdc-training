@@ -402,6 +402,216 @@ can_automate() {
   return 0
 }
 
+# Why this one needs you, in the voice agreed for NEEDS YOU items.
+#
+# What was here before was a single line - "held: this finding needs judgement
+# or is not safely automatable" - printed under every held finding regardless of
+# what it was. That is the finish line the operator kept falling off: detection
+# is thorough, and then the tool says it will not help and does not say what to
+# do instead.
+#
+# The shape, for every one of these: what I found and when, why I will not touch
+# it, the one command that resolves the ambiguity, and what to do if the answer
+# is surprising. Never a bare path - a path is not a command.
+held_reason() {
+  local check=$1 subject=$2 desc=$3 payload unit home f fp comment n
+  case "$check" in
+
+    sshkey)
+      home=${subject%/.ssh/*}
+      printf '\n       A key in this file can log in as that account. Recognise every\n'
+      printf '       one of them or remove it.\n\n'
+      n=0
+      while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        fp=$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        comment=$(printf '%s' "$line" | awk '{print $NF}')
+        n=$((n + 1))
+        if [ -n "$fp" ]; then
+          printf '         %-52s %s\n' "$fp" "$comment"
+        else
+          printf '         (line %s could not be parsed as a key - look at it yourself)\n' "$n"
+        fi
+      done <"$subject" 2>/dev/null
+      printf '\n       I am not going to delete one for you, because deleting the wrong\n'
+      printf '       line locks you out of a box you are being scored on.\n\n'
+      printf '       You are logged in over SSH right now, and the key that let you in\n'
+      printf '       is written in the SSH log. This prints its fingerprint:\n\n'
+      printf '         sudo journalctl -u ssh | grep "Accepted publickey" | tail -1\n\n'
+      printf '       That one is yours. To delete a DIFFERENT one, paste the command\n'
+      printf '       printed under it below - each names its key by fingerprint, so you\n'
+      printf '       are never translating a row into an action, and the list re-sorting\n'
+      printf '       cannot change what a command deletes:\n\n'
+      while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        fp=$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        [ -n "$fp" ] || continue
+        comment=$(printf '%s' "$line" | awk '{print $NF}')
+        printf '         to delete %s:\n' "$comment"
+        printf '           sudo %s/baseline.sh --config %s \\\n' "$qkit" "$qconfig"
+        printf '                --remove-key %s --apply\n\n' "$fp"
+      done <"$subject" 2>/dev/null
+      printf '       That command refuses to remove the key your own session is using,\n'
+      printf '       so it cannot lock you out even if you paste the wrong one.\n'
+      return 0 ;;
+
+    crondeep)
+      unit=${subject%%::*}; payload=${subject#*::}
+      printf '\n       A scheduled job runs a file that contains a reverse shell.\n\n'
+      printf '         the job:     %s\n' "$unit"
+      printf '         it runs:     %s\n\n' "$payload"
+      printf '       This is not automated because the job lives in a SHARED crontab,\n'
+      printf '       where removing the file leaves the schedule behind and removing\n'
+      printf '       the whole crontab takes your own entries with it.\n\n'
+      printf '       Read both, then remove the payload and the line that calls it:\n\n'
+      printf '         sudo cat %q\n' "$payload"
+      printf '         sudo crontab -l -u %s\n\n' "$(basename -- "$unit")"
+      printf '         sudo cp -a %q /var/tmp/ccdc-evidence/\n' "$payload"
+      printf '         sudo rm -f %q\n' "$payload"
+      printf '         sudo crontab -e -u %s     # delete the line that ran it\n\n' "$(basename -- "$unit")"
+      printf '       Find what WROTE the job before you move on, or it comes back.\n'
+      return 0 ;;
+
+    tmpproc|netproc)
+      printf '\n       A process is running that should not be, and its evidence only\n'
+      printf '       exists while it is alive: the socket to whoever is on the other\n'
+      printf '       end, its parent - which is the way back in - and, if the file was\n'
+      printf '       deleted, the only copy of the executable left in existence.\n\n'
+      printf '       Kill it first and the incident report becomes "we found something\n'
+      printf '       and removed it". Capture first and it names an address and a\n'
+      printf '       parent process.\n\n'
+      printf '       Find it, then capture it, then kill it BY PID:\n\n'
+      printf '         sudo ls -l /proc/*/exe 2>/dev/null | grep -E "/(tmp|var/tmp|dev/shm)/"\n'
+      printf '         sudo %s/preserve.sh --config %s --pid PID --freeze --apply\n' "$qkit" "$qconfig"
+      printf '         sudo kill -9 PID\n\n'
+      printf '       Or let baseline.sh do the whole sequence, in order, and refuse to\n'
+      printf '       kill anything it could not capture first:\n\n'
+      printf '         sudo %s/baseline.sh --config %s\n' "$qkit" "$qconfig"
+      return 0 ;;
+
+    nopasswd)
+      printf '\n       Passwordless sudo is configured. Every line of it is a way to\n'
+      printf '       become root with no credential at all.\n\n'
+      printf '       Not automated because a malformed sudoers file locks EVERY account\n'
+      printf '       out of root, including yours, and the only way back is the console.\n\n'
+      printf '       Read them, and compare against what the packet says should exist:\n\n'
+      printf '         sudo grep -rn NOPASSWD /etc/sudoers /etc/sudoers.d/\n\n'
+      printf '       Change them with the editor that refuses to save a broken file:\n\n'
+      printf '         sudo visudo                       # the main file\n'
+      printf '         sudo visudo -f /etc/sudoers.d/THE_FILE\n'
+      printf '         sudo visudo -c                    # MUST say "parsed OK"\n\n'
+      printf '       Keep this shell open until visudo -c passes.\n'
+      return 0 ;;
+
+    netprocsvc)
+      printf '\n       An interpreter is holding a listening port. That is normal for a\n'
+      printf '       scored service written in python or php, and it is also exactly\n'
+      printf '       what a web shell looks like. The two are indistinguishable from\n'
+      printf '       the process name alone, which is why this needs you.\n\n'
+      printf '       Read the command line and the unit that owns it:\n\n'
+      printf '         sudo ss -tulnp | grep -i %q\n' "$(basename -- "$subject")"
+      printf '         sudo ps -o pid,ppid,unit,cmd -C %q\n\n' "$(basename -- "$subject")"
+      printf '       If the command line matches what the packet says you serve, it is\n'
+      printf '       your service. If it serves a directory you do not recognise, or it\n'
+      printf '       has no unit at all, it is not.\n'
+      return 0 ;;
+
+    etcchange)
+      printf '\n       Files under /etc changed in the last half hour. Early in an event\n'
+      printf '       most of these are yours, which is why it is amber and last.\n\n'
+      printf '       What changed:\n\n'
+      printf '         sudo find /etc -xdev -type f -mmin -30 -printf "%%TH:%%TM %%p\\n" | sort\n\n'
+      printf '       For anything you did not do, compare it against what shipped and\n'
+      printf '       against your own restore point:\n\n'
+      printf '         sudo %s/baseline.sh --config %s --status\n' "$qkit" "$qconfig"
+      printf '         sudo %s/backup.sh --config %s --list\n' "$qkit" "$qconfig"
+      printf '         sudo %s/backup.sh --config %s --diff /etc/THE_FILE\n' "$qkit" "$qconfig"
+      return 0 ;;
+
+    sshrootlogin|sshemptypw)
+      printf '\n       The SSH daemon is configured to allow a login it should not.\n\n'
+      printf '       Never automated, and not because it is hard: this is the config you\n'
+      printf '       are logged in THROUGH. A bad edit ends your session and the event.\n\n'
+      printf '       Read what the daemon will ACTUALLY do - this resolves every Include\n'
+      printf '       and names the file that set each value, so a drop-in enabling root\n'
+      printf '       logins is found while sshd_config still says no:\n\n'
+      printf '         sudo %s/sshd.sh --config %s\n\n' "$qkit" "$qconfig"
+      printf '       Then change it transactionally. It validates with sshd -t, arms a\n'
+      printf '       rollback, and only then reloads:\n\n'
+      printf '         sudo %s/sshd.sh --config %s --apply\n' "$qkit" "$qconfig"
+      printf '         # open a SECOND terminal and log in before the next line\n'
+      printf '         sudo %s/sshd.sh --config %s --confirm\n' "$qkit" "$qconfig"
+      return 0 ;;
+
+    suidunpackaged)
+      printf '\n       A setuid-root program that no package owns. Anyone who can run it\n'
+      printf '       runs it as root.\n\n'
+      printf '       Usually a packaging quirk, occasionally a backdoor, and the way to\n'
+      printf '       tell is whether it is a copy of a shell:\n\n'
+      printf '         sudo dpkg -S %q || sudo dpkg -S %q\n' "$subject" "${subject#/usr}"
+      printf '         sudo cmp -s -- %q /bin/dash && echo "THIS IS DASH - treat as RED"\n\n' "$subject"
+      printf '       If nothing owns it, clear the bit first - that neutralises it and\n'
+      printf '       leaves the file for evidence:\n\n'
+      printf '         sudo cp -a %q /var/tmp/ccdc-evidence/\n' "$subject"
+      printf '         sudo chmod -s %q\n' "$subject"
+      return 0 ;;
+
+    netunpackaged)
+      printf '\n       Something is listening on the network and no package owns the\n'
+      printf '       program behind it.\n\n'
+      printf '       Find the owner before you touch it - the unit, not the name:\n\n'
+      printf '         sudo %s/surface.sh --config %s\n\n' "$qkit" "$qconfig"
+      printf '       If the packet does not list that port as scored, it should not be\n'
+      printf '       reachable. Close it at the firewall and stop the thing serving it,\n'
+      printf '       in that order, so you are never relying on one of the two.\n'
+      return 0 ;;
+
+    port|udpport)
+      printf '\n       Something is listening that your config does not account for.\n\n'
+      printf '         %s\n\n' "$subject"
+      printf '       Not automated because closing a port the scoring engine is\n'
+      printf '       checking costs you that service for as long as it stays shut, and\n'
+      printf '       from inside the box the two look identical.\n\n'
+      printf '       Find what is holding it, by unit and package rather than by name:\n\n'
+      printf '         sudo %s/surface.sh --config %s\n\n' "$qkit" "$qconfig"
+      printf '       Then check that port against the packet. If the packet does not\n'
+      printf '       list it, stop the thing serving it AND close it at the firewall -\n'
+      printf '       in that order, so you are never relying on only one of the two:\n\n'
+      printf '         sudo systemctl stop THE_UNIT\n'
+      printf '         sudo %s/fw.sh --config %s --apply\n' "$qkit" "$qconfig"
+      printf '         sudo %s/fw.sh --config %s --confirm   # from a NEW connection\n' "$qkit" "$qconfig"
+      return 0 ;;
+
+    rogueunit)
+      printf '\n       A systemd unit that nothing accounts for.\n\n'
+      printf '         %s\n\n' "$subject"
+      printf '       Held rather than removed because a unit your scored service pulls\n'
+      printf '       in also looks like this, and removing one takes the service with\n'
+      printf '       it.\n\n'
+      printf '       Read what it actually runs, and what depends on it:\n\n'
+      printf '         sudo systemctl cat %s\n' "$(basename -- "$subject")"
+      printf '         sudo systemctl list-dependencies --reverse %s\n\n' "$(basename -- "$subject")"
+      printf '       If nothing scored depends on it and no package ships it, baseline\n'
+      printf '       will remove it with an evidence copy and restart anything scored\n'
+      printf '       that it touched:\n\n'
+      printf '         sudo %s/baseline.sh --config %s --status\n' "$qkit" "$qconfig"
+      return 0 ;;
+
+    rcdeep|rcfile)
+      printf '\n       A shell startup file runs something when that user logs in.\n\n'
+      printf '       Not automated: these files live in a directory the user owns and\n'
+      printf '       most of what is in them is legitimately theirs, so deleting the\n'
+      printf '       file is wrong and deleting the right LINE needs eyes.\n\n'
+      printf '       Look at the end of it, which is where an append lands:\n\n'
+      printf '         sudo tail -20 %q\n' "${subject#*::}"
+      printf '         diff /etc/skel/%s %q\n\n' "$(basename -- "${subject#*::}")" "${subject#*::}"
+      printf '       Anything that RUNS a command rather than setting a variable - a\n'
+      printf '       trap, a curl, a background job, a line ending in & - is the finding.\n'
+      return 0 ;;
+  esac
+  return 1
+}
+
 render_action() {
   local check=$1 subject=$2 user group unit target base owner rest dropin
   case "$check" in
@@ -533,28 +743,36 @@ write_alerts() {
         printf -v quoted '%q' "$subject"
         printf '    %-12s %s\n' "$check" "$quoted"
         printf '                 %s\n' "$desc"
-        case "$check" in
-          svcshell|admingroup|uid0|emptypw)
-            printf '                 held: protected/invalid account or unsafe subject.\n' ;;
-          unit|unittmp|unitdeep)
-            printf '                 held: protected unit or unsafe/non-current path.\n' ;;
-          netproc)
-            # Never automated, and not because it is hard to automate. The
-            # subject is a live process: its evidence lives only in memory, a
-            # PID is reused the moment it exits, and killing the shell before
-            # finding its parent loses the way back in. CARD 12 is the order.
-            printf '                 held: a LIVE process - freeze and capture it before killing it (CARD 12).\n' ;;
-          *) printf '                 held: this finding needs judgement or is not safely automatable.\n' ;;
-        esac
+        if ! held_reason "$check" "$subject" "$desc"; then
+          case "$check" in
+            svcshell|admingroup|uid0|emptypw)
+              printf '                 held: this account is protected by your config, or the\n'
+              printf '                 name is not one this tool will act on. Check it against\n'
+              printf '                 CCDC_ALLOWED_USERS before doing anything by hand.\n' ;;
+            unit|unittmp|unitdeep)
+              printf '                 held: the unit is protected by your config, or the path\n'
+              printf '                 is not the one that is live now. Read it first:\n'
+              printf '                   sudo systemctl cat %s\n' "$(basename -- "${subject%%::*}")" ;;
+            *)
+              printf '                 held: there is no automatic action for a %s finding\n' "$check"
+              printf '                 and no written reason here yet. That is a gap in this\n'
+              printf '                 tool, not a judgement about the finding - treat it by\n'
+              printf '                 hand and say so.\n' ;;
+          esac
+        fi
         printf '\n'
       done <"$findings"
       [ "$heldred" -eq 1 ] && printf '\n'
 
-      printf '  Reported but NOT actionable automatically (needs your judgement):\n'
+      printf '  NEEDS YOU - and here is exactly why\n\n'
       while IFS='|' read -r sev check subject desc; do
         [ "${sev:-}" = AMBER ] || continue
         printf -v quoted '%q' "$subject"
-        printf '    %-12s %s  - %s\n' "$check" "$quoted" "$desc"
+        printf '    %-12s %s\n' "$check" "$quoted"
+        printf '                 %s\n' "$desc"
+        held_reason "$check" "$subject" "$desc" || \
+          printf '                 held: no written guidance for a %s finding yet.\n' "$check"
+        printf '\n'
       done <"$findings"
     fi
 

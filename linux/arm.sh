@@ -175,14 +175,37 @@ EOF
   return 1
 }
 
-if [ -n "${CCDC_TCP_CHECKS:-}" ]; then
-  check_field_list CCDC_TCP_CHECKS 3 4 'name|host|port|systemd-service   (the unit is optional: omit it to log only)' \
-    && good "CCDC_TCP_CHECKS parses"
-fi
-if [ -n "${CCDC_HTTP_CHECKS:-}" ]; then
-  check_field_list CCDC_HTTP_CHECKS 2 3 'name|url|systemd-service   (the unit is optional: omit it to log only)' \
-    && good "CCDC_HTTP_CHECKS parses"
-fi
+# Validate through the SAME parser the runtime uses, not a second opinion.
+#
+# These were checked here with a field-count rule while watchdog.sh, baseline.sh
+# and harden.sh read them through ccdc_tcp_checks / ccdc_http_checks, which
+# accept both the documented name|host|port|service form AND the bare
+# "127.0.0.1:8080" spelling. So preflight refused to arm on a config every other
+# tool in the kit reads correctly - the exact "two tools disagree and you cannot
+# tell which is right" failure this kit keeps finding in itself.
+check_through_parser() {
+  local varname=$1 parser=$2 label=$3 warnings
+  eval "[ -n \"\${$varname:-}\" ]" || return 0
+  warnings=$("$parser" 2>&1 >/dev/null)
+  if [ -z "$warnings" ]; then
+    good "$varname parses"
+    return 0
+  fi
+  bad "$varname has entries this kit cannot read"
+  printf '%s\n' "$warnings" | sed 's/^ccdc: warning: /             /'
+  printf '             expected: %s\n' "$label"
+  printf '             or the short form, one per line: %s\n' \
+    "$([ "$varname" = CCDC_TCP_CHECKS ] && printf '127.0.0.1:8080' || printf 'http://127.0.0.1:8080/')"
+  fixcmd "\$EDITOR $qconfig"
+  fixcmd "grep -n -B6 $(printf '%q' "$varname") $qexample"
+  fixcmd "# ^ the annotated reference; copy its format into $qconfig"
+  return 1
+}
+
+check_through_parser CCDC_TCP_CHECKS ccdc_tcp_checks \
+  'name|host|port|systemd-service   (the unit is optional: omit it to log only)'
+check_through_parser CCDC_HTTP_CHECKS ccdc_http_checks \
+  'name|url|systemd-service   (the unit is optional: omit it to log only)'
 
 case "${CCDC_HTTP_CHECKS:-}" in
   *127.0.0.1*|*localhost*)

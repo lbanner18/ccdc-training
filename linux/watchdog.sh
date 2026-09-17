@@ -171,29 +171,33 @@ valid_service_name() {
 
 validate_checks() {
   local name host port service url path extra
+  # Validated through ccdc_tcp_checks / ccdc_http_checks - the SAME readers the
+  # rest of the kit uses. This function used to parse the raw variable itself
+  # and reject "127.0.0.1:8080", which lib/common.sh, arm.sh, baseline.sh and
+  # harden.sh all accept. The result was node-health-watch.service crash-looping
+  # every five seconds with "invalid TCP check name" while guardian reported
+  # only that it "did not become fully operational" - so the keep-alive, the one
+  # layer whose whole job is holding a scored service up, was dead and nothing
+  # said which layer or why.
   while IFS='|' read -r name host port service extra; do
     [ -n "${name:-}${host:-}${port:-}${service:-}${extra:-}" ] || continue
     [ -z "${extra:-}" ] || ccdc_die "TCP check has too many fields: $name"
-    case "$name" in ''|*[!A-Za-z0-9_.-]*) ccdc_die "invalid TCP check name: $name" ;; esac
+    case "$name" in ''|*[!A-Za-z0-9_.:/-]*) ccdc_die "invalid TCP check name: $name" ;; esac
     case "$host" in ''|*[!A-Za-z0-9_.:-]*) ccdc_die "invalid TCP check host: $host" ;; esac
     case "$port" in ''|*[!0-9]*) ccdc_die "invalid TCP check port for $name: $port" ;; esac
     [ "$port" -ge 1 ] && [ "$port" -le 65535 ] || ccdc_die "TCP check port out of range for $name: $port"
     [ -z "${service:-}" ] || valid_service_name "$service" \
       || ccdc_die "invalid TCP recovery service for $name: $service"
-  done <<EOF
-${CCDC_TCP_CHECKS:-}
-EOF
+  done < <(ccdc_tcp_checks)
   while IFS='|' read -r name url service extra; do
     [ -n "${name:-}${url:-}${service:-}${extra:-}" ] || continue
     [ -z "${extra:-}" ] || ccdc_die "HTTP check has too many fields: $name"
-    case "$name" in ''|*[!A-Za-z0-9_.-]*) ccdc_die "invalid HTTP check name: $name" ;; esac
+    case "$name" in ''|*[!A-Za-z0-9_.:/-]*) ccdc_die "invalid HTTP check name: $name" ;; esac
     case "$url" in http://*|https://*) ;; *) ccdc_die "HTTP check URL must start with http:// or https://: $url" ;; esac
     case "$url" in *[[:space:]'|']*) ccdc_die "HTTP check URL contains whitespace or a delimiter: $url" ;; esac
     [ -z "${service:-}" ] || valid_service_name "$service" \
       || ccdc_die "invalid HTTP recovery service for $name: $service"
-  done <<EOF
-${CCDC_HTTP_CHECKS:-}
-EOF
+  done < <(ccdc_http_checks)
   for service in ${CCDC_SYSTEMD_SERVICES:-}; do
     valid_service_name "$service" || ccdc_die "invalid systemd service name: $service"
   done
@@ -423,9 +427,7 @@ run_once() {
       log_state "tcp:$name" bad "tcp_unhealthy name=$name host=$host port=$port"
       [ -n "${service:-}" ] && restart_service "$service" tcp "$host|$port"
     fi
-  done <<EOF
-${CCDC_TCP_CHECKS:-}
-EOF
+  done < <(ccdc_tcp_checks)
 
   while IFS='|' read -r name url service; do
     [ -n "${name:-}" ] || continue
@@ -439,9 +441,7 @@ EOF
       log_state "http:$name" bad "http_unhealthy name=$name url=$url"
       [ -n "${service:-}" ] && restart_service "$service" http "$url"
     fi
-  done <<EOF
-${CCDC_HTTP_CHECKS:-}
-EOF
+  done < <(ccdc_http_checks)
 
   for service in ${CCDC_SYSTEMD_SERVICES:-}; do
     # Already restarted and verified above via its endpoint check.

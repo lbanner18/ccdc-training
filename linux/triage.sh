@@ -991,7 +991,14 @@ begin
 tmpproc=$(ls -l /proc/*/exe 2>/dev/null | grep -E '/(tmp|var/tmp|dev/shm)/' | head -10)
 if [ -n "$tmpproc" ]; then
   red "process(es) executing from /tmp, /var/tmp or /dev/shm   [CARD 6]"
-  emit RED tmpproc "see-log" "process executing from a world-writable directory"
+  # Name the process, not "see-log". A finding whose subject is a literal
+  # instruction to go and read something else cannot be acted on, and sentry
+  # printed it as the identifier.
+  printf '%s\n' "$tmpproc" | while IFS= read -r l; do
+    [ -n "$l" ] || continue
+    emit RED tmpproc "$(printf '%s' "$l" | sed 's|.*/proc/\([0-9]*\)/exe.*-> |pid\1:|')" \
+      "process executing from a world-writable directory"
+  done
   while IFS= read -r l; do detail "$(printf '%s' "$l" | cut -c1-110)"; done <<EOF
 $tmpproc
 EOF
@@ -1782,7 +1789,7 @@ begin
 recent=$(find /etc -xdev -type f -mmin -30 2>/dev/null | grep -vE '/(mtab|resolv.conf|adjtime|.*\.lock)$' | head -8)
 if [ -n "$recent" ]; then
   amber "/etc file(s) modified in the last 30 minutes   [CARD 9]"
-  emit AMBER etcchange "see-log" "/etc changed recently"
+  emit AMBER etcchange "$(printf '%s\n' "$recent" | head -1)" "/etc changed recently"
   detail "if you did not change these, someone else did"
   for f in $recent; do detail "$(date -r "$f" '+%H:%M') $f"; done
   fixhdr

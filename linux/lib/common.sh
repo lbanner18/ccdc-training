@@ -247,23 +247,73 @@ ccdc_tcp_checks() {
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
     if [ "${line#*|}" != "$line" ]; then
-      IFS='|' read -r name host port svc <<INNER
+      IFS='|' read -r name host port svc extra <<INNER
 $line
 INNER
+      if [ -n "${extra:-}" ]; then
+        ccdc_warn "CCDC_TCP_CHECKS: too many fields in '$line' (want name|host|port|service)"
+        continue
+      fi
       if [ -z "${port:-}" ]; then
         ccdc_warn "CCDC_TCP_CHECKS: no port in '$line' (want name|host|port|service)"
         continue
       fi
+      case "$port" in
+        ''|*[!0-9]*) ccdc_warn "CCDC_TCP_CHECKS: '$port' is not a port number in '$line'"; continue ;;
+      esac
       printf '%s|%s|%s|%s\n' "${name:-$host:$port}" "$host" "$port" "${svc:-}"
     else
       for tok in $line; do
         case "$tok" in
-          *:*) printf '%s|%s|%s|\n' "$tok" "${tok%:*}" "${tok##*:}" ;;
+          *:*)
+            case "${tok##*:}" in
+              ''|*[!0-9]*) ccdc_warn "CCDC_TCP_CHECKS: '$tok' has no port number" ;;
+              *) printf '%s|%s|%s|\n' "$tok" "${tok%:*}" "${tok##*:}" ;;
+            esac ;;
           *) ccdc_warn "CCDC_TCP_CHECKS: cannot read '$tok' as host:port or name|host|port|service" ;;
         esac
       done
     fi
   done <<OUTER
 ${CCDC_TCP_CHECKS:-}
+OUTER
+}
+
+# Emit CCDC_HTTP_CHECKS as normalised name|url|service lines.
+#
+# Same deal as ccdc_tcp_checks: the documented form is name|url|systemd-service
+# and the common way to write it is a bare URL. Accept both rather than be right
+# and useless, and warn on anything that is neither.
+ccdc_http_checks() {
+  local line name url svc tok
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    if [ "${line#*|}" != "$line" ]; then
+      IFS='|' read -r name url svc extra <<INNER
+$line
+INNER
+      if [ -n "${extra:-}" ]; then
+        ccdc_warn "CCDC_HTTP_CHECKS: too many fields in '$line' (want name|url|service)"
+        continue
+      fi
+      if [ -z "${url:-}" ]; then
+        ccdc_warn "CCDC_HTTP_CHECKS: no URL in '$line' (want name|url|service)"
+        continue
+      fi
+      case "$url" in
+        http://*|https://*) ;;
+        *) ccdc_warn "CCDC_HTTP_CHECKS: '$url' is not an http:// or https:// URL in '$line'"; continue ;;
+      esac
+      printf '%s|%s|%s\n' "${name:-$url}" "$url" "${svc:-}"
+    else
+      for tok in $line; do
+        case "$tok" in
+          http://*|https://*) printf '%s|%s|\n' "$tok" "$tok" ;;
+          *) ccdc_warn "CCDC_HTTP_CHECKS: cannot read '$tok' as a URL or name|url|service" ;;
+        esac
+      done
+    fi
+  done <<OUTER
+${CCDC_HTTP_CHECKS:-}
 OUTER
 }

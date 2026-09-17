@@ -248,3 +248,78 @@ if ! bwrap --die-with-parent --unshare-user --uid 0 --gid 0 --unshare-pid \
   [ ! -f "$test_root/state/sentry.log" ] || tail -n 30 "$test_root/state/sentry.log" >&2
   exit 1
 fi
+
+# --- source-level guarantees, on the host ------------------------------------
+#
+# These read the scripts rather than run them, so they belong out here: inside
+# the sandbox $ROOT is not set and they silently did nothing while making the
+# whole suite exit non-zero.
+hpass=0; hfail=0
+hok() { hpass=$((hpass + 1)); printf 'ok - %s\n' "$1"; }
+hno() { hfail=$((hfail + 1)); printf 'not ok - %s\n' "$1"; }
+
+# --- every check triage can emit must be answered by sentry --------------------
+#
+# This is the finish-line guarantee, and it is the one that was missing. Sentry
+# printed one line - "held: this finding needs judgement or is not safely
+# automatable" - under every finding it would not act on, regardless of what the
+# finding was. Detection was thorough and then the tool went quiet at the exact
+# moment the operator needed it.
+#
+# So: every check type triage emits must be EITHER actionable by sentry, or have
+# written guidance in held_reason that says what to compare and what to run.
+gap=$(python3 - "$ROOT" <<'SCAN'
+import re, sys, os
+root = sys.argv[1]
+triage = open(os.path.join(root, 'linux', 'triage.sh'), encoding='utf-8').read()
+sentry = open(os.path.join(root, 'linux', 'sentry.sh'), encoding='utf-8').read()
+
+emitted = set(re.findall(r'emit\s+\w+\s+([a-z0-9]+)\s', triage))
+
+def arms(src, fn):
+    m = re.search(r'\n' + fn + r'\(\) \{(.*?)\n\}\n', src, re.S)
+    if not m:
+        return set()
+    out = set()
+    for line in m.group(1).splitlines():
+        mm = re.match(r'^\s*([a-z0-9|]+)\)', line)
+        if mm:
+            for part in mm.group(1).split('|'):
+                if part and part != '*':
+                    out.add(part)
+    return out
+
+answered = arms(sentry, 'actionable') | arms(sentry, 'held_reason') | arms(sentry, 'render_action')
+print(' '.join(sorted(k for k in emitted if k not in answered)))
+SCAN
+)
+if [ -z "$gap" ]; then
+  hok 'every check triage emits is either actionable or has written guidance'
+else
+  hno "checks with no action and no written reason:$gap"
+fi
+
+# The generic line must not be the answer for anything real.
+if grep -q 'this finding needs judgement or is not safely automatable' "$ROOT/linux/sentry.sh"; then
+  hno 'the generic "needs judgement" boilerplate is still printed'
+else
+  hok 'the generic "needs judgement" boilerplate is gone'
+fi
+
+# Guidance has to hand over a command, not a path. A path cannot be pasted.
+if awk '/^held_reason\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -qE 'sudo |diff |grep '; then
+  hok 'the guidance hands over commands, not bare paths'
+else
+  hno 'the guidance names files without saying how to open them'
+fi
+
+# Never by list position: the list re-sorts between reading and acting.
+if awk '/^held_reason\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -qE '\-\-key [ab]\b'; then
+  hno 'a destructive command identifies its target by position in a list'
+else
+  hok 'destructive commands name their target, never a row letter'
+fi
+
+
+printf 'sentry source checks: %s passed, %s failed\n' "$hpass" "$hfail"
+[ "$hfail" -eq 0 ] || exit 1

@@ -23,7 +23,10 @@ run_suite() {
   local out rc=0
   out=$(bash "$@" 2>&1) || rc=$?
   printf '%s\n' "$out"
-  printf '%s\n' "$out" | tail -1 >>"$tally"
+  # ALL tally lines, not just the last: sentry-self-test reports a sandboxed
+  # tally and then a source-level one, and taking only the final line silently
+  # dropped twenty-seven assertions from the total.
+  printf '%s\n' "$out" | grep -E '[0-9]+ passed' >>"$tally" || true
   return "$rc"
 }
 

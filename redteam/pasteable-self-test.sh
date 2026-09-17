@@ -563,8 +563,21 @@ CCDC_BOX_NAME="shape"
 CCDC_ALLOWED_USERS="root"
 CCDC_SYSTEMD_SERVICES=""
 CCDC_EVIDENCE_DIR="$shape_dir"
-CCDC_TCP_CHECKS="127.0.0.1:8080 127.0.0.1:22"
+CCDC_TCP_CHECKS="host:notaport"
 CCDC_HTTP_CHECKS="a|b|c|d"
+EOF
+# The SHORT spelling is valid on purpose. The operator's real config is written
+# "127.0.0.1:8080 127.0.0.1:22", every runtime reader accepts it through
+# ccdc_tcp_checks, and preflight rejecting it meant arm refused to start on a
+# config the rest of the kit reads correctly - while watchdog crash-looped on
+# the same variable for a different reason.
+cat >"$shape_dir/short.env" <<EOF
+CCDC_BOX_NAME="shape"
+CCDC_ALLOWED_USERS="root"
+CCDC_SYSTEMD_SERVICES=""
+CCDC_EVIDENCE_DIR="$shape_dir"
+CCDC_TCP_CHECKS="127.0.0.1:8080 127.0.0.1:22"
+CCDC_HTTP_CHECKS="http://127.0.0.1:8080/"
 EOF
 
 "$ROOT/linux/arm.sh" --config "$shape_dir/good.env" >"$shape_dir/good.out" 2>&1
@@ -576,13 +589,22 @@ else
   grep -E 'CHECKS|field' "$shape_dir/good.out" | sed 's/^/    /' | head -8
 fi
 
+"$ROOT/linux/arm.sh" --config "$shape_dir/short.env" >"$shape_dir/short.out" 2>&1
+if grep -q 'ok: CCDC_TCP_CHECKS parses' "$shape_dir/short.out" \
+   && grep -q 'ok: CCDC_HTTP_CHECKS parses' "$shape_dir/short.out"; then
+  ok 'the short host:port and bare-URL spellings pass preflight too'
+else
+  no 'preflight rejects a spelling every runtime reader in the kit accepts'
+  grep -E 'CHECKS|cannot read|not a port' "$shape_dir/short.out" | sed 's/^/    /' | head -8
+fi
+
 "$ROOT/linux/arm.sh" --config "$shape_dir/bad.env" >"$shape_dir/bad.out" 2>&1
-if grep -q 'PROBLEM: CCDC_TCP_CHECKS is not in the documented format' "$shape_dir/bad.out" \
-   && grep -q 'PROBLEM: CCDC_HTTP_CHECKS is not in the documented format' "$shape_dir/bad.out"; then
-  ok 'a space-separated list and a too-many-fields line are both caught in preflight'
+if grep -q 'CCDC_TCP_CHECKS has entries this kit cannot read' "$shape_dir/bad.out" \
+   && grep -q 'CCDC_HTTP_CHECKS has entries this kit cannot read' "$shape_dir/bad.out"; then
+  ok 'a bad port and a too-many-fields line are both caught in preflight'
 else
   no 'arm.sh does not validate config list format in preflight'
-  grep -E 'CHECKS|field' "$shape_dir/bad.out" | sed 's/^/    /' | head -8
+  grep -E 'CHECKS|cannot read|not a port' "$shape_dir/bad.out" | sed 's/^/    /' | head -8
 fi
 
 # The fix instruction has to point at a file that actually holds the format.
