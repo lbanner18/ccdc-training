@@ -1465,8 +1465,14 @@ do_action() {
 card_for() {
   case "$1" in
     uid0)      printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
-    sudorule|sudogrp|rootadj)
-               printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
+    # An account sitting next to root in /etc/passwd is CARD 1. A sudo RULE is
+    # not - it is the same thing the file it came from is, and that file is
+    # already sent to CARD 7, so the rule inside it was pointing somewhere
+    # else. Group membership grants root without any sudoers file changing at
+    # all, which is the second half of CARD 10.
+    rootadj)   printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
+    sudorule)  printf 'playbooks/remediation-cards.md  CARD 7 - passwordless sudo you did not configure' ;;
+    sudogrp)   printf 'playbooks/remediation-cards.md  CARD 10 - service account with a shell, or in an admin group' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
     usershell) printf 'playbooks/remediation-cards.md  CARD 11 - shell start-up file that launches something' ;;
