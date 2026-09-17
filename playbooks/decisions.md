@@ -149,3 +149,48 @@ Recurring bug class, found four separate times in one night: a safety check that
 compares an empty list, a port probe that finds nothing to probe and returns
 success, a capture that fails and is reported as honoured. Any check that could
 not execute says so.
+
+## D11 — Every finding ties to a card (2026-09-17, Luke's instruction)
+
+> "don't just check cards for what's showing up rn, look at all the
+> possibilities we've looked at and make sure each possible output is tied to a
+> card, write it fresh if you need to"
+
+Every finding the kit can emit carries a `more:` line naming a real card —
+approvable **and** needs-you, and especially needs-you, because that is where
+the operator has to decide something and a reference is the difference between
+deciding and guessing.
+
+The kit emits **60 distinct finding kinds** across baseline.sh, triage.sh and
+harden.sh. A reference to a card that does not exist, or to the wrong card,
+costs a page-turn to discover and is worse than none.
+
+Cards written 2026-09-17 to close the gaps found by enumerating all 60:
+- **CARD 13** SSH is configured to let them in (`sshrootlogin`, `sshemptypw`) —
+  these are permanent NEEDS-YOU items and had no card at all; they were being
+  pointed at CARD 8, which is listening ports.
+- **CARD 14** a kernel module that was not loaded when you froze the box
+- **CARD 15** a user-level service, running as someone who is not logged in
+- **CARD 16** something is running that nothing needs (harden.sh's necessity
+  findings, which are a different category from every other card: nothing on it
+  is an implant)
+
+## D12 — Sentry's finish line (2026-09-17) — **IN PROGRESS**
+
+The original count: 27 check types, 14 with an action, 13 without. Of the 13,
+nine were "simply unwritten" and four are deliberate holds (`sshrootlogin`,
+`sshemptypw`, `etcchange`, and `sshkey` as the judgement call).
+
+**Built 2026-09-17:** `nopasswd`, `suidunpackaged`, `rogueunit`, `tmpproc`,
+`netproc`. Each captures evidence first; `rogueunit` re-checks the scored
+services and restores the unit if one stops answering; the live-process actions
+refuse to kill anything they could not capture.
+
+**Still to do:** `port`, `udpport`, `netunpackaged`, `netprocsvc`. These name a
+PORT or a process that may BE the scored service, so each needs the
+scored-check-and-rollback that harden.sh --cut uses. Not yet written.
+
+**Also fixed on the way:** `nopasswd` emitted the literal subject `"sudoers"` —
+a category, not a target, so it could never be acted on. It now emits one
+finding per file, RED for a drop-in that postdates the box and AMBER for the
+rest. Same defect as the old `see-log` subjects.

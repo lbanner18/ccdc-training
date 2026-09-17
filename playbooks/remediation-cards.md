@@ -754,3 +754,251 @@ uptime you just protected.
 If the same finding comes back after you cleaned it, you removed the artifact
 and missed the way back in. Go back to the card's "way back in" section and work
 all of it, not the first command.
+
+---
+
+## CARD 13 — SSH is configured to let them in
+
+`RED  root login is permitted` · `RED  empty passwords are accepted`
+
+This is the config you are logged in **through**. Every other card can be
+undone from where you are sitting; this one can end your session and your
+access to a scored box in the same second. Read first, change transactionally,
+and never edit a file and reload in one step.
+
+### Find it yourself
+
+The setting you care about is not necessarily in the file you would open.
+`sshd_config` can say `PermitRootLogin no` while a drop-in two directories away
+says yes, and the daemon obeys the drop-in. So ask the daemon, not the file:
+
+```bash
+# what the daemon will ACTUALLY do - this resolves every Include
+sudo sshd -T | grep -Ei 'permitrootlogin|permitemptypasswords|passwordauth'
+
+# and WHICH file set it
+sudo sshd -T -f /etc/ssh/sshd_config 2>/dev/null >/dev/null; \
+  grep -rn -Ei 'permitrootlogin|permitemptypasswords' \
+  /etc/ssh/sshd_config /etc/ssh/sshd_config.d/ 2>/dev/null
+```
+
+Three access paths no `authorized_keys` check can see, all legitimate config,
+all a way in:
+
+```bash
+sudo sshd -T | grep -Ei 'authorizedkeyscommand|trustedusercakeys|authorizedkeysfile'
+```
+
+- `AuthorizedKeysCommand` runs a program to produce keys. Read that program.
+- `TrustedUserCAKeys` trusts a certificate authority. Any key it signs works.
+- `AuthorizedKeysFile` pointed somewhere unusual means the file you are
+  auditing is not the file being consulted.
+
+`Match` blocks are **not** evaluated by `sshd -T`. Read them by eye:
+
+```bash
+sudo grep -rn -A5 '^Match' /etc/ssh/sshd_config /etc/ssh/sshd_config.d/
+```
+
+### Fix it
+
+Do not hand-edit and reload. `sshd.sh` snapshots, writes a drop-in, validates
+with `sshd -t`, arms a rollback that survives your session dying, and only then
+reloads:
+
+```bash
+sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env                 # read-only
+sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --dry-run       # the plan
+sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --apply         # arms rollback
+```
+
+**Now open a second terminal and log in.** Do not test in the session you
+already have — an existing connection survives a config that refuses new ones,
+so testing in place proves nothing.
+
+```bash
+sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --confirm       # only if it worked
+sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --rollback      # if it did not
+```
+
+If you do nothing, it reverts on its own.
+
+### What it costs you to get wrong
+
+Locking yourself out of a Linux box mid-event means every remaining finding on
+it goes unworked, and the console may not be available to you. That is why this
+one is never automated, and why the rollback is armed before the change rather
+than after.
+
+### If the setting keeps coming back
+
+Something is rewriting it. Look for the mechanism, not the file:
+
+```bash
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --status
+sudo systemctl list-timers --all | grep -iE 'ssh|config'
+sudo grep -rn 'sshd_config' /etc/cron* /var/spool/cron/crontabs/ 2>/dev/null
+```
+
+---
+
+## CARD 14 — a kernel module that was not loaded when you froze the box
+
+`RED  module  <name>`
+
+A loaded kernel module runs in ring 0. It can hide processes from `ps`, hide
+files from `ls`, hide its own entry from `lsmod`, and lie to every tool on this
+list including this kit. If one appeared after you blessed the box, treat the
+box's own answers as unreliable from that moment.
+
+### Find it yourself
+
+```bash
+# what is loaded now
+lsmod | sort
+
+# what the module claims to be, and where it came from
+modinfo MODULENAME | head -20
+
+# does any package own that file?
+dpkg -S "$(modinfo -n MODULENAME 2>/dev/null)" 2>/dev/null || echo "NO PACKAGE OWNS IT"
+```
+
+A module whose file lives outside `/lib/modules/$(uname -r)/kernel/` — or that
+no package owns — is not a distribution module.
+
+### Fix it
+
+```bash
+sudo cp -a "$(modinfo -n MODULENAME)" /var/tmp/ccdc-evidence/   # evidence FIRST
+sudo rmmod MODULENAME
+```
+
+If `rmmod` says the module is in use and nothing legitimate is using it, that
+resistance is itself the finding. Stop it from coming back across a reboot:
+
+```bash
+echo "blacklist MODULENAME" | sudo tee /etc/modprobe.d/ccdc-blacklist.conf
+echo "install MODULENAME /bin/false" | sudo tee -a /etc/modprobe.d/ccdc-blacklist.conf
+sudo depmod -a
+```
+
+### What this costs you to get wrong
+
+Removing a storage or network module can take the box off the network or make
+the filesystem unreadable. Check `modinfo` for what it actually is before you
+remove anything you did not plant yourself. `nf_*`, `virtio_*`, `ahci`, `ext4`
+and the like are the machine working.
+
+### If you cannot remove it
+
+A module that will not unload, or that reappears, means the box can no longer
+be trusted to describe itself. Say so in the incident report, keep the scored
+service up, and treat every subsequent "clean" result from this host as
+unconfirmed. The only authoritative check left is from **off** the box: does
+the scoring engine still see the service behaving correctly.
+
+---
+
+## CARD 15 — a user-level service, running as someone who is not logged in
+
+`RED  userunit  /home/USER/.config/systemd/user/NAME.service`
+
+Everyone looks at `/etc/systemd/system`. Systemd will also run units out of a
+user's own home directory, as that user, and with **lingering** enabled they
+start at boot with nobody logged in. `systemctl list-units` as root does not
+show them.
+
+### Find it yourself
+
+```bash
+# the files themselves - every home, not just yours
+sudo find /home /root -path '*/.config/systemd/user/*' -name '*.service' -o \
+     -path '*/.config/systemd/user/*' -name '*.timer' 2>/dev/null
+
+# who is allowed to run services with nobody logged in
+ls -la /var/lib/systemd/linger/
+
+# and what that user is actually running
+sudo systemctl --user -M USER@ list-units --type=service --no-pager 2>/dev/null
+```
+
+### Fix it
+
+`systemctl --user` will not work from a root shell the way you expect — it
+talks to that user's own session bus, which may not exist. Use `-M USER@`, or
+disable lingering first so the unit cannot start at all:
+
+```bash
+sudo cp -a THE_UNIT_FILE /var/tmp/ccdc-evidence/            # evidence FIRST
+sudo loginctl disable-linger USER
+sudo systemctl --user -M USER@ disable --now NAME.service 2>/dev/null
+sudo rm -f THE_UNIT_FILE
+```
+
+Then confirm nothing of that user's is still running:
+
+```bash
+ps -u USER -o pid,etime,cmd
+```
+
+### If the account should not exist at all
+
+Removing the unit leaves the account. If the account is also a finding, work
+CARD 1 or CARD 10 as well — otherwise they simply write the unit again.
+
+---
+
+## CARD 16 — something is running that nothing needs
+
+`units  snapd` · `pkg  telnet` · reported by `harden.sh`, not by `triage.sh`
+
+This card is different from every other one here. Nothing on it is an implant.
+Every item is legitimate, package-owned software that would pass a provenance
+check forever. The finding is that **no scored service needs it**, and every
+daemon you do not need is attack surface you are defending for no points.
+
+### Find it yourself
+
+```bash
+sudo ./linux/harden.sh --config /tmp/ccdc-linux.env              # read-only
+sudo ./linux/harden.sh --config /tmp/ccdc-linux.env --explain 3  # the full case
+```
+
+Read the **WILL NOT TOUCH** block as carefully as the rest. It exists so you
+can see what was considered and deliberately kept, rather than wondering.
+
+### Fix it
+
+```bash
+sudo ./linux/harden.sh --config /tmp/ccdc-linux.env --cut all-safe --apply
+sudo ./linux/harden.sh --config /tmp/ccdc-linux.env --undo --apply    # all of it back
+```
+
+After every single cut it re-checks the scored services and reverses that one
+cut by itself if any stops answering, so a wrong call costs one item and a few
+seconds rather than a scoring round.
+
+### The two that are not obvious
+
+**cloud-init is a persistence mechanism, not just surface.** It re-runs on every
+boot and re-applies users and SSH keys from `/var/lib/cloud`. An account you
+removed during an incident comes back after the next reboot with nothing in the
+logs to explain it.
+
+**open-vm-tools is a judgement call the packet decides.** Its guest-operations
+channel can execute commands inside the VM — real attack surface — and it is
+also how competition infrastructure may reach the box. On KVM it is dead weight.
+On VMware, cutting it costs you the console.
+
+### Order matters
+
+Harden **before** you bless. Cut first, then freeze what is left:
+
+```bash
+sudo ./linux/harden.sh   --config /tmp/ccdc-linux.env --cut all-safe --apply
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
+```
+
+Blessing first and hardening after makes every cut you make read as drift for
+the rest of the event.

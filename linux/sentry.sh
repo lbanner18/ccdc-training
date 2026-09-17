@@ -413,6 +413,34 @@ can_automate() {
 # The shape, for every one of these: what I found and when, why I will not touch
 # it, the one command that resolves the ambiguity, and what to do if the answer
 # is surprising. Never a bare path - a path is not a command.
+# Which printed card covers this finding?
+#
+# Every item carries one, approvable or not - and especially the ones that need
+# a human, because those are the ones where the operator has to decide something
+# and a reference is the difference between deciding and guessing. A reference
+# that points at the WRONG card is worse than none: it costs a page-turn to
+# discover it was wrong.
+card_for() {
+  case "$1" in
+    uid0|emptypw|rootadj)   printf 'CARD 1 - UID-0 account that is not root' ;;
+    sshkey)                 printf 'CARD 2 - SSH key you do not recognise' ;;
+    cron|crondeep)          printf 'CARD 3 - scheduled job that calls home' ;;
+    unit|unittmp|unitdeep|unitdropin|unitdropindeep|rogueunit)
+                            printf 'CARD 4 - systemd unit that calls home, or runs from /tmp' ;;
+    suid|suidunpackaged)    printf 'CARD 5 - SUID interpreter' ;;
+    tmpproc|netproc)        printf 'CARD 6 - process running from /tmp, or with a deleted executable' ;;
+    nopasswd)               printf 'CARD 7 - passwordless sudo you did not configure' ;;
+    port|udpport|netunpackaged)
+                            printf 'CARD 8 - unexpected listening port' ;;
+    etcchange)              printf 'CARD 9 - /etc changed and it was not you' ;;
+    svcshell|admingroup)    printf 'CARD 10 - service account with a shell, or in an admin group' ;;
+    rcdeep|rcfile)          printf 'CARD 11 - shell start-up file that launches something' ;;
+    netprocsvc)             printf 'CARD 12 - a shell or interpreter is holding a network connection' ;;
+    sshrootlogin|sshemptypw) printf 'CARD 13 - SSH is configured to let them in' ;;
+    *)                      printf 'playbooks/remediation-cards.md' ;;
+  esac
+}
+
 # Is guardian currently holding sentry's tree to a frozen copy?
 guardian_is_armed() {
   local g=${CCDC_GUARDIAN_DIR:-/usr/local/lib/node-health}
@@ -768,7 +796,8 @@ write_alerts() {
         # In bash "[2]" is a glob - a character class - and with no file named
         # "2" to match, it reaches the tool as the literal string "[2]" and is
         # rejected as not a number. The operator did exactly what was printed.
-        printf '        approve: sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve %s --apply\n\n' "$i"
+        printf '        approve: sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve %s --apply\n' "$i"
+        printf '        more:  playbooks/remediation-cards.md  %s\n\n' "$(card_for "$check")"
       done <"$queue"
     fi
 
@@ -801,6 +830,8 @@ write_alerts() {
               printf '                 hand and say so.\n' ;;
           esac
         fi
+        printf '                 more:  playbooks/remediation-cards.md  %s\n' \
+          "$(card_for "$check")"
         printf '\n'
       done <"$findings"
       [ "$heldred" -eq 1 ] && printf '\n'
@@ -814,6 +845,8 @@ write_alerts() {
         printf '                 %s\n' "$desc"
         held_reason "$check" "$subject" "$desc" || \
           printf '                 held: no written guidance for a %s finding yet.\n' "$check"
+        printf '                 more:  playbooks/remediation-cards.md  %s\n' \
+          "$(card_for "$check")"
         printf '\n'
       done <"$findings"
     fi
@@ -1091,6 +1124,139 @@ action_rcfile() {
   cat "$tmp" >"$source"
 }
 
+# --- the actions that were "simply unwritten" ---------------------------------
+#
+# Each of these was detected and then not offered, which is where the operator
+# fell off: thorough detection, silence at the finish line. Every one captures
+# evidence first, acts, and where it can take a scored service down, checks the
+# service afterwards.
+
+# A sudoers drop-in written AFTER the box was built. Never /etc/sudoers itself,
+# and never a file that predates the box - that one is probably the image's or
+# yours. visudo -c decides whether it worked, because a sudoers file that no
+# longer parses locks every account out of root.
+action_nopasswd() {
+  local path=$1
+  new_evidence_case nopasswd || return 1
+  preserve_into_case "$path" || return 1
+  rm -f -- "$path" || return 1
+  if ! visudo -c >/dev/null 2>&1; then
+    slog "warning: visudo -c FAILED after removing $path; restoring it"
+    cp -a -- "$evidence_case/$(basename -- "$path")" "$path" 2>/dev/null
+    return 1
+  fi
+  return 0
+}
+
+# Setuid root and owned by no package. Clear the bit first so the escalation is
+# dead even if the removal fails, then remove the file.
+action_suidunpackaged() {
+  local path=$1
+  new_evidence_case suidunpackaged || return 1
+  preserve_into_case "$path" || return 1
+  chmod u-s,g-s -- "$path" || return 1
+  rm -f -- "$path"
+}
+
+# An enabled unit nothing accounts for. Same shape as action_unit, plus the
+# scored check - removing a unit something scored quietly pulls in takes the
+# scored service with it, and that is worth finding out in five seconds rather
+# than at the next scoring round.
+action_rogueunit() {
+  local unit=$1 base
+  base=$(basename -- "$unit")
+  new_evidence_case rogueunit || return 1
+  preserve_into_case "$unit" || return 1
+  systemctl disable --now "$base" >/dev/null 2>&1 \
+    || slog "warning: could not disable $base before removal"
+  rm -f -- "$unit" || return 1
+  systemctl daemon-reload >/dev/null 2>&1
+  systemctl reset-failed >/dev/null 2>&1
+  if ! scored_still_answering; then
+    slog "warning: a scored service stopped answering after removing $unit; restoring"
+    cp -a -- "$evidence_case/$base" "$unit" 2>/dev/null
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable --now "$base" >/dev/null 2>&1
+    return 1
+  fi
+  return 0
+}
+
+# A live process. Capture BEFORE the kill or the socket, the parent and an
+# unlinked executable all cease to exist - and refuse to kill what could not be
+# captured, because a kill with no capture destroys the only evidence there was.
+action_live_process() {
+  local subject=$1 kind=$2 pid path
+  pid=$(printf '%s' "$subject" | sed -n 's/^pid\([0-9][0-9]*\):.*/\1/p')
+  path=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s/ (deleted)$//')
+  if [ -z "$pid" ]; then
+    pid=$(resolve_pid_for_exe "$path") || return 1
+  fi
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] || { slog "warning: $subject is no longer running"; return 1; }
+  new_evidence_case "$kind" || return 1
+  if ! "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" --freeze --apply \
+       >/dev/null 2>&1; then
+    # preserve refuses to SIGSTOP anything inside a scored unit's cgroup, which
+    # is correct. Capture it running instead - everything except the
+    # frozen-process guarantee - and only give up if that fails too.
+    "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" >/dev/null 2>&1 || {
+      slog "warning: could not capture pid $pid, so it was NOT killed"
+      return 1
+    }
+  fi
+  kill -9 "$pid" 2>/dev/null || true
+  if [ -f "$path" ]; then
+    preserve_into_case "$path" || return 1
+    rm -f -- "$path"
+  fi
+  return 0
+}
+
+action_tmpproc() { action_live_process "$1" tmpproc; }
+action_netproc() { action_live_process "$1" netproc; }
+
+# netproc's subject is an executable path, not a pid. Find the live pid for it.
+resolve_pid_for_exe() {
+  local want=$1 p exe
+  for p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+    exe=$(readlink "/proc/$p/exe" 2>/dev/null) || continue
+    exe=${exe% (deleted)}
+    [ "$exe" = "$want" ] || continue
+    printf '%s' "$p"
+    return 0
+  done
+  return 1
+}
+
+# Are the scored services still answering? Used after anything that could take
+# one down, so a wrong call reverses itself in seconds rather than at the next
+# scoring round.
+scored_still_answering() {
+  local u name host port svc waited ok
+  for u in ${CCDC_SYSTEMD_SERVICES:-} ${CCDC_PROTECT_SERVICES:-}; do
+    u=${u##*/}
+    case "$u" in *.service|*.socket) ;; *) u="$u.service" ;; esac
+    systemctl list-unit-files "$u" >/dev/null 2>&1 || continue
+    waited=0
+    while [ "$waited" -lt 20 ]; do
+      systemctl is-active --quiet "$u" 2>/dev/null && break
+      sleep 0.5; waited=$((waited + 1))
+    done
+    systemctl is-active --quiet "$u" 2>/dev/null || return 1
+  done
+  while IFS='|' read -r name host port svc; do
+    [ -n "${port:-}" ] || continue
+    ccdc_have nc || continue
+    ok=0; waited=0
+    while [ "$waited" -lt 20 ]; do
+      nc -z -w 2 "$host" "$port" >/dev/null 2>&1 && { ok=1; break; }
+      sleep 0.5; waited=$((waited + 1))
+    done
+    [ "$ok" -eq 1 ] || return 1
+  done < <(ccdc_tcp_checks 2>/dev/null)
+  return 0
+}
+
 # A malicious drop-in leaves the unit file byte-identical while adding an
 # ExecStartPost= that runs as root on next start. can_automate already accepted
 # these, but execute_action had no branch for them, so the operator could sign
@@ -1138,6 +1304,11 @@ execute_action() {
     unitdropin) action_unitdropin "$subject" ;;
     unitdropindeep) action_unitdropindeep "$subject" ;;
     suid) action_suid "$subject" ;;
+    nopasswd) action_nopasswd "$subject" ;;
+    suidunpackaged) action_suidunpackaged "$subject" ;;
+    rogueunit) action_rogueunit "$subject" ;;
+    tmpproc) action_tmpproc "$subject" ;;
+    netproc) action_netproc "$subject" ;;
     rcdeep) action_rcdeep "$subject" ;;
     rcfile) action_rcfile "$subject" ;;
     *) return 1 ;;

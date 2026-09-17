@@ -49,6 +49,23 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 - [ ] **E. Prompt indicator** — `[!3]` in `PS1` for findings below RED.
       Described in `baseline-design.md:338`, never built.
 
+## P0b — sentry's finish line (2026-09-17, in progress)
+
+- [x] `more:` card reference on EVERY sentry item, approvable and needs-you.
+      Asserted, including that every card named actually exists.
+- [x] Cards 13-16 written to close the gaps found by enumerating all 60 finding
+      kinds the kit can emit.
+- [x] Actions written: `nopasswd`, `suidunpackaged`, `rogueunit`, `tmpproc`,
+      `netproc`. **NOT YET TESTED against the live box.**
+- [ ] Actions still to write: `port`, `udpport`, `netunpackaged`, `netprocsvc`.
+      Each names a port or a process that may BE the scored service, so each
+      needs harden.sh's scored-check-and-rollback pattern.
+- [ ] Wire `card_for` completeness into baseline.sh too, and assert every one of
+      the 60 kinds resolves to a card that exists.
+- [ ] Prove each new action end to end on a planted box.
+- [ ] **Remember:** every sentry change needs guardian uninstall -> sentry
+      install -> guardian install, or guardian reverts it within a tick.
+
 ## P1 — promised in writing, not built
 
 - [x] 3. `--explain N` — built in `harden.sh` and back-ported to `baseline.sh`.

@@ -798,7 +798,9 @@ begin
 nopw=$(grep -rIHn '^[^#]*NOPASSWD' /etc/sudoers /etc/sudoers.d 2>/dev/null | grep -v '^\s*$')
 if [ -n "$nopw" ]; then
   amber "passwordless sudo is configured - confirm each line is the packet's   [CARD 7]"
-  emit AMBER nopasswd "sudoers" "passwordless sudo is configured"
+  # One finding per FILE, not one that says "sudoers". A subject that is a
+  # category rather than a target can never be acted on, and sentry printed it
+  # as the identifier - the same defect as the old "see-log" subjects.
   nopw_late=''
   nopw_files=''
   while IFS= read -r l; do
@@ -818,6 +820,16 @@ if [ -n "$nopw" ]; then
   done <<EOF
 $nopw
 EOF
+  # RED for a drop-in that postdates the box - that one you have no account
+  # for and it can be removed. AMBER for the rest, which need your eyes against
+  # the packet.
+  for nfile in $(printf '%s\n' $nopw_files | sort -u); do
+    if ccdc_list_contains "$nfile" "$nopw_late"; then
+      emit RED nopasswd "$nfile" "passwordless sudo in a file written after this box was built"
+    else
+      emit AMBER nopasswd "$nfile" "passwordless sudo - confirm this line is the packet's"
+    fi
+  done
   if [ -n "$nopw_late" ]; then
     detail ""
     detail "the file(s) written after the box was built are the ones you have no"

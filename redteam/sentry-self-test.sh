@@ -321,5 +321,35 @@ else
 fi
 
 
+# Every item carries a card reference - approvable or not, and ESPECIALLY the
+# ones that need a human, because those are where the operator has to decide and
+# a reference is the difference between deciding and guessing.
+refs=$(grep -c "more:  playbooks/remediation-cards.md" "$ROOT/linux/sentry.sh" || true)
+if [ "$refs" -ge 3 ]; then
+  hok 'approvable, held and amber items all print a card reference'
+else
+  hno "only $refs of the three render paths print a card reference"
+fi
+
+# A reference that points at the wrong card costs a page-turn to discover.
+# sshrootlogin/sshemptypw had NO card and were pointed at CARD 8, which is
+# listening ports.
+missing=$(python3 - "$ROOT" <<'SCAN'
+import re, sys, os
+root = sys.argv[1]
+cards = set(re.findall(r'^## CARD (\d+)', open(os.path.join(root,'playbooks','remediation-cards.md'),
+            encoding='utf-8').read(), re.M))
+src = open(os.path.join(root,'linux','sentry.sh'), encoding='utf-8').read()
+m = re.search(r'\ncard_for\(\) \{(.*?)\n\}\n', src, re.S)
+named = set(re.findall(r"CARD (\d+)", m.group(1) if m else ''))
+print(' '.join(sorted(named - cards)))
+SCAN
+)
+if [ -z "$missing" ]; then
+  hok 'every card sentry names actually exists in the playbook'
+else
+  hno "sentry points at cards that do not exist: $missing"
+fi
+
 printf 'sentry source checks: %s passed, %s failed\n' "$hpass" "$hfail"
 [ "$hfail" -eq 0 ] || exit 1
