@@ -166,7 +166,7 @@ linux/                    Bash tools for Linux boxes:
   diff-evidence.sh        compare two evidence snapshots
 windows/                  PowerShell first-pass tools
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (267 assertions, non-root)
+  self-test.sh            runs every suite below (270 assertions, non-root)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag
                           without documentation

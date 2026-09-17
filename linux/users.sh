@@ -80,3 +80,4 @@ fi
 
 find "$evidence" -type f ! -name SHA256SUMS -exec sha256sum {} \; >"$evidence/SHA256SUMS" 2>/dev/null || true
 ccdc_info "access audit saved to $evidence"
+printf '  list it:  sudo ls -la %q\n' "$evidence"

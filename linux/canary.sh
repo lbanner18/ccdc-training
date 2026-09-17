@@ -454,7 +454,13 @@ check() {
     return 4
   fi
   if [ "$tripped" -eq 1 ]; then
-    ccdc_warn "one or more canaries TRIPPED - investigate now; alerts in $alertlog"
+    # Naming the log is not telling anyone how to read it. The state directory
+    # is 0700 root because it holds captured evidence, so an operator's own
+    # shell cannot cd into it, cannot tab-complete inside it, and cannot expand
+    # a glob against it - and `sudo cd` is not a thing, because cd is a shell
+    # builtin. Print the command that works.
+    ccdc_warn "one or more canaries TRIPPED - investigate now"
+    printf '  read the alerts:  sudo tail -n 40 %q\n' "$alertlog" >&2
     return 3
   fi
   ccdc_info "no canary trips detected"

@@ -152,3 +152,5 @@ ccdc_record_shell "$evidence/firewall.txt" 'if command -v nft >/dev/null 2>&1; t
 # then always reports FAILED.
 find "$evidence" -type f ! -name SHA256SUMS -exec sha256sum {} \; >"$evidence/SHA256SUMS" 2>/dev/null || true
 ccdc_info "recon evidence saved to $evidence"
+printf '  list it:  sudo ls -la %q\n' "$evidence"
+printf '  read one: sudo less %q/accounts.txt\n' "$evidence"

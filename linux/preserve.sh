@@ -286,7 +286,8 @@ ccdc_append_log "$state_dir/preserve.log" "CASE $case_name pid=${target_pid:-non
 
 printf '\n  case captured: %s\n' "$case_dir"
 printf '  %s file(s), manifest hashed.\n\n' "$(find "$case_dir" -type f 2>/dev/null | wc -l | tr -d ' ')"
-printf '  read this first: %s/00-CASE.txt\n' "$case_dir"
+printf '  read this first: sudo cat %q/00-CASE.txt\n' "$case_dir"
+printf '  list the case:   sudo ls -la %q\n' "$case_dir"
 if [ "$frozen" -eq 1 ]; then
   printf '\n  pid %s IS STILL STOPPED. Decide now:\n' "$target_pid"
   printf '      kill -CONT %s      # let it run (it is an attacker process, probably not this)\n' "$target_pid"

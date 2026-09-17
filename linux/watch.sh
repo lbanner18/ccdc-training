@@ -242,8 +242,13 @@ EOF
   if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$degraded" -eq 0 ]; then
     quiet "quiet - no persistence/privilege changes, no canary trips, audit intact"
   else
-    printf '\n    evidence: %s\n' "$this_dir"
-    [ -n "$prior_dir" ] && printf '    compare:  ./linux/diff-evidence.sh %s %s\n' "$prior_dir" "$this_dir"
+    # Both of these get pasted, so both carry sudo and an absolute path. The
+    # evidence directory is 0700 root; "./linux/diff-evidence.sh" only resolves
+    # if you happen to be standing in the kit, and without sudo it cannot read
+    # either directory it was handed.
+    printf '\n    evidence: sudo ls -la %q\n' "$this_dir"
+    [ -n "$prior_dir" ] && printf '    compare:  sudo %q/diff-evidence.sh %q %q\n' \
+      "$SCRIPT_DIR" "$prior_dir" "$this_dir"
     printf '\n'
   fi
   [ "$failed" -eq 0 ] || return 4

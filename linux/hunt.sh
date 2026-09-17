@@ -167,3 +167,9 @@ ccdc_record_shell "$evidence/suid-capabilities.txt" 'find / -xdev -type f \( -pe
 # then always reports FAILED.
 find "$evidence" -type f ! -name SHA256SUMS -exec sha256sum {} \; >"$evidence/SHA256SUMS" 2>/dev/null || true
 ccdc_info "hunt report saved to $evidence"
+# The evidence directory is 0700 root. Saying where a report is without saying
+# how to open it leaves the operator at a prompt that will not tab-complete,
+# will not cd, and will not expand a glob - `sudo cd` does not exist, because
+# cd is a shell builtin.
+printf '  list it:  sudo ls -la %q\n' "$evidence"
+printf '  read one: sudo less %q/persistence.txt\n' "$evidence"

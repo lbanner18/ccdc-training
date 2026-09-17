@@ -899,5 +899,45 @@ else
   no "README claims ${claimed:-no} assertions; the suite has well over 250"
 fi
 
+# A path is not a command. The evidence and case directories are 0700 root -
+# on purpose, they hold captured evidence - so an operator's own shell cannot
+# cd into them, cannot tab-complete inside them, and cannot expand a glob
+# against them. `sudo cd` does not help: cd is a shell builtin, there is no
+# /bin/cd for sudo to exec, and a child that chdir'd and exited would leave the
+# shell where it was.
+#
+# So any message whose job is to say where something landed has to hand over a
+# command that actually opens it.
+pathonly=$(python3 - "$ROOT" <<'SCAN'
+import glob, os, re, sys
+bad = []
+tell = re.compile(r'(saved to|read this first|alerts in|case captured) .*\$\{?(evidence|case_dir|alertlog|state_dir|this_dir)')
+for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
+    lines = open(f, encoding='utf-8', errors='replace').read().splitlines()
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith('#'):
+            continue
+        if not tell.search(line):
+            continue
+        # Look for the command in the lines that follow, SKIPPING comments.
+        # The first version of this check took any 'sudo' within five lines,
+        # and passed on the comment explaining why sudo is needed - the test
+        # matched the prose about the fix instead of the fix. Comments cannot
+        # be pasted, so they do not count, and the window has to be measured
+        # in code lines rather than raw lines or a long comment hides the gap.
+        code = [l for l in lines[i + 1:i + 12] if not l.lstrip().startswith('#')][:4]
+        if any('sudo ' in l for l in code):
+            continue
+        bad.append('%s:%d: %s' % (os.path.basename(f), i + 1, line.strip()[:90]))
+print('\n'.join(bad))
+SCAN
+)
+if [ -z "$pathonly" ]; then
+  ok 'every "here is where it landed" message also says how to open it'
+else
+  no 'a tool names a root-only path without a command that reads it'
+  printf '%s\n' "$pathonly" | sed 's/^/    /'
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
