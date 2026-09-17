@@ -196,3 +196,37 @@ ccdc_hash_file() {
     ccdc_warn "no SHA-256 utility available for $path"
   fi
 }
+
+# Is an installed private copy of the kit behind the tree it was copied from?
+#
+# sentry.sh and guardian.sh deliberately run from their OWN copies, so that an
+# attacker who edits the operator's working tree cannot get a root supervision
+# loop to execute it. That is the right call, and it has a consequence nobody
+# was told about: fixes to the kit never reach the running supervisor.
+#
+# On 2026-09-17 the installed sentry was a snapshot from before an evening of
+# work. It was still printing an --approve command that bash mangles, it had
+# none of the new notifications, and it did not contain baseline.sh at all -
+# while the operator read its output and reasonably assumed it was current.
+#
+# Prints one line per file that differs or is missing. Silence means in sync.
+ccdc_tree_drift() {
+  local src=$1 dst=$2 f base
+  [ -d "$src" ] && [ -d "$dst" ] || return 0
+  # Only compare a directory that IS a copy of the kit. guardian's install
+  # directory holds its own payload scripts rather than a copy of linux/, so
+  # comparing the two reported twenty-six files as "missing" and told the
+  # operator their guardian was catastrophically out of date when it was fine.
+  # A drift warning that fires on a healthy install is how a drift warning
+  # stops being read.
+  [ -f "$dst/triage.sh" ] && [ -f "$dst/lib/common.sh" ] || return 0
+  for f in "$src"/*.sh "$src"/lib/*.sh; do
+    [ -f "$f" ] || continue
+    base=${f#"$src"/}
+    if [ ! -f "$dst/$base" ]; then
+      printf 'missing  %s\n' "$base"
+    elif ! cmp -s -- "$f" "$dst/$base"; then
+      printf 'differs  %s\n' "$base"
+    fi
+  done
+}

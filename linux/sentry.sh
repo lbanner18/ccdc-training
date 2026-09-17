@@ -458,6 +458,24 @@ write_alerts() {
   [ -n "$watch_count" ] || watch_count=0
   {
     printf 'ALERTS  %s  (supervised sentry, triage %ss / full sweep %ss)\n' "$(date -u '+%H:%M:%SZ')" "$interval" "$watch_interval"
+    # Say when the thing producing this report is older than the kit it came
+    # from. Sentry runs from its own copy on purpose - an attacker editing the
+    # operator's tree must not be able to steer a root loop - but that means
+    # fixes never arrive on their own, and a stale supervisor reports stale
+    # findings in stale wording while looking exactly like a current one.
+    drift=$(ccdc_tree_drift "$SCRIPT_DIR" "$install_dir" 2>/dev/null)
+    if [ -n "$drift" ]; then
+      printf '\n  THE RUNNING SENTRY IS OLDER THAN YOUR KIT (%s file(s) differ)\n' \
+        "$(printf '%s\n' "$drift" | grep -c .)"
+      printf '  It is executing a private copy taken when you installed it, so\n'
+      printf '  nothing you have changed since has reached it:\n\n'
+      printf '%s\n' "$drift" | head -8 | sed 's/^/      /'
+      [ "$(printf '%s\n' "$drift" | grep -c .)" -gt 8 ] \
+        && printf '      ... and %s more\n' "$(($(printf '%s\n' "$drift" | grep -c .) - 8))"
+      printf '\n  Bring it up to date (this reinstalls the copy and restarts the\n'
+      printf '  service; your approval queue and evidence are kept):\n\n'
+      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --install --apply\n'
+    fi
     printf '==================================================================\n\n'
     if [ -s "$triage_health" ] || [ -s "$watch_health" ]; then
       printf '  MONITOR HEALTH PROBLEM - detection is not current:\n'

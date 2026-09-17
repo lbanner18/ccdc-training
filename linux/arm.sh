@@ -247,6 +247,35 @@ if [ -r "$exceptions_file" ]; then
   fi
 fi
 
+# Is a supervisor already running an older copy of this kit?
+#
+# sentry and guardian execute private copies on purpose, so that editing the
+# working tree cannot steer a root loop. The cost is that fixes never arrive on
+# their own, and a stale supervisor looks exactly like a current one - it was
+# still printing an --approve command bash mangles, hours after that was fixed.
+for _inst in "${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}}" \
+             "${CCDC_GUARDIAN_DIR:-/usr/local/lib/${CCDC_GUARDIAN_NAME:-node-health}}"; do
+  [ -d "$_inst" ] || continue
+  _drift=$(ccdc_tree_drift "$SCRIPT_DIR" "$_inst" 2>/dev/null)
+  [ -n "$_drift" ] || continue
+  printf '    WARNING: %s is running code older than this kit
+' "$(basename -- "$_inst")"
+  printf '    (%s file(s) differ or are missing). It executes its own copy, so
+' \
+    "$(printf '%s\n' "$_drift" | grep -c .)"
+  printf '    nothing you have fixed since installing it has reached it.
+'
+  printf '%s\n' "$_drift" | head -6 | sed 's/^/      /'
+  case "$(basename -- "$_inst")" in
+    "${CCDC_SENTRY_NAME:-ccdc-sentry}")
+      printf '    refresh it:  sudo %s/sentry.sh --config %s --install --apply
+' "$qkit" "$qconfig" ;;
+    *)
+      printf '    refresh it:  sudo %s/guardian.sh --config %s --install --apply
+' "$qkit" "$qconfig" ;;
+  esac
+done
+
 if [ "$failed" -gt 0 ] && [ "$apply" -eq 1 ]; then
   ccdc_die "preflight found $failed problem(s); nothing was armed"
 fi
