@@ -76,6 +76,12 @@ if m:
 # kinds printed directly as 'kind|...' by the enumerators
 for m in re.finditer(r"printf '([a-z0-9]+)\|", src):
     emitted.add(m.group(1))
+# ...and the ones emitted from inside awk, which this missed entirely. uid0,
+# svcshell and rootadj are all `awk '{print "kind|" ...}'`, so a kind added that
+# way was invisible to the coverage guarantee - which is how rootadj could have
+# shipped with no action and no written reason without anything noticing.
+for m in re.finditer(r'print "([a-z0-9]+)\|', src):
+    emitted.add(m.group(1))
 # 'file' was excluded here by hand, with a comment claiming the default arms
 # handled it. They did not: it had no action and no written reason for having
 # none, and it was the bucket /etc/kernel/postinst.d and the boot-time systemd
@@ -407,7 +413,7 @@ if grep -q 'sudogrp|' "$BASE"; then
 else
   no 'a user added to the sudo group is invisible to the baseline'
 fi
-if grep -q 'sudorule|sudogrp) return 1' "$BASE"; then
+if grep -qE 'sudorule\|sudogrp[a-z|]*\) return 1' "$BASE"; then
   ok 'no package can vouch for a sudo rule or a group membership'
 else
   no 'a sudo rule in a packaged file would read as explained'
@@ -422,6 +428,49 @@ if grep -q 'sudo visudo' "$BASE"; then
   ok 'the sudoers guidance uses visudo, which refuses to save a broken file'
 else
   no 'the sudoers guidance edits the file without visudo'
+fi
+
+# --- conffiles, which dpkg --verify does not check ---------------------------
+#
+# Measured, not assumed: append a line to /etc/profile, run
+# `dpkg --verify base-files`, and it reports nothing. That is deliberate on
+# dpkg's part - a conffile is a file the admin is expected to edit - and it
+# meant clause 2 of this tool's whole model was blind to /etc/ssh/sshd_config,
+# every file in /etc/pam.d, /etc/sudoers, /etc/profile and most of
+# /etc/profile.d. Atomic Red Team's T1546.004 walks straight through it.
+if grep -q 'load_conffiles' "$BASE" && grep -q 'Conffiles' "$BASE"; then
+  ok 'conffiles are checked against the md5 dpkg recorded for them'
+else
+  no 'conffiles are unverified, so an edit to sshd_config or pam.d is invisible'
+fi
+
+# The conffile scan must not be limited to the execution-trigger directories.
+# sshd_config is not an execution trigger and is the most valuable file on the
+# box to have quietly edited.
+if awk '/^inventory_files\(\)/,/^}/' "$BASE" | grep -q 'CONFFILE_MD5\[@\]'; then
+  ok 'every conffile is scanned, not only those in the trigger directories'
+else
+  no 'the conffile scan misses anything outside exec_trigger_dirs'
+fi
+
+# A path-only blessing must not explain a CONTENT change. Blessing /etc/profile
+# freezes the fact that it exists, which it always did.
+if grep -q 'changed-from-shipped\*)' "$BASE" && grep -q 'BLESSED_LINE' "$BASE"; then
+  ok 'a changed file needs its CONTENT blessed, not just its path'
+else
+  no 'blessing a path explains away every later edit to that file forever'
+fi
+
+# --- next to root without being root -----------------------------------------
+#
+# `useradd -g 0 -M -d /root` sets the GID to 0, not the UID. The account gets an
+# ordinary UID, so the UID-0 check is right to stay silent, and it still has a
+# login shell, root's home directory and root-group access to everything root's
+# group can reach. It walked past this tool cleanly.
+if grep -q 'rootadj|' "$BASE"; then
+  ok 'an account with GID 0 or root as its home is reported'
+else
+  no 'useradd -g 0 -d /root creates an account this tool cannot see'
 fi
 
 printf 'baseline self-test: %s passed, %s failed\n' "$pass" "$fail"

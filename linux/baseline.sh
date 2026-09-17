@@ -216,7 +216,7 @@ kind_for() {
 }
 
 inventory_files() {
-  local d f
+  local d f cfmd5
   for d in $exec_trigger_dirs; do
     [ -d "$d" ] || continue
     # -L so a symlinked trigger directory is still walked; maxdepth 2 reaches
@@ -229,6 +229,16 @@ inventory_files() {
     [ -e "$f" ] || continue
     printf '%s|%s|\n' "$(kind_for "$f")" "$f"
   done
+  # Every conffile whose content differs from what the package shipped,
+  # wherever it lives. This is not limited to exec_trigger_dirs on purpose:
+  # /etc/ssh/sshd_config is not an execution trigger and is the single most
+  # valuable file on the box to have quietly edited.
+  for f in "${!CONFFILE_MD5[@]}"; do
+    [ -f "$f" ] || continue
+    cfmd5=$(conffile_changed "$f") || continue
+    printf '%s|%s|changed-from-shipped md5=%s\n' "$(kind_for "$f")" "$f" "$cfmd5"
+  done
+
   # Per-user systemd units: these run as the user at login and are easy to miss.
   { printf '%s\n' /root; (getent passwd 2>/dev/null || cat /etc/passwd) \
       | awk -F: '$6 ~ /^\// {print $6}'; } | sort -u | while IFS= read -r home; do
@@ -278,6 +288,16 @@ inventory_semantic() {
 
   # Accounts that can log in as root, and service accounts with a real shell.
   awk -F: '$3 == 0 {print "uid0|" $1 "|shell=" $7}' /etc/passwd 2>/dev/null
+  # Accounts ADJACENT to root, which the UID test above does not see.
+  #
+  # Atomic Red Team's T1136.001 creates one with `useradd -g 0 -M -d /root`.
+  # That is GID 0, not UID 0 - the account gets an ordinary UID, so a check
+  # reading field 3 is correct to stay silent and the account still gets a
+  # login shell, root's home directory and root-group access to every file
+  # root's group can reach. It walked past this tool cleanly.
+  awk -F: '$1 != "root" && ($4 == 0 || $6 == "/root") \
+           {print "rootadj|" $1 "|gid=" $4 " home=" $6 " shell=" $7}' \
+      /etc/passwd 2>/dev/null
   awk -F: '$3 > 0 && $3 < 1000 && $7 !~ /(nologin|false|sync)$/ \
            {print "svcshell|" $1 "|shell=" $7}' /etc/passwd 2>/dev/null
 
@@ -569,14 +589,54 @@ declare -A BLESSED_SET=()
 declare -A EXCEPT_SET=()
 declare -A EXCEPT_WHY=()
 declare -A PKG_MODIFIED=()
+declare -A BLESSED_LINE=()
+declare -A CONFFILE_MD5=()
+
+# dpkg --verify does not check conffiles. At all.
+#
+# That is deliberate on dpkg's part - a conffile is a file the administrator is
+# expected to edit, so reporting every edited one as damage would be useless.
+# The consequence for this tool is that clause 2 was blind to every conffile on
+# the box: /etc/ssh/sshd_config, all of /etc/pam.d, /etc/sudoers, /etc/profile
+# and most of /etc/profile.d. Appending a line to /etc/profile and then running
+# `dpkg --verify base-files` returns nothing at all, which was measured, not
+# assumed.
+#
+# dpkg does record their md5s, it simply does not compare them. So we compare
+# them: 744 conffiles on the lab box, one second.
+load_conffiles() {
+  local p m
+  ccdc_have dpkg-query || return 0
+  while read -r p m; do
+    [ -n "${m:-}" ] || continue
+    CONFFILE_MD5["$p"]=$m
+  done < <(dpkg-query -W -f='${Conffiles}\n' '*' 2>/dev/null \
+           | awk 'NF>=2 && $2 ~ /^[0-9a-f]{32}$/ {print $1" "$2}')
+}
+
+# Prints the current md5 if it differs from what the package shipped.
+conffile_changed() {
+  local p=$1 want=${CONFFILE_MD5["$1"]:-} got
+  [ -n "$want" ] || return 1
+  got=$(md5sum -- "$p" 2>/dev/null | cut -d' ' -f1)
+  [ -n "$got" ] || return 1
+  [ "$got" = "$want" ] && return 1
+  printf '%s' "$got"
+}
 
 load_sets() {
   local line key verify_cache
   if load_pkg_paths; then PKG_BULK=1; fi
+  load_conffiles
   if [ -r "$blessed" ]; then
     while IFS= read -r line; do
       key=$(printf '%s' "$line" | cut -d'|' -f1-2)
-      [ -n "$key" ] && BLESSED_SET["$key"]=1
+      if [ -n "$key" ]; then
+        BLESSED_SET["$key"]=1
+        # The whole line, so a finding whose DETAIL carries a content hash can
+        # drift when the content changes while the path does not.
+        BLESSED_LINE["$line"]=1
+      fi
     done <"$blessed"
   fi
   if [ -r "$exceptions" ]; then
@@ -662,6 +722,16 @@ unit_is_expected() {
 
 explained() {
   local kind=$1 subject=$2 detail=${3:-} target
+  # A file whose CONTENT has changed cannot be explained by a baseline entry
+  # that only recorded its path. Blessing /etc/profile froze the fact that it
+  # exists, which it always did; the line appended to it afterwards does not
+  # change the path, so a path-only match would explain the edit away forever.
+  case "$detail" in
+    changed-from-shipped*)
+      [ -n "${BLESSED_LINE["$kind|$subject|$detail"]:-}" ] && return 0
+      allowlisted "$kind" "$subject" && return 0
+      return 1 ;;
+  esac
   [ -n "${BLESSED_SET["$kind|$subject"]:-}" ] && return 0
   allowlisted "$kind" "$subject" && return 0
   case "$kind" in
@@ -669,7 +739,7 @@ explained() {
     uid0) [ "$subject" = root ] && return 0; return 1 ;;
     # Semantic readings are never "explained" by a package. An account, a key or
     # a listening socket is either in the blessed baseline or it is news.
-    svcshell|sshkey|sshd|listener|module|sudorule|sudogrp) return 1 ;;
+    svcshell|sshkey|sshd|listener|module|sudorule|sudogrp|rootadj) return 1 ;;
     procexe)
       # These three can never be explained by anything, and the blessed
       # baseline must not be able to whitewash them either. A deleted
@@ -715,6 +785,8 @@ why_for() {
     return
   fi
   case "$kind" in
+    rootadj)
+      printf 'an account next to root without being root - %s' "$detail" ;;
     sudorule)
       printf 'a sudo rule that was not in the blessed baseline (from %s)' "$detail" ;;
     sudogrp)
@@ -882,6 +954,30 @@ needs_you_for() {
   local kind=$1 subject=$2 detail=$3 user fp who __l __k __now __want
 
   case "$kind" in
+    rootadj)
+      printf '       An account that is next to root without being root, which is\n'
+      printf '       why the UID check did not report it:\n\n'
+      printf '         %s   %s\n\n' "$subject" "$detail"
+      printf '       Its UID is ordinary. What it has instead is some of:\n'
+      printf '         GID 0     - read and write anything the root GROUP can\n'
+      printf '         /root     - its home IS root'"'"'s home directory, so its\n'
+      printf '                     shell startup files are root'"'"'s startup files\n\n'
+      printf '       Decide first whether you put it there. If not, and nothing\n'
+      printf '       is running as it, remove it - and note that -r is NOT used,\n'
+      printf '       because its home directory is /root:\n\n'
+      printf '         ps -u %s\n' "$subject"
+      printf '         sudo userdel -f %s\n\n' "$subject"
+      printf '       Use -f alone. Do NOT add the recursive flag: this account'"'"'s\n'
+      printf '       home directory IS /root, and the recursive form would take\n'
+      printf '       it with the account.\n\n'
+      printf '       If it is legitimate but should not be in the root group,\n'
+      printf '       give it its own and leave the account alone:\n\n'
+      printf '         sudo groupadd %s 2>/dev/null; sudo usermod -g %s %s\n\n' \
+        "$subject" "$subject" "$subject"
+      printf '       If it is yours and correct, record it:\n\n'
+      printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
+      printf '              --reason "why this account sits next to root" --apply\n'
+      return 0 ;;
     sysctl)
       printf '       A kernel-parameter file that no package owns. Deleting it is\n'
       printf '       not automatic, because this is the one drop-in directory\n'
@@ -1277,7 +1373,7 @@ do_action() {
 card_for() {
   case "$1" in
     uid0)      printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
-    sudorule|sudogrp)
+    sudorule|sudogrp|rootadj)
                printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
@@ -1381,7 +1477,7 @@ severity_for() {
   local kind=$1 subject=$2 detail=${3:-} dangerous=0
   # Both routes to root are RED on sight. Neither happens by accident, and
   # neither is reversible by the person who did not do it.
-  case "$kind" in sudorule|sudogrp) printf 'RED'; return ;; esac
+  case "$kind" in sudorule|sudogrp|rootadj) printf 'RED'; return ;; esac
   if [ "$kind" = procexe ]; then
     case "$detail" in
       *deleted*|*volatile-dir*|*ld-preload*) printf 'RED'; return ;;

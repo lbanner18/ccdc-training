@@ -188,6 +188,30 @@ unesc() { printf '%s' "$1" | sed 's/\\x7c/|/g; s/\\n/\n/g; s/\\\\/\\/g'; }
 # one sees is exactly the result worth writing down. baseline.sh reports what
 # nothing explains; triage.sh reports what is wrong regardless of when it
 # started.
+# Did the atomic change anything at all?
+#
+# Some atomics are no-ops on a given box. T1098.004 "Modify SSH Authorized Keys"
+# reads authorized_keys and writes the identical bytes back; nothing changes, so
+# nothing can be detected, and scoring that as MISSED sends you hunting a gap
+# that does not exist. A false miss is worse than a false catch here - it is the
+# one result that costs you hours.
+#
+# Deliberately independent of the kit: if this used the kit's own enumeration it
+# would agree with the kit by construction, which is the opposite of what a test
+# harness is for.
+state_fingerprint() {
+  {
+    cat /etc/passwd /etc/group /etc/sudoers 2>/dev/null
+    cat /etc/sudoers.d/* 2>/dev/null
+    find /etc /root /home /usr/local /var/spool/cron /srv /opt -xdev \
+         \( -type f -o -type l \) -printf '%p %T@ %s %m\n' 2>/dev/null | sort
+    systemctl list-units --all --no-legend --plain 2>/dev/null | awk '{print $1, $3, $4}'
+    systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1, $2}'
+    ss -tulnH 2>/dev/null | awk '{print $1, $5}' | sort
+    lsmod 2>/dev/null | awk '{print $1}' | sort
+  } 2>/dev/null | sha256sum | awk '{print $1}'
+}
+
 detector_state() {
   local b t
   b=$("$KIT_DIR/baseline.sh" --config "$config" --status 2>/dev/null \
@@ -257,6 +281,8 @@ EOF
 
   printf '\n  [%s] %s  %s\n' "$n" "$tech" "$(unesc "$name")"
 
+  local fp0 fp1
+  fp0=$(state_fingerprint)
   before=$(detector_state); b0=${before%% *}; t0=${before##* }
   printf '      before: baseline %s finding(s), triage %s\n' "$b0" "$t0"
 
@@ -269,9 +295,14 @@ EOF
     verdict='ERROR'
   else
     sleep 2
+    fp1=$(state_fingerprint)
     after=$(detector_state); b1=${after%% *}; t1=${after##* }
     printf '      after:  baseline %s finding(s), triage %s\n' "$b1" "$t1"
-    if [ "$b1" -gt "$b0" ] || [ "$t1" -gt "$t0" ]; then
+    if [ "$fp0" = "$fp1" ] && [ "$b1" -le "$b0" ] && [ "$t1" -le "$t0" ]; then
+      verdict='NOOP'
+      printf '      NO-OP - this atomic changed nothing on this box, so there was\n'
+      printf '      nothing to detect. Not a miss.\n'
+    elif [ "$b1" -gt "$b0" ] || [ "$t1" -gt "$t0" ]; then
       verdict='CAUGHT'
       printf '      CAUGHT'
       [ "$b1" -gt "$b0" ] && printf ' by baseline'
@@ -314,15 +345,17 @@ run_sweep() {
 }
 
 print_scorecard() {
-  local total caught missed err
+  local total caught missed err noop
   [ -s "$ledger" ] || { printf '  Nothing has been run yet.\n'; return 0; }
   total=$(grep -c . "$ledger")
   caught=$(grep -c '|CAUGHT|' "$ledger" || true)
   missed=$(grep -c '|MISSED|' "$ledger" || true)
   err=$(grep -c '|ERROR|' "$ledger" || true)
+  noop=$(grep -c '|NOOP|' "$ledger" || true)
   printf '  ATOMIC SCORECARD\n\n'
-  printf '    %s run: %s caught, %s MISSED, %s did not execute here\n\n' \
+  printf '    %s run: %s caught, %s MISSED, %s did not execute here,\n' \
     "$total" "$caught" "$missed" "$err"
+  printf '    %s changed nothing on this box\n\n' "$noop"
   if [ "$missed" -gt 0 ]; then
     printf '  These got through. Each one is a mechanism the kit cannot see,\n'
     printf '  and is worth more than the rest of this run put together:\n\n'
