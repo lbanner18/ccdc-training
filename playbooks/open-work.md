@@ -88,9 +88,19 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 - [ ] 13. **Tryout sign-up — due 2026-09-24.**
 - [ ] 14. Public-repo decision. Rule 5.6.1 wants three months public before the regional;
       "private now, public on competition day" does not satisfy it.
-- [ ] 15. Review all six inject drafts against their numbered asks. One of six read.
+- [x] 15. Reviewed all six drafts against their numbered asks. They hold up
+      better than the audit implied: all six carry the memo, the commands, and
+      the evidence step; the two without a "deliverable beyond the memo" line
+      are correct (IR procedure is memo-only, password policy's deliverable IS
+      the citation). Login banner names five legal concepts, the two deliberate
+      omissions, cites DISA, and catches the `/etc/issue` vs `/etc/issue.net`
+      trap that decides pass or fail.
 - [ ] 16. VPN Options inject needs a 3-minute recorded video. The catalog itself says it
       "cannot be improvised at minute 50."
-- [ ] 17. Unnecessary software audit inject — unwritten, and the same shape as item 2.
+- [x] 17. Unnecessary software audit inject — written
+      (`injects/responses/unnecessary-software.md`), and `harden.sh --table`
+      emits the location / ports / removal-steps table the inject asks for,
+      already filled in. Section 3 is the part that matters: what was found and
+      deliberately NOT removed, with the question each one turns on.
 - [ ] 18. Windows coverage. Login banner, SSH and endpoint protection injects say
       *every server* / *Linux and Windows*. `windows/` is first-pass PowerShell.

@@ -46,11 +46,19 @@ Two distinct styles show up, and they read differently:
 
 ## Drafts exist for most of these
 
-Six of the injects above are pre-written in [`responses/`](responses/): login
+Seven of the injects above are pre-written in [`responses/`](responses/): login
 banner, SSH access, incident response procedure, password policy, endpoint
-protection, and the perimeter assessment. Each is about a page, in the memo
+protection, the perimeter assessment, and the unnecessary software audit. Each is about a page, in the memo
 format, with its source cited inline and its failure mode called out.
 
-Still unwritten, and both need a decision rather than a draft: the **VPN
-Options** video, and the **unnecessary software audit**, which is a table
-generator more than a memo.
+The unnecessary software audit is a rendering job rather than a research job,
+because `harden.sh --table` emits the "location / ports opened / removal steps"
+table the inject asks for, already filled in — *provided the hardening was done
+in the first hour.* If it was not, the inject arrives and the honest move is to
+run `harden.sh` read-only and write the memo about what you are about to do,
+rather than cut fifteen things at minute 50 with a scoreboard running.
+
+Still unwritten, and it needs a decision rather than a draft: the **VPN Options**
+video. Three minutes, recorded, posted. Decide the tool and the account before
+competition day — this is the one inject that cannot be produced by anything in
+this repo.

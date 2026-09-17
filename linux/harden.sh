@@ -61,6 +61,7 @@ while [ "$#" -gt 0 ]; do
     --undo)    mode='undo'
                case "${2:-}" in ''|--*) undo_item='all'; shift ;;
                                  *) undo_item=$2; shift 2 ;; esac ;;
+    --table)   mode='table'; shift ;;
     --all)     show_all=1; shift ;;
     --apply)   apply=1; CCDC_DRY_RUN=0; shift ;;
     --i-know-it-is-blessed) allow_blessed=1; shift ;;
@@ -73,6 +74,9 @@ while [ "$#" -gt 0 ]; do
       printf '  --cut N       cut item N (also 1,3,4 or all-safe)\n'
       printf '  --undo [N]    put item N back, or everything with no argument\n'
       printf '  --all         also list what was considered and left alone\n'
+      printf '  --table       the Unnecessary Software audit inject table:\n'
+      printf '                what it is, where it lives, what it listens on,\n'
+      printf '                and how it was removed\n'
       printf '\n'
       printf '  --i-know-it-is-blessed  harden a box that has already been blessed.\n'
       printf '                Refused by default: every cut would read as drift.\n'
@@ -922,6 +926,50 @@ do_undo() {
   fi
 }
 
+# --- --table: the Unnecessary Software / Configuration Audit inject -----------
+#
+# That inject asks for a report naming the location, the ports it opened, and
+# the removal steps. This tool already knows all three - it decided what to cut
+# and it recorded how to put each one back - so the inject is a rendering
+# question, not a research question. Emitted as markdown, to paste into the memo.
+print_table() {
+  local line class kind key members pkgs head port ports u
+  printf '| Item | What it is | Where it lives | Listening | How it was removed |\n'
+  printf '|---|---|---|---|---|\n'
+  for line in ${FINDINGS+"${FINDINGS[@]}"}; do
+    class=$(printf '%s' "$line" | cut -d'|' -f1)
+    kind=$(printf '%s' "$line" | cut -d'|' -f2)
+    key=$(printf '%s' "$line" | cut -d'|' -f3)
+    members=$(printf '%s' "$line" | cut -d'|' -f4)
+    pkgs=$(printf '%s' "$line" | cut -d'|' -f5)
+    head=$(printf '%s' "$line" | cut -d'|' -f6)
+
+    # What each unit was actually listening on, so the "ports opened" column is
+    # measured rather than asserted.
+    ports=''
+    if [ "$kind" = 'units' ]; then
+      for u in $members; do
+        port=$(ss -tulnpH 2>/dev/null | grep -F "${u%.*}" | awk '{print $1 "/" $5}' \
+               | sed 's/.*://' | sort -u | paste -sd' ' -)
+        [ -n "$port" ] && ports="$ports $port"
+      done
+    fi
+    [ -n "$ports" ] || ports='none'
+
+    printf '| %s | %s | %s | %s | %s |\n' \
+      "$key" "$head" \
+      "$(printf '%s' "${pkgs:-$members}" | tr ' ' ',' | cut -c1-60)" \
+      "${ports# }" \
+      "$([ "$class" = 'safe' ] && printf 'purged, or disabled and masked where no .deb could be cached first' \
+         || printf 'LEFT IN PLACE - needs a decision from the packet')"
+  done
+  printf '\n'
+  printf '_Removal and restoration are both one command, and every removal was\n'
+  printf 'followed by a check that the scored services still answered:_\n\n'
+  printf '    sudo %s --config %s --cut all-safe --apply\n' "$qself" "$qconfig"
+  printf '    sudo %s --config %s --undo --apply\n\n' "$qself" "$qconfig"
+}
+
 # --- main ---------------------------------------------------------------------
 ccdc_require_root
 
@@ -931,11 +979,11 @@ case "$mode" in
   cut)
     build_keep_set
     do_cut_items "$cut_items" ;;
-  look)
+  look|table)
     build_keep_set
     enumerate_units
     enumerate_suid
     enumerate_packages
     enumerate_listeners
-    print_listing ;;
+    if [ "$mode" = 'table' ]; then print_table; else print_listing; fi ;;
 esac
