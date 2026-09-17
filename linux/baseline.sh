@@ -200,6 +200,17 @@ kind_for() {
     /etc/xdg/autostart/*)                    printf 'xdgauto' ;;
     /etc/initramfs-tools/*)                  printf 'initramfs' ;;
     /etc/NetworkManager/*)                   printf 'netdispatch' ;;
+    # These four were in exec_trigger_dirs but had no prefix here, so they fell
+    # through to the generic 'file' kind - which had no action and no written
+    # reason for having none. Meanwhile action_for carried a 'generator' arm
+    # that nothing on earth emitted. A boot-time generator and a kernel
+    # post-install hook both run as root, and both were landing in the one
+    # bucket the tool had nothing to say about.
+    */systemd/system-generators/*)           printf 'generator' ;;
+    /etc/kernel/*.d/*)                       printf 'kernelhook' ;;
+    /etc/sysctl.d/*)                         printf 'sysctl' ;;
+    /etc/apparmor.d/*)                       printf 'apparmor' ;;
+    */initramfs-tools/*)                     printf 'initramfs' ;;
     *)                                       printf 'file' ;;
   esac
 }
@@ -821,7 +832,7 @@ evidence_copy() {
 action_for() {
   local kind=$1 subject=$2 detail=$3 parent
   case "$kind" in
-    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader|netdispatch)
+    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader|netdispatch|kernelhook|apparmor|file)
       printf 'copy it to evidence, then delete it' ;;
     cron)
       case "$subject" in
@@ -868,9 +879,48 @@ action_for() {
 # automatically, the one command that resolves the ambiguity, and what to do if
 # the answer is surprising.
 needs_you_for() {
-  local kind=$1 subject=$2 detail=$3 user fp who
+  local kind=$1 subject=$2 detail=$3 user fp who __l __k __now __want
 
   case "$kind" in
+    sysctl)
+      printf '       A kernel-parameter file that no package owns. Deleting it is\n'
+      printf '       not automatic, because this is the one drop-in directory\n'
+      printf '       where YOUR hardening and THEIR backdoor look identical from\n'
+      printf '       the outside - both are an unpackaged file setting kernel\n'
+      printf '       parameters.\n\n'
+      printf '       What it sets, and what each is now:\n\n'
+      while IFS= read -r __l; do
+        case "$__l" in ''|'#'*|';'*) continue ;; esac
+        __k=$(printf '%s' "$__l" | cut -d= -f1 | tr -d '[:space:]')
+        [ -n "$__k" ] || continue
+        __now=$(sysctl -n "$__k" 2>/dev/null || printf '?')
+        __want=$(printf '%s' "$__l" | cut -d= -f2- | tr -d '[:space:]')
+        if [ "$__now" = "$__want" ]; then
+          printf '         %-38s now: %-6s LIVE\n' "$__l" "$__now"
+        else
+          printf '         %-38s now: %-6s not loaded yet\n' "$__l" "$__now"
+        fi
+      done <"$subject" 2>/dev/null
+      # Whether the file has taken effect changes what you are dealing with.
+      # A dropped-but-unloaded file is a change staged for the next boot, and
+      # deleting it costs nothing. A live one is already changing how this box
+      # routes and dumps memory, and `sysctl --system` after deleting it is
+      # what actually puts the kernel back.
+      printf '\n       "not loaded yet" means it takes effect on the next boot or\n'
+      printf '       the next `sysctl --system` - you can delete it before it ever\n'
+      printf '       does anything. "LIVE" means the kernel is already running\n'
+      printf '       this way, and only the reload below puts it back.\n'
+      printf '\n       The ones worth looking at hardest: ip_forward turning this\n'
+      printf '       box into a router, rp_filter off allowing spoofed sources,\n'
+      printf '       suid_dumpable letting a setuid crash dump its memory, and\n'
+      printf '       kptr_restrict or dmesg_restrict going back to 0.\n\n'
+      printf '       If it is theirs, remove it and reload:\n\n'
+      printf '         sudo cp -a %q %s/removed/\n' "$subject" "$state_dir"
+      printf '         sudo rm -f %q && sudo sysctl --system\n\n' "$subject"
+      printf '       If it is yours, record it:\n\n'
+      printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
+      printf '              --reason "my hardening" --apply\n'
+      return 0 ;;
     sudorule)
       printf '       A sudo rule that was not here when you froze this box. It\n'
       printf '       came from %s:\n\n' "$detail"
@@ -1079,7 +1129,7 @@ do_action() {
   fi
 
   case "$kind" in
-    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader|userunit|netdispatch)
+    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader|userunit|netdispatch|kernelhook|apparmor|file)
       remove_file_safely "$subject" ;;
 
     cron)
@@ -1231,6 +1281,9 @@ card_for() {
                printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
+    sysctl)    printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
+    kernelhook|apparmor|file)
+               printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
     unit|generator|initscript)
                printf 'playbooks/remediation-cards.md  CARD 4 - systemd unit that calls home' ;;
     suid)      printf 'playbooks/remediation-cards.md  CARD 5 - SUID interpreter' ;;
@@ -1739,8 +1792,17 @@ print_explain() {
     printf '    do it:     sudo %s --config %s --approve %s --apply\n' \
       "$qself" "$qconfig" "$want"
   else
-    printf '  There is no automatic action for this one, on purpose. The listing\n'
-    printf '  prints the reason under NEEDS YOU - read that before doing anything.\n\n'
+    # Only claim deliberateness when there is a written reason to point at.
+    # Saying "on purpose" for every missing action is how the generic `file`
+    # kind sat unanswered while reading as a considered decision.
+    if needs_you_for "$kind" "$subject" "$detail" >/dev/null 2>&1; then
+      printf '  There is no automatic action for this one, on purpose. The listing\n'
+      printf '  prints the reason under NEEDS YOU - read that before doing anything.\n\n'
+    else
+      printf '  There is no automatic action for this one AND no written reason\n'
+      printf '  why not. That is a gap in this tool, not a judgement about the\n'
+      printf '  finding - please say so, and treat it by hand for now.\n\n'
+    fi
   fi
 
   # Do not offer --allow for the things that can never be allowed. explained()

@@ -1834,6 +1834,22 @@ if ! mv -f -- "$findings_tmp" "$findings_file"; then
 fi
 findings_tmp=''
 
+# What this tool is FOR, now that baseline.sh exists.
+#
+# The two answer different questions and the difference is worth keeping.
+# baseline.sh reports CHANGE - what is here that was not here when you froze
+# the box - and it can act on almost all of it. This tool reports STATE - what
+# is wrong regardless of when it got that way. A box that shipped with
+# PermitRootLogin yes and was blessed in that condition will never drift, and
+# baseline.sh will be silent about it forever. This tool will not.
+#
+# Measured on the lab drill set: baseline.sh found every finding this tool
+# found, plus two it did not - the /etc/update-motd.d script and the
+# /etc/ld.so.preload hijack - and named them individually with an action each,
+# where this tool reported them inside a "/etc files modified" bucket.
+printf '\n  This tool reports what is WRONG. For what has CHANGED since you froze\n'
+printf '  this box - which is most of the above, with a command that fixes each:\n'
+printf '      sudo %s/baseline.sh --config %s --status\n' "$SCRIPT_DIR" "$config"
 printf '\n  Full detail, if you want it: ./linux/hunt.sh and ./linux/recon.sh\n'
 [ "$findings" -gt 0 ] && exit 3
 exit 0

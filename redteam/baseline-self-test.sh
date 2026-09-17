@@ -76,7 +76,10 @@ if m:
 # kinds printed directly as 'kind|...' by the enumerators
 for m in re.finditer(r"printf '([a-z0-9]+)\|", src):
     emitted.add(m.group(1))
-emitted.discard('file')      # the generic fallback kind, handled by default arms
+# 'file' was excluded here by hand, with a comment claiming the default arms
+# handled it. They did not: it had no action and no written reason for having
+# none, and it was the bucket /etc/kernel/postinst.d and the boot-time systemd
+# generators were falling into. It is not excluded any more.
 
 answered = arms('action_for') | arms('needs_you_for')
 missing = sorted(k for k in emitted if k not in answered)
