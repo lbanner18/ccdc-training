@@ -41,6 +41,7 @@ allow_what=''
 allow_reason=''
 apply=0
 show_all=0
+fast=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -50,6 +51,7 @@ while [ "$#" -gt 0 ]; do
     --allow)  mode='allow'; allow_what=${2:?missing --allow value}; shift 2 ;;
     --reason) allow_reason=${2:?missing --reason text}; shift 2 ;;
     --all)    show_all=1; shift ;;
+    --fast)   fast=1; shift ;;
     --apply)  apply=1; CCDC_DRY_RUN=0; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--bless|--status|--allow WHAT --reason TEXT] [--all] [--apply]\n' "$0"
@@ -59,6 +61,8 @@ while [ "$#" -gt 0 ]; do
       printf '  --status    what has drifted since the blessing\n'
       printf '  --allow     record a standing exception (needs --reason and --apply)\n'
       printf '  --all       include things held back from the first screen\n'
+      printf '  --fast      skip the two slow checks (package checksums, SUID sweep)\n'
+      printf '              so a supervisor loop can run this every pass\n'
       printf '\n'
       printf 'A thing is explained if it is in the blessed baseline, or a package owns\n'
       printf 'it with an intact checksum, or it is allowlisted in the config.\n'
@@ -269,9 +273,14 @@ inventory_semantic() {
     lsmod 2>/dev/null | awk 'NR > 1 {print "module|" $1 "|"}'
   fi
 
-  # SUID/SGID binaries.
-  find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null \
-    | while IFS= read -r f; do printf 'suid|%s|\n' "$f"; done
+  # SUID/SGID binaries. This walks the whole filesystem, which is most of the
+  # cost of a full run, so --fast leaves it out: a new SUID root binary is worth
+  # finding, but it is not worth finding twice a minute at the price of the
+  # process check never running at all.
+  if [ "$fast" -eq 0 ]; then
+    find / -xdev -type f \( -perm -4000 -o -perm -2000 \) 2>/dev/null \
+      | while IFS= read -r f; do printf 'suid|%s|\n' "$f"; done
+  fi
 }
 
 # --- what is RUNNING -----------------------------------------------------
@@ -415,13 +424,63 @@ inventory() {
 # files would have spent minutes answering a question that takes seconds. This
 # tool runs while a clock is going.
 
+# Every path any installed package claims, loaded in one pass.
+#
+# lib/provenance.sh answers pkg_owns() by shelling out to `dpkg-query -S`, which
+# is right for a tool that asks a handful of times. This one asks about every
+# file in the inventory - three hundred-odd - and each call reloads the package
+# database, which was twenty of a twenty-one second run. Reading the .list files
+# directly is one pass over the same data.
+#
+# The merged-/usr problem from provenance.sh applies here too and is handled the
+# same way: dpkg recorded /bin/fusermount3 while the filesystem reports
+# /usr/bin/fusermount3, so both spellings go in the set.
+declare -A PKG_OWNED=()
+
+load_pkg_paths() {
+  local line alt count=0
+  for f in /var/lib/dpkg/info/*.list; do
+    [ -r "$f" ] || continue
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      PKG_OWNED["$line"]=1
+      count=$((count + 1))
+      case "$line" in
+        /bin/*)  alt="/usr/bin/${line#/bin/}" ;;
+        /sbin/*) alt="/usr/sbin/${line#/sbin/}" ;;
+        /lib/*)  alt="/usr/lib/${line#/lib/}" ;;
+        /usr/bin/*)  alt="/bin/${line#/usr/bin/}" ;;
+        /usr/sbin/*) alt="/sbin/${line#/usr/sbin/}" ;;
+        /usr/lib/*)  alt="/lib/${line#/usr/lib/}" ;;
+        *) alt='' ;;
+      esac
+      [ -n "$alt" ] && PKG_OWNED["$alt"]=1
+    done <"$f"
+  done
+  [ "$count" -gt 0 ]
+}
+
+# Use the bulk set when it loaded, and fall back to the library otherwise - an
+# rpm box, or a dpkg layout this does not understand, must still get a correct
+# answer rather than "no package owns anything on this machine", which would
+# report every file on the box as unexplained.
+PKG_BULK=0
+pkg_owns_fast() {
+  if [ "$PKG_BULK" -eq 1 ]; then
+    [ -n "${PKG_OWNED["$1"]:-}" ] && return 0
+    return 1
+  fi
+  pkg_owns "$1"
+}
+
 declare -A BLESSED_SET=()
 declare -A EXCEPT_SET=()
 declare -A EXCEPT_WHY=()
 declare -A PKG_MODIFIED=()
 
 load_sets() {
-  local line key
+  local line key verify_cache
+  if load_pkg_paths; then PKG_BULK=1; fi
   if [ -r "$blessed" ]; then
     while IFS= read -r line; do
       key=$(printf '%s' "$line" | cut -d'|' -f1-2)
@@ -438,11 +497,27 @@ load_sets() {
   # One dpkg --verify for the whole box. A package owning /etc/pam.d/sshd says
   # nothing about whether a pam_exec line was added to it this morning, so
   # ownership alone is not clause 2 - the checksum has to still match.
+  # dpkg --verify re-checksums every file of every installed package, which is
+  # the other half of a full run's cost. In --fast mode the answer is cached
+  # from the last full run rather than skipped outright: a stale modified-file
+  # list is still better than pretending every packaged file is intact.
   if ccdc_have dpkg; then
-    while IFS= read -r line; do
-      line=$(printf '%s' "$line" | awk '{print $NF}')
-      [ -n "$line" ] && PKG_MODIFIED["$line"]=1
-    done < <(dpkg --verify 2>/dev/null)
+    verify_cache="$baseline_dir/dpkg-verify.cache"
+    if [ "$fast" -eq 1 ] && [ -r "$verify_cache" ]; then
+      while IFS= read -r line; do
+        [ -n "$line" ] && PKG_MODIFIED["$line"]=1
+      done <"$verify_cache"
+    elif [ "$fast" -eq 0 ]; then
+      mkdir -p "$baseline_dir" 2>/dev/null; chmod 700 "$baseline_dir" 2>/dev/null
+      : >"$verify_cache.tmp"
+      while IFS= read -r line; do
+        line=$(printf '%s' "$line" | awk '{print $NF}')
+        [ -n "$line" ] || continue
+        PKG_MODIFIED["$line"]=1
+        printf '%s\n' "$line" >>"$verify_cache.tmp"
+      done < <(dpkg --verify 2>/dev/null)
+      mv "$verify_cache.tmp" "$verify_cache" 2>/dev/null || rm -f "$verify_cache.tmp"
+    fi
   fi
 }
 
@@ -519,7 +594,7 @@ explained() {
       ;;&
     *)
       [ -n "${PKG_MODIFIED["$subject"]:-}" ] && return 1
-      pkg_owns "$subject" && return 0
+      pkg_owns_fast "$subject" && return 0
       # A .wants/ entry is an ENABLEMENT symlink, not a unit. It is explained
       # exactly when what it points at is explained - otherwise every enabled
       # package service on the box reports as an unexplained unit, which was
@@ -528,7 +603,7 @@ explained() {
         target=$(readlink -f -- "$subject" 2>/dev/null) || return 1
         [ -n "$target" ] && [ "$target" != "$subject" ] || return 1
         [ -n "${PKG_MODIFIED["$target"]:-}" ] && return 1
-        pkg_owns "$target" && return 0
+        pkg_owns_fast "$target" && return 0
         case "$kind" in unit|userunit) unit_is_expected "$target" && return 0 ;; esac
       fi
       ;;
@@ -726,6 +801,7 @@ report() {
 
   printf '%s on %s\n' "$heading" "${CCDC_BOX_NAME:-this box}"
   printf 'read-only. %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  [ "$fast" -eq 1 ] && printf 'FAST pass: package checksums are cached and the SUID sweep was skipped.\n'
   if [ -r "$blessed" ]; then
     printf 'compared against the baseline blessed %s\n' \
       "$(date -u -d "@$(stat -c '%Y' "$blessed")" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)"

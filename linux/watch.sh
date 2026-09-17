@@ -137,7 +137,7 @@ prev_dir=$(ls -dt "$watch_dir"/pass-* 2>/dev/null | head -1 || true)
 
 one_pass() {
   local changed=0 trips=0 failed=0 rc=0 f added removed this_dir prior_dir d canary_out
-  local audit_rc=0 audit_out degraded=0
+  local audit_rc=0 audit_out degraded=0 unexplained=0 base_out base_red base_all
 
   # 1. canary first: it is instant and it is the highest-confidence signal on
   # the box. A moved decoy is not an anomaly to weigh, it is someone in.
@@ -231,6 +231,36 @@ EOF
     fi
   fi
 
+  # The pass-to-pass diff above answers "did something change in the last two
+  # minutes". It cannot answer "is anything still wrong", and that gap is not
+  # cosmetic: a foothold appears once, is reported once, and from the next pass
+  # onward it is part of the box. In the 2026-09-17 drill a payload running out
+  # of /dev/shm appeared at 00:51 and had decayed to "its CPU time changed" by
+  # 00:53. A rootkit that survives one cycle is invisible to a differ, forever.
+  #
+  # So this asks the absolute question every pass, against the blessed baseline.
+  # Nothing here decays: an item stays listed until it is removed or recorded as
+  # a standing exception.
+  if [ -x "$SCRIPT_DIR/baseline.sh" ]; then
+    base_out=$("$SCRIPT_DIR/baseline.sh" --config "$config" --fast 2>/dev/null)
+    base_red=$(printf '%s\n' "$base_out" | grep -cE '^  \[[0-9]+\] RED' || true)
+    base_all=$(printf '%s\n' "$base_out" | grep -cE '^  \[[0-9]+\]' || true)
+    [ -n "$base_red" ] || base_red=0
+    [ -n "$base_all" ] || base_all=0
+    if [ "$base_red" -gt 0 ]; then
+      unexplained=1
+      alert "$base_red UNEXPLAINED thing(s) still on this box (of $base_all total)"
+      printf '%s\n' "$base_out" | grep -E '^  \[[0-9]+\] RED' | head -12 | sed 's/^  /      /'
+      if [ "$base_red" -gt 12 ]; then
+        printf '      ... and %s more RED not shown here\n' "$((base_red - 12))"
+      fi
+      printf '      these do not go away on their own. Full detail and what to do:\n'
+      printf '        sudo %q/baseline.sh --config %q\n' "$SCRIPT_DIR" "$config"
+    elif [ "$base_all" -gt 0 ]; then
+      printf '%s  %s unexplained item(s), none RED\n' "$(stamp)" "$base_all"
+    fi
+  fi
+
   prev_dir="$this_dir"
 
   # Keep the last N passes so the directory cannot grow without bound over a
@@ -239,7 +269,8 @@ EOF
     [ -n "$old" ] && rm -rf -- "$old"
   done
 
-  if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$failed" -eq 0 ] && [ "$degraded" -eq 0 ]; then
+  if [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$failed" -eq 0 ] \
+     && [ "$degraded" -eq 0 ] && [ "$unexplained" -eq 0 ]; then
     quiet "quiet - no persistence/privilege changes, no canary trips, audit intact"
   else
     # Both of these get pasted, so both carry sudo and an absolute path. The
@@ -252,12 +283,16 @@ EOF
     printf '\n'
   fi
   [ "$failed" -eq 0 ] || return 4
-  [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$degraded" -eq 0 ] || return 3
+  [ "$changed" -eq 0 ] && [ "$trips" -eq 0 ] && [ "$degraded" -eq 0 ] \
+    && [ "$unexplained" -eq 0 ] || return 3
   return 0
 }
 
 printf 'watch.sh: detection-only loop, every %ss. Ctrl-C to stop.\n' "$interval"
 printf '  watching: canary trips + persistence/privilege changes + audit/log health\n'
+printf '            + anything on this box that nothing explains. That last one is\n'
+printf '            absolute, not a diff: it stays listed until you remove it or\n'
+printf '            record it as a standing exception.\n'
 printf '  NOT watching: whether the scorer can reach your service. Check that\n'
 printf '  from OFF the box yourself - nothing here can see it.\n\n'
 

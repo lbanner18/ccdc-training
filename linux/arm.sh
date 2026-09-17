@@ -179,6 +179,74 @@ case "${CCDC_HTTP_CHECKS:-}" in
     printf '    address the scorer uses.\n' ;;
 esac
 
+# Is there a blessed baseline to watch for drift FROM?
+#
+# arm.sh starts the machinery that notices change. Without a baseline, the only
+# question that machinery can answer is "did anything change in the last two
+# minutes" - and a foothold that survives one cycle stops being reported
+# forever. That is not a hypothetical: in the 2026-09-17 drill a payload running
+# out of /dev/shm was reported once and had decayed to "its CPU time changed"
+# ninety seconds later.
+#
+# This is a warning, not a refusal. Arming a box with no baseline is still far
+# better than not arming it, and there are good reasons to do it in this order
+# on a box you have just been handed.
+baseline_file="${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}/baseline/inventory"
+exceptions_file="${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}/baseline/exceptions"
+if [ -r "$baseline_file" ]; then
+  good "blessed baseline present ($(grep -c . "$baseline_file" 2>/dev/null) items, $(date -u -d "@$(stat -c '%Y' "$baseline_file" 2>/dev/null)" '+%Y-%m-%dT%H:%MZ' 2>/dev/null))"
+else
+  printf '    WARNING: no blessed baseline. The watch loop will report what
+'
+  printf '    CHANGED since its last pass, but it cannot tell you what is still
+'
+  printf '    wrong - so anything already on this box, or planted once and left
+'
+  printf '    alone, becomes part of the scenery after one cycle.
+'
+  printf '
+'
+  printf '    Look at what nothing explains, remove what should not be here, and
+'
+  printf '    freeze the rest. It takes two commands:
+'
+  printf '
+'
+  printf '      sudo %s/baseline.sh --config %s
+' "$qkit" "$qconfig"
+  printf '      sudo %s/baseline.sh --config %s --bless
+' "$qkit" "$qconfig"
+  printf '
+'
+  printf '    You can arm first and do that after; the watch loop picks the
+'
+  printf '    baseline up on its next pass without a restart.
+'
+fi
+
+# Standing exceptions are listed EVERY time, on purpose. An exception is a hole
+# you opened deliberately, and one that scrolls out of sight becomes a permanent
+# blind spot - which is the decay bug above wearing a different hat.
+if [ -r "$exceptions_file" ]; then
+  exc_n=$(grep -c . "$exceptions_file" 2>/dev/null) || exc_n=0
+  if [ "${exc_n:-0}" -gt 0 ]; then
+    printf '
+    STANDING EXCEPTIONS (%s) - allowed on purpose, never flagged again:
+' "$exc_n"
+    while IFS='|' read -r ekind esubject ewhen ewhy; do
+      [ -n "${ekind:-}" ] || continue
+      printf '      %-30s %s  %s
+' "$esubject" "$ewhen" "$ewhy"
+    done <"$exceptions_file"
+    printf '    Each of these is a thing that would otherwise be reported. If one
+'
+    printf '    no longer needs to be allowed, remove its line from:
+'
+    printf '      sudo %s %q
+' "\$EDITOR" "$exceptions_file"
+  fi
+fi
+
 if [ "$failed" -gt 0 ] && [ "$apply" -eq 1 ]; then
   ccdc_die "preflight found $failed problem(s); nothing was armed"
 fi
