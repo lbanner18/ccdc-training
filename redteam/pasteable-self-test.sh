@@ -999,5 +999,49 @@ else
   printf '%s\n' "$sqbrack" | sed 's/^/    /'
 fi
 
+# The inverse of the --help check above: every flag a tool PRINTS must be a flag
+# it ACCEPTS.
+#
+# baseline.sh printed a remediation command containing --remove-key for a week's
+# worth of minutes before anyone noticed the flag did not exist. Its --help was
+# complete and its argument parser was correct; the gap was that it advertised a
+# command it could not run, which is the single failure this whole suite exists
+# to prevent, arriving from a direction nothing was watching.
+ghostflag=$(python3 - "$ROOT" <<'SCAN'
+import glob, os, re, sys
+bad = []
+for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
+    src = open(f, encoding='utf-8', errors='replace').read()
+    tool = os.path.basename(f)
+    # Flags the argument parser handles: the case arms inside `case "$1" in`.
+    accepted = set(re.findall(r'^\s*(--[a-z][a-z0-9-]*)\)', src, re.M))
+    accepted |= set(re.findall(r'^\s*-[a-z]\|(--[a-z][a-z0-9-]*)\)', src, re.M))
+    accepted |= set(re.findall(r'\|(--[a-z][a-z0-9-]*)\)', src))
+    # Flags this tool prints in a command that names ITSELF. A tool printing
+    # another tool's flags is fine and common, so only self-referencing lines
+    # count.
+    for line in src.splitlines():
+        st = line.strip()
+        if not st.startswith(("printf", "fixcmd", "fix ")):
+            continue
+        if tool not in line and '$qself' not in line and '$0' not in line:
+            continue
+        for flag in re.findall(r'(--[a-z][a-z0-9-]{2,})', line):
+            if flag in accepted:
+                continue
+            # Flags belonging to another tool named on the same line.
+            if re.search(r'/[a-z-]+\.sh[^|]*' + re.escape(flag), line) and tool not in line:
+                continue
+            bad.append('%s: prints %s but does not accept it' % (tool, flag))
+print('\n'.join(sorted(set(bad))))
+SCAN
+)
+if [ -z "$ghostflag" ]; then
+  ok 'no tool prints a command using a flag it does not accept'
+else
+  no 'a tool advertises a flag it cannot parse'
+  printf '%s\n' "$ghostflag" | sed 's/^/    /' | head -8
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

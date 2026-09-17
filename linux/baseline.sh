@@ -680,6 +680,7 @@ why_for() {
     initscript) printf 'SysV init script - runs as root at boot; no package owns it%s' "$age" ;;
     envfile)   printf 'sourced by init scripts as root; no package owns it%s' "$age" ;;
     dhcphook)  printf 'runs as root on every DHCP lease; no package owns it%s' "$age" ;;
+    netdispatch) printf 'runs as root every time an interface goes up or down; no package owns it%s' "$age" ;;
     polkit)    printf 'polkit rule - decides who may do privileged things%s' "$age" ;;
     syslog)    printf 'syslog config, which can execute programs on matching lines%s' "$age" ;;
     skel)      printf 'copied into the home directory of every NEW user%s' "$age" ;;
@@ -764,7 +765,7 @@ evidence_copy() {
 action_for() {
   local kind=$1 subject=$2 detail=$3 parent
   case "$kind" in
-    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader)
+    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader|netdispatch)
       printf 'copy it to evidence, then delete it' ;;
     cron)
       case "$subject" in
@@ -772,6 +773,11 @@ action_for() {
           printf 'copy it to evidence, then remove that user'"'"'s crontab entirely' ;;
         *) printf 'copy it to evidence, then delete it' ;;
       esac ;;
+    userunit)
+      # A unit under a user's ~/.config/systemd/user. systemctl --user cannot be
+      # driven sensibly from here for another user's session, so the file is
+      # removed and the operator is told to reload that user's manager.
+      printf 'copy it to evidence, then delete it (you will need: systemctl --user daemon-reload as that user)' ;;
     unit)
       parent=$(dropin_parent "$subject")
       if [ -n "$parent" ]; then
@@ -963,7 +969,7 @@ do_action() {
   fi
 
   case "$kind" in
-    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader)
+    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader|userunit|netdispatch)
       remove_file_safely "$subject" ;;
 
     cron)
@@ -1076,7 +1082,7 @@ card_for() {
     procexe)   printf 'playbooks/remediation-cards.md  CARD 6 - process from /tmp or with a deleted exe' ;;
     sudoers)   printf 'playbooks/remediation-cards.md  CARD 7 - passwordless sudo you did not configure' ;;
     listener)  printf 'playbooks/remediation-cards.md  CARD 8 - unexpected listening port' ;;
-    pam|envfile|polkit|skel)
+    pam|envfile|polkit|skel|netdispatch|dhcphook|syslog|logrotate|xdgauto|aptconf|udev)
                printf 'playbooks/remediation-cards.md  CARD 9 - /etc changed and it was not you' ;;
     svcshell)  printf 'playbooks/remediation-cards.md  CARD 10 - service account with a shell' ;;
     profile|motd|loader)
@@ -1475,7 +1481,10 @@ case "$mode" in
     [ -r "$queue" ] || ccdc_die "nothing has been listed yet, so there is no item $approve_items to approve.
   Look at the box first, which writes the numbered queue this reads:
     sudo $qself --config $qconfig"
-    load_sets
+    # load_sets reads every package's file list, which is only needed to decide
+    # whether something is still unexplained - a question only do_action asks.
+    # A dry run never gets there, so it does not pay for it.
+    [ "$apply" -eq 1 ] && load_sets
     # Work out which item numbers were asked for.
     wanted=''
     if [ "$approve_items" = all-green ]; then

@@ -293,6 +293,9 @@ service behaving, and whether anything reappears after removal.
 
 ## Build order
 
+Status as of 2026-09-17: 1 and 3 are done, 2 is done for `baseline.sh` and
+outstanding for `triage.sh`/`sentry.sh`, 4 has not started.
+
 1. **Baseline and drift** — the blessed baseline, the three-clause explained
    test, semantic readings frozen alongside the file inventory, drift measured
    against the baseline rather than the previous pass.
@@ -306,6 +309,16 @@ service behaving, and whether anything reappears after removal.
 3. **Alerting** — deduped `wall` on RED, prompt indicator otherwise.
 4. **Render pass** — drive every tool through every mode and read the output as
    an operator rather than as its author.
+5. **Atomic Red Team as the adversary.** Not as a denominator — that was a wrong
+   turn, since a curated list of 435 techniques is a better anecdote list, not a
+   measure of coverage. The denominator is "every execution trigger on this box
+   resolves to a package, the packet, or your own work", which `baseline.sh`
+   answers in nine seconds. ART's role is to try to beat that model, and
+   anything that gets through is work. Practical constraints: the lab VM has no
+   network, so download-based atomics fail for the wrong reason and must be
+   scored inconclusive rather than detected; several atomics are destructive
+   beyond what their cleanup reverses, so each one is read before it runs and
+   the box is reverted afterwards; many need prereqs the isolated box lacks.
 
 ## How to iterate from here
 
@@ -319,3 +332,32 @@ The method that produced the gaps was security by anecdote. Replacing it:
 - **Generate drills from the inventory, not from imagination.** If `plant.sh`
   picks at random from the mechanism list, a drill stops measuring "did anyone
   think of this" and starts measuring real coverage.
+
+---
+
+## The prompt indicator
+
+`wall` interrupts you when something new goes RED. It deliberately does not
+repeat itself, which leaves a second question unanswered: *is there anything
+outstanding right now?* That belongs somewhere always visible and never
+intrusive, which is the shell prompt.
+
+Add to `~/.bashrc` on the box:
+
+```bash
+ccdc_prompt() {
+  local q=/var/tmp/ccdc-evidence/baseline/queue n
+  n=$(sudo -n grep -c . "$q" 2>/dev/null) || return 0
+  [ "${n:-0}" -gt 0 ] && printf '[!%s] ' "$n"
+}
+PS1='$(ccdc_prompt)'"$PS1"
+```
+
+It prints `[!6]` while six things are unexplained and nothing at all when the
+box is clean, so a clean box is silent and a dirty one is impossible to forget
+about. It reads the queue that `baseline.sh` already writes, so it costs one
+`grep` per prompt and needs no daemon.
+
+If `sudo -n` prompts rather than failing silently on your box, give the account
+a NOPASSWD rule for exactly that one read - and record it as a standing
+exception so the tool does not later report the rule you added.

@@ -152,6 +152,9 @@ linux/                    Bash tools for Linux boxes:
   watch.sh                detection sweep; folded into sentry, also runnable alone
   canary.sh               decoy files + auditd tripwires
   audit.sh                persistent audit rules; catches a wiped log
+  baseline.sh             what is on this box that nothing explains, and what
+                          to do about each one. Bless a known-good state, then
+                          every later change is measured against it forever
   watchdog.sh             restarts a dead scored service (run via guardian)
   guardian.sh             keeps the watchdog alive against an attacker w/ root
   services.sh             review and reversibly disable unneeded daemons
@@ -166,10 +169,16 @@ linux/                    Bash tools for Linux boxes:
   diff-evidence.sh        compare two evidence snapshots
 windows/                  PowerShell first-pass tools
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (280 assertions, non-root)
+  self-test.sh            runs every suite below (301 assertions, non-root)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag
-                          without documentation
+                          without documentation, and no flag a tool advertises
+                          but cannot parse
+  baseline-self-test.sh   every finding kind has an action or a written reason
+                          it needs a human; nothing destructive can reach a
+                          path outside the trigger directories
+  night-drill.sh          eight footholds, including two that no content-based
+                          check can see
   walkthrough.sh          five planted footholds for hands-on practice
   live.sh                 five footholds that are RUNNING, for the
                           freeze-before-kill drill

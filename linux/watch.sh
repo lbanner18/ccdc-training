@@ -104,6 +104,33 @@ alert() {
   printf '\n*** %s  %s\n' "$(stamp)" "$1"
   ccdc_append_log "$log" "ALERT $1"
 }
+
+# Reach the operator when they are not looking at this window.
+#
+# Nothing in this kit notified anyone of anything. There was no wall, no
+# notify-send, no tty write, no mail - the only mechanism that existed was a
+# terminal bell in sentry.sh, and sentry.sh hardcodes --no-bell into the systemd
+# unit it installs. You found out when you typed the command, which during an
+# inject is a long time.
+#
+# wall reaches every logged-in terminal in seconds, needs nothing installed, and
+# interrupts what you are typing. That last part is the point.
+#
+# Deduplication is not optional. Walled every interval about the same finding,
+# an operator learns to ignore wall inside ten minutes, and then the mechanism
+# is worse than not having it - the same decay problem this loop was just fixed
+# for, arriving through the notification channel instead.
+notified_file="$state_dir/notified"
+notify_operator() {
+  local key=$1 msg=$2
+  [ "${CCDC_WATCH_NOTIFY:-1}" -eq 1 ] || return 0
+  ccdc_have wall || return 0
+  [ -f "$notified_file" ] && grep -Fqx -- "$key" "$notified_file" 2>/dev/null && return 0
+  printf '%s\n' "$key" >>"$notified_file"
+  # -n suppresses wall's own banner; not every wall has it, so fall back.
+  printf '%s\n' "$msg" | wall -n 2>/dev/null || printf '%s\n' "$msg" | wall 2>/dev/null || true
+  ccdc_append_log "$log" "NOTIFY $key"
+}
 quiet() { printf '%s  %s\n' "$(stamp)" "$1"; }
 
 # Audit health is a STATE, not an event, and this loop reports changes.
@@ -137,7 +164,7 @@ prev_dir=$(ls -dt "$watch_dir"/pass-* 2>/dev/null | head -1 || true)
 
 one_pass() {
   local changed=0 trips=0 failed=0 rc=0 f added removed this_dir prior_dir d canary_out
-  local audit_rc=0 audit_out degraded=0 unexplained=0 base_out base_red base_all
+  local audit_rc=0 audit_out degraded=0 unexplained=0 base_out base_red base_all redline
 
   # 1. canary first: it is instant and it is the highest-confidence signal on
   # the box. A moved decoy is not an anomaly to weigh, it is someone in.
@@ -145,6 +172,9 @@ one_pass() {
   if [ "${rc:-0}" -eq 3 ]; then
     trips=1
     alert "CANARY TRIPPED"
+    notify_operator "canary-$(printf '%s' "$canary_out" | md5sum | cut -c1-12)" \
+      "CCDC: CANARY TRIPPED on $(hostname). Someone touched a decoy file.
+  sudo $SCRIPT_DIR/canary.sh --config $config --check"
     printf '%s\n' "$canary_out" | grep -E 'TRIPPED|AUDIT|HINT' | sed 's/^/      /'
   elif [ "${rc:-0}" -ne 0 ]; then
     failed=1
@@ -250,6 +280,14 @@ EOF
     if [ "$base_red" -gt 0 ]; then
       unexplained=1
       alert "$base_red UNEXPLAINED thing(s) still on this box (of $base_all total)"
+      # One wall per distinct finding, not one per pass. A standing finding that
+      # you have already seen must not keep interrupting you.
+      while IFS= read -r redline; do
+        [ -n "$redline" ] || continue
+        notify_operator "red-$(printf '%s' "$redline" | sed 's/^ *\[[0-9]*\] *//' | md5sum | cut -c1-12)" \
+          "CCDC: $(printf '%s' "$redline" | sed 's/^ *//') on $(hostname)
+  sudo $SCRIPT_DIR/baseline.sh --config $config"
+      done < <(printf '%s\n' "$base_out" | grep -E '^  \[[0-9]+\] RED')
       printf '%s\n' "$base_out" | grep -E '^  \[[0-9]+\] RED' | head -12 | sed 's/^  /      /'
       if [ "$base_red" -gt 12 ]; then
         printf '      ... and %s more RED not shown here\n' "$((base_red - 12))"
