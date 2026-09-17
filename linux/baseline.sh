@@ -39,6 +39,9 @@ config=''
 mode='look'
 allow_what=''
 allow_reason=''
+approve_items=''
+remove_key=''
+force_key=0
 apply=0
 show_all=0
 fast=0
@@ -48,17 +51,25 @@ while [ "$#" -gt 0 ]; do
     --config) config=${2:?missing config path}; shift 2 ;;
     --bless)  mode='bless'; shift ;;
     --status) mode='status'; shift ;;
+    --approve) mode='approve'; approve_items=${2:?missing item number(s)}; shift 2 ;;
+    --remove-key) mode='removekey'; remove_key=${2:?missing key fingerprint}; shift 2 ;;
+    --i-have-console-access) force_key=1; shift ;;
     --allow)  mode='allow'; allow_what=${2:?missing --allow value}; shift 2 ;;
     --reason) allow_reason=${2:?missing --reason text}; shift 2 ;;
     --all)    show_all=1; shift ;;
     --fast)   fast=1; shift ;;
     --apply)  apply=1; CCDC_DRY_RUN=0; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--bless|--status|--allow WHAT --reason TEXT] [--all] [--apply]\n' "$0"
+      printf 'usage: %s --config FILE [--bless|--status|--approve N|--allow WHAT --reason TEXT]\n' "$0"
+      printf '       [--all] [--fast] [--apply]\n'
       printf '\n'
       printf '  (no mode)   look at everything; read-only; reports what nothing explains\n'
       printf '  --bless     freeze the current box as the known-good baseline\n'
       printf '  --status    what has drifted since the blessing\n'
+      printf '  --approve N act on item N from the last listing (also 1,3,4 or all-green)\n'
+      printf '  --remove-key FP  delete one authorised SSH key, named by fingerprint.\n'
+      printf '              Refuses to remove a key that has logged in to this box\n'
+      printf '              unless --i-have-console-access is also given.\n'
       printf '  --allow     record a standing exception (needs --reason and --apply)\n'
       printf '  --all       include things held back from the first screen\n'
       printf '  --fast      skip the two slow checks (package checksums, SUID sweep)\n'
@@ -88,6 +99,7 @@ mkdir -p "$state_dir" 2>/dev/null \
 baseline_dir="$state_dir/baseline"
 blessed="$baseline_dir/inventory"
 exceptions="$baseline_dir/exceptions"
+queue="$baseline_dir/queue"
 
 # --- the enumeration ---------------------------------------------------------
 #
@@ -222,7 +234,7 @@ inventory_files() {
 # So the baseline freezes readings, not just paths.
 
 inventory_semantic() {
-  local u fp comment line proto addr port
+  local u fp comment line lineno proto addr port
 
   # Accounts that can log in as root, and service accounts with a real shell.
   awk -F: '$3 == 0 {print "uid0|" $1 "|shell=" $7}' /etc/passwd 2>/dev/null
@@ -237,11 +249,22 @@ inventory_semantic() {
     [ -n "$u" ] || u=$(basename -- "$home")
     for f in "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"; do
       [ -r "$f" ] || continue
+      lineno=0
       while IFS= read -r line; do
+        lineno=$((lineno + 1))
         case "$line" in ''|'#'*) continue ;; esac
         fp=$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
         comment=$(printf '%s\n' "$line" | awk '{print $NF}')
-        [ -n "$fp" ] || continue
+        if [ -z "$fp" ]; then
+          # A line this ssh-keygen cannot fingerprint used to be skipped
+          # silently, which means the report's answer to "what can log in here"
+          # quietly omitted it. Two ways that bites: a key in an algorithm this
+          # ssh-keygen does not know but sshd does, and a hand-edited file where
+          # the damage IS the malformed line. Report it as what it is.
+          printf 'sshkey|%s:UNPARSEABLE-line%s|%s (this line could not be parsed as a key - look at it)\n' \
+            "$u" "$lineno" "$(printf '%s' "$line" | cut -c1-40)"
+          continue
+        fi
         printf 'sshkey|%s:%s|%s\n' "$u" "$fp" "$comment"
       done <"$f"
     done
@@ -388,9 +411,15 @@ inventory_processes() {
          [ -n "$subject" ] || continue ;;
     esac
     PROC_PIDS["$subject"]="${PROC_PIDS["$subject"]:-}$pid "
-    case "${PROC_FLAGS["$subject"]:-}" in
+    # Always create the key, even when there are no flags. The deduplication
+    # here used to skip the assignment entirely for a process with an empty
+    # flag string, so the key never existed and the printf below tripped
+    # `set -u` once per clean process - twenty-four lines of "unbound variable"
+    # above an otherwise correct report.
+    PROC_FLAGS["$subject"]="${PROC_FLAGS["$subject"]:-}"
+    case "${PROC_FLAGS["$subject"]}" in
       *"$flags"*) ;;
-      *) PROC_FLAGS["$subject"]="${PROC_FLAGS["$subject"]:-}$flags" ;;
+      *) PROC_FLAGS["$subject"]="${PROC_FLAGS["$subject"]}$flags" ;;
     esac
   done
 
@@ -407,7 +436,7 @@ inventory_processes() {
     printf 'procexe|%s|pids=%s%s%s\n' \
       "$subject" \
       "$(printf '%s' "${PROC_PIDS["$subject"]}" | tr ' ' ',' | sed 's/,$//')" \
-      "$(printf '%s' "${PROC_FLAGS["$subject"]}" | tr -s ' ' | sed 's/^ */ flags=/;s/ /,/g2')" \
+      "$(printf '%s' "${PROC_FLAGS["$subject"]:-}" | tr -s ' ' | sed 's/^ */ flags=/;s/ /,/g2')" \
       "${sockets:+ sockets=$(printf '%s' "$sockets" | sed 's/ *$//')}"
   done
 }
@@ -663,6 +692,477 @@ why_for() {
 # upgrades is written by the installer and owned by no package, and calling that
 # RED next to a drop-in planted twenty minutes ago teaches the operator that RED
 # means nothing.
+# --- acting on a finding -----------------------------------------------------
+#
+# Everything below removes things from a running box, so the guard rails come
+# first and none of them are optional.
+#
+#   - Nothing is removed that a package owns. Unexplained already implies that,
+#     but the check is repeated at the moment of action, because the listing and
+#     the removal are two separate commands with a human in between.
+#   - Nothing is removed outside the trigger directories this tool enumerates.
+#     A bug in subject parsing must not be able to reach /etc/passwd.
+#   - Nothing scored is touched. The drop-in ON a scored unit is removed; the
+#     scored unit itself never is.
+#   - Everything is copied to evidence BEFORE it is removed, so every action is
+#     reversible and every removal is inject evidence.
+#   - The finding is re-verified against the live box first. Item numbers come
+#     from a frozen queue, and a box that changed underneath the operator must
+#     not silently move item 2 onto something else.
+
+removal_root_ok() {
+  local f=$1 d
+  for d in $exec_trigger_dirs; do
+    case "$f" in "$d"/*) return 0 ;; esac
+  done
+  for d in $exec_trigger_files; do
+    [ "$f" = "$d" ] && return 0
+  done
+  # Payload directories a finding can legitimately point into.
+  case "$f" in
+    /usr/local/lib/*|/usr/local/bin/*|/usr/local/sbin/*|/dev/shm/*|/tmp/*|/var/tmp/*) return 0 ;;
+  esac
+  return 1
+}
+
+# The unit a drop-in belongs to, if this path is a drop-in.
+dropin_parent() {
+  local f=$1 parent
+  case "$f" in
+    */*.service.d/*.conf|*/*.timer.d/*.conf|*/*.socket.d/*.conf)
+      parent=$(basename -- "$(dirname -- "$f")")
+      printf '%s' "${parent%.d}" ;;
+  esac
+}
+
+is_scored_unit() {
+  local name=$1 svc
+  for svc in ${CCDC_SYSTEMD_SERVICES:-} ${CCDC_PROTECT_SERVICES:-}; do
+    [ "${name%.service}" = "${svc%.service}" ] && return 0
+  done
+  return 1
+}
+
+evidence_copy() {
+  local f=$1 dest
+  dest="$state_dir/removed/$(ccdc_now)"
+  mkdir -p "$dest" 2>/dev/null || return 1
+  chmod 700 "$dest" 2>/dev/null
+  if [ -e "$f" ]; then
+    cp -a -- "$f" "$dest/$(printf '%s' "${f#/}" | tr '/' '_')" 2>/dev/null || return 1
+    ccdc_hash_file "$f" >>"$dest/hashes.txt" 2>/dev/null
+  fi
+  printf '%s' "$dest"
+}
+
+# What WILL this do, in a sentence the operator can refuse?
+#
+# An empty answer means "no automatic action" and sends the finding to the
+# NEEDS YOU block. That is a deliberate decision per kind, never an oversight:
+# thirteen of triage's twenty-seven checks had no action simply because nobody
+# had written one, which is the gap this whole design exists to close.
+action_for() {
+  local kind=$1 subject=$2 detail=$3 parent
+  case "$kind" in
+    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader)
+      printf 'copy it to evidence, then delete it' ;;
+    cron)
+      case "$subject" in
+        /var/spool/cron/crontabs/*)
+          printf 'copy it to evidence, then remove that user'"'"'s crontab entirely' ;;
+        *) printf 'copy it to evidence, then delete it' ;;
+      esac ;;
+    unit)
+      parent=$(dropin_parent "$subject")
+      if [ -n "$parent" ]; then
+        if is_scored_unit "$parent"; then
+          printf 'remove the DROP-IN only, daemon-reload, restart %s, then confirm it answers before reporting done. Does not touch %s itself' "$parent" "$parent"
+        else
+          printf 'remove the drop-in, then daemon-reload'
+        fi
+      else
+        printf 'disable and stop the unit, copy it to evidence, delete it, daemon-reload' ;
+      fi ;;
+    uid0)
+      printf 'lock the account, remove its login shell, then delete the UID-0 alias while KEEPING its home directory' ;;
+    svcshell)
+      printf 'set the shell to nologin and stop any processes it is running' ;;
+    suid)
+      printf 'clear the setuid/setgid bits, copy to evidence, then delete the file' ;;
+    procexe)
+      printf 'capture the process to a case directory, kill it by PID, then delete the file it ran from' ;;
+    *) printf '' ;;
+  esac
+}
+
+# For findings with no automatic action: why not, and what resolves it.
+#
+# This gets prose, not labels. The first draft of this block read "check: you
+# are logged in right now with (a). Removing (b) cannot lock you out. Verify
+# with: ssh-add -l" - a pile of fragments, and the command was wrong besides,
+# since ssh-add lists the local agent rather than what the box authorises.
+#
+# The shape that works: what was found and when, why it will not be touched
+# automatically, the one command that resolves the ambiguity, and what to do if
+# the answer is surprising.
+needs_you_for() {
+  local kind=$1 subject=$2 detail=$3 user fp
+
+  case "$kind" in
+    sshkey)
+      user=${subject%%:*}; fp=${subject#*:}
+      case "$fp" in
+        UNPARSEABLE-*)
+          printf '       %s/.ssh/authorized_keys has a line that is not a valid key.\n' "$user"
+          printf '       sshd ignores lines it cannot parse, so this one grants nobody\n'
+          printf '       access - but it did not write itself, and something edited\n'
+          printf '       that file. Read it and find out what:\n\n'
+          printf '         sudo cat -n ~%s/.ssh/authorized_keys\n\n' "$user"
+          printf '         %s\n\n' "$detail"
+          printf '       If you did not put it there, treat the file as touched: check\n'
+          printf '       its mtime against when you were last in it, and check every\n'
+          printf '       OTHER key in it too.\n'
+          return 0 ;;
+      esac
+      if [ -r "$blessed" ]; then
+        printf '       A key that can log in as %s. It is not in the blessed baseline,\n' "$user"
+        printf '       which means it was added after this box was frozen.\n\n'
+      else
+        printf '       A key that can log in as %s. Nothing has been blessed yet, so\n' "$user"
+        printf '       this is every key on the box, not just the new ones - you are\n'
+        printf '       confirming which ones belong here.\n\n'
+      fi
+      printf '         %s   %s\n\n' "$fp" "$detail"
+      printf '       I am not going to delete it for you, because deleting the wrong\n'
+      printf '       line locks you out of a box you are being scored on.\n\n'
+      printf '       You are logged in over SSH right now, and the key that let you in\n'
+      printf '       is written in the SSH log. Run this and it prints the fingerprint\n'
+      printf '       of the key YOUR session used:\n\n'
+      printf '         sudo journalctl -u ssh | grep "Accepted publickey" | tail -1\n\n'
+      printf '       If that fingerprint is NOT the one above, the one above is not\n'
+      printf '       yours and you can remove it. Naming it by fingerprint, so you\n'
+      printf '       cannot delete a different line than the one you read:\n\n'
+      printf '         sudo %s --config %s --remove-key %s --apply\n\n' "$qself" "$qconfig" "$fp"
+      printf '       If it IS yours, record it so it stops being reported:\n\n'
+      printf '         sudo %s --config %s --allow %s \\\n' "$qself" "$qconfig" "$fp"
+      printf '              --reason "my own key, added after bless" --apply\n' ;;
+
+    sshd)
+      printf '       An effective sshd setting that does not match the blessed\n'
+      printf '       baseline. sshd -T resolves Includes and drop-ins, so this is\n'
+      printf '       what the daemon is ACTUALLY doing, not what sshd_config says.\n\n'
+      printf '         %s is now: %s\n\n' "$subject" "$detail"
+      printf '       SSH policy is not changed automatically here, and that is\n'
+      printf '       deliberate: a wrong value written to a live sshd is how people\n'
+      printf '       lock themselves out of a scored box mid-event. sshd.sh makes\n'
+      printf '       the change, validates it with sshd -t first, and arms a\n'
+      printf '       rollback timer before it reloads anything:\n\n'
+      printf '         sudo %q/sshd.sh --config %s\n\n' "$SCRIPT_DIR" "$qconfig"
+      printf '       First find out WHERE the setting comes from, because it may be\n'
+      printf '       in a drop-in you have not looked at:\n\n'
+      printf '         sudo grep -rn %q /etc/ssh/sshd_config /etc/ssh/sshd_config.d/\n' "$subject" ;;
+
+    listener)
+      printf '       A listening socket that is not in the blessed baseline.\n\n'
+      printf '         %s   %s\n\n' "$subject" "$detail"
+      printf '       Killing a listener is not automatic because a scored service is\n'
+      printf '       a listener, and the fastest way to lose uptime is to close the\n'
+      printf '       port the scorer is checking.\n\n'
+      printf '       Find out what holds it and whether that process is explained:\n\n'
+      printf '         sudo ss -tulnp | grep %q\n\n' "${subject#*/}"
+      printf '       If the owning process appears elsewhere on this screen as an\n'
+      printf '       unexplained procexe, deal with it there - that finding knows how\n'
+      printf '       to capture the process before killing it. If it is a scored\n'
+      printf '       service, add the port to CCDC_ALLOWED_TCP_PORTS in your config.\n' ;;
+
+    module)
+      printf '       A loaded kernel module that is not in the blessed baseline.\n\n'
+      printf '         %s\n\n' "$subject"
+      printf '       Unloading a module is not automatic because getting it wrong\n'
+      printf '       takes the box off the network or takes the disk away.\n\n'
+      printf '       Find out what it is and whether anything is using it:\n\n'
+      printf '         sudo modinfo %q\n' "$subject"
+      printf '         sudo lsmod | grep %q\n\n' "$subject"
+      printf '       A module with no description, no signature and a used-by count\n'
+      printf '       of 0 is worth taking seriously. One that arrived with a driver\n'
+      printf '       you installed is not.\n' ;;
+
+    sudoers|pam)
+      printf '       A %s file that nothing explains.\n\n' "$kind"
+      printf '         %s\n\n' "$subject"
+      printf '       This is not removed automatically because both of these files\n'
+      printf '       decide whether you can still become root. A wrong edit to a PAM\n'
+      printf '       stack can lock every account out of the box, including yours,\n'
+      printf '       and sudoers syntax errors disable sudo entirely.\n\n'
+      printf '       Read it first:\n\n'
+      printf '         sudo cat %q\n\n' "$subject"
+      printf '       If it grants access you did not grant, remove it with visudo,\n'
+      printf '       which refuses to save a file that would break sudo:\n\n'
+      printf '         sudo visudo -f %q\n\n' "$subject"
+      printf '       Keep a root shell open in a second terminal while you do it.\n' ;;
+
+    *) return 1 ;;
+  esac
+}
+
+# Confirm a unit came back after we touched it. Anything that restarts a scored
+# service must prove the service answers again, not merely that systemd says
+# "active" - a hung daemon reads active while the scorer gets nothing.
+verify_unit_back() {
+  local unit=$1 line name host port svc waited=0 ok
+  # `systemctl restart` returns once systemd has SPAWNED the process, not once
+  # the application has bound its port - and with Type=simple that is
+  # immediately. Probing straight away reported a healthy scored web server as
+  # "did NOT come back cleanly" while it was already serving 200s, which is
+  # worse than not checking: the operator goes and starts fixing something that
+  # works. So give it time to listen, and only then decide.
+  while [ "$waited" -lt 20 ]; do
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then break; fi
+    sleep 0.5; waited=$((waited + 1))
+  done
+  systemctl is-active --quiet "$unit" 2>/dev/null || return 1
+
+  while IFS='|' read -r name host port svc; do
+    [ -n "${name:-}" ] || continue
+    [ "${svc:-}" = "$unit" ] || [ "${svc:-}" = "${unit%.service}" ] || continue
+    ccdc_have nc || continue
+    ok=0; waited=0
+    while [ "$waited" -lt 20 ]; do
+      if nc -z -w 2 "$host" "$port" >/dev/null 2>&1; then ok=1; break; fi
+      sleep 0.5; waited=$((waited + 1))
+    done
+    [ "$ok" -eq 1 ] || return 1
+  done <<EOF
+${CCDC_TCP_CHECKS:-}
+EOF
+  return 0
+}
+
+remove_file_safely() {
+  local f=$1 dest
+  removal_root_ok "$f" \
+    || { ccdc_warn "refusing to remove a path outside the trigger directories: $f"; return 1; }
+  pkg_owns_fast "$f" \
+    && { ccdc_warn "refusing to remove a package-owned file: $f"; return 1; }
+  dest=$(evidence_copy "$f") \
+    || { ccdc_warn "could not copy to evidence, so nothing was removed: $f"; return 1; }
+  rm -f -- "$f" || return 1
+  printf '    removed %s\n    a copy is in %s\n' "$f" "$dest"
+  ccdc_append_log "$baseline_dir/actions.log" "REMOVE $f evidence=$dest by=$(id -un)"
+  return 0
+}
+
+do_action() {
+  local kind=$1 subject=$2 detail=$3 parent pid pids dest user
+
+  # The listing and this command are separate, with a human in between. If the
+  # box changed in the meantime, item 2 may no longer be what was read.
+  if explained "$kind" "$subject" "$detail"; then
+    ccdc_warn "this is no longer unexplained - skipping: $kind $subject"
+    return 1
+  fi
+
+  case "$kind" in
+    motd|aptconf|udev|logrotate|xdgauto|initscript|envfile|dhcphook|polkit|syslog|skel|profile|generator|initramfs|loader)
+      remove_file_safely "$subject" ;;
+
+    cron)
+      case "$subject" in
+        /var/spool/cron/crontabs/*)
+          user=$(basename -- "$subject")
+          dest=$(evidence_copy "$subject") || return 1
+          crontab -u "$user" -r 2>/dev/null \
+            && printf '    removed %s crontab\n    a copy is in %s\n' "$user" "$dest" \
+            || { ccdc_warn "could not remove $user crontab"; return 1; }
+          ccdc_append_log "$baseline_dir/actions.log" "CRONTAB-CLEAR $user evidence=$dest" ;;
+        *) remove_file_safely "$subject" ;;
+      esac ;;
+
+    unit)
+      parent=$(dropin_parent "$subject")
+      if [ -n "$parent" ]; then
+        remove_file_safely "$subject" || return 1
+        rmdir "$(dirname -- "$subject")" 2>/dev/null
+        systemctl daemon-reload 2>/dev/null
+        if is_scored_unit "$parent"; then
+          printf '    %s is SCORED - restarting it and checking it answers\n' "$parent"
+          systemctl restart "$parent" 2>/dev/null
+          if verify_unit_back "$parent"; then
+            printf '    %s is back and answering\n' "$parent"
+          else
+            ccdc_warn "$parent did NOT come back cleanly. Check it now:
+  sudo systemctl status $parent
+  the drop-in was copied to evidence and can be restored from there"
+            return 1
+          fi
+        fi
+      else
+        # A whole unit. Never a scored one - those are explained by the config
+        # and never reach here, but check anyway before stopping anything.
+        parent=$(basename -- "$subject")
+        is_scored_unit "$parent" \
+          && { ccdc_warn "refusing to remove a scored unit: $parent"; return 1; }
+        systemctl disable --now "$parent" 2>/dev/null
+        remove_file_safely "$subject" || return 1
+        systemctl daemon-reload 2>/dev/null
+      fi ;;
+
+    uid0)
+      # Never userdel -r. A UID-0 backdoor is homed at /root nearly by
+      # definition - that IS the point of the account - and -r would delete
+      # root's keys, dotfiles and anything the team put there.
+      [ "$subject" = root ] && { ccdc_warn "refusing to touch root"; return 1; }
+      usermod -L "$subject" 2>/dev/null
+      usermod -s /usr/sbin/nologin "$subject" 2>/dev/null
+      if userdel -f "$subject" 2>/dev/null; then
+        printf '    removed the UID-0 alias %s; its home directory was left alone\n' "$subject"
+        ccdc_append_log "$baseline_dir/actions.log" "USERDEL $subject (no -r) by=$(id -un)"
+      else
+        ccdc_warn "could not delete $subject; it is locked and has no shell"
+        return 1
+      fi ;;
+
+    svcshell)
+      usermod -s /usr/sbin/nologin "$subject" 2>/dev/null \
+        || { ccdc_warn "could not change $subject's shell"; return 1; }
+      printf '    %s can no longer log in\n' "$subject"
+      pkill -u "$subject" 2>/dev/null && printf '    stopped its running processes\n'
+      ccdc_append_log "$baseline_dir/actions.log" "NOLOGIN $subject by=$(id -un)" ;;
+
+    suid)
+      chmod -s -- "$subject" 2>/dev/null \
+        && printf '    cleared the setuid/setgid bits on %s\n' "$subject"
+      # Clearing the bit neutralises the escalation and leaves the file. Anyone
+      # who still has root can chmod it back in one command, so remove it too.
+      remove_file_safely "$subject" ;;
+
+    procexe)
+      pids=$(printf '%s' "$detail" | sed -n 's/.*pids=\([0-9,]*\).*/\1/p' | tr ',' ' ')
+      [ -n "$pids" ] || { ccdc_warn "no PIDs recorded for $subject"; return 1; }
+      for pid in $pids; do
+        printf '    capturing pid %s before killing it\n' "$pid"
+        "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" --freeze --apply \
+          >/dev/null 2>&1 \
+          || ccdc_warn "capture of pid $pid failed; killing it anyway would destroy the evidence, so it was left running"
+      done
+      for pid in $pids; do
+        [ -d "/proc/$pid" ] || continue
+        # By PID, never by name. This box runs a scored python3 web server.
+        kill -9 "$pid" 2>/dev/null && printf '    killed pid %s\n' "$pid"
+      done
+      ccdc_append_log "$baseline_dir/actions.log" "KILL $subject pids=$pids by=$(id -un)"
+      if [ -e "$subject" ]; then remove_file_safely "$subject"; fi
+      printf '    now find what STARTED it, or it comes back. The captured case\n'
+      printf '    has its ancestry:  sudo %q/preserve.sh --config %s --list\n' \
+        "$SCRIPT_DIR" "$qconfig" ;;
+
+    *)
+      ccdc_warn "no automatic action for a $kind finding; see the NEEDS YOU block"
+      return 1 ;;
+  esac
+}
+
+# Which printed card covers this? The operator asked for a playbook reference on
+# every finding, and a reference that points at the wrong card is worse than
+# none - it costs a page-turn to discover it was wrong.
+card_for() {
+  case "$1" in
+    uid0)      printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
+    sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
+    cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
+    unit|generator|initscript)
+               printf 'playbooks/remediation-cards.md  CARD 4 - systemd unit that calls home' ;;
+    suid)      printf 'playbooks/remediation-cards.md  CARD 5 - SUID interpreter' ;;
+    procexe)   printf 'playbooks/remediation-cards.md  CARD 6 - process from /tmp or with a deleted exe' ;;
+    sudoers)   printf 'playbooks/remediation-cards.md  CARD 7 - passwordless sudo you did not configure' ;;
+    listener)  printf 'playbooks/remediation-cards.md  CARD 8 - unexpected listening port' ;;
+    pam|envfile|polkit|skel)
+               printf 'playbooks/remediation-cards.md  CARD 9 - /etc changed and it was not you' ;;
+    svcshell)  printf 'playbooks/remediation-cards.md  CARD 10 - service account with a shell' ;;
+    profile|motd|loader)
+               printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
+    sshd)      printf 'playbooks/packet-to-config.md  and linux/sshd.sh --help' ;;
+    *)         printf 'playbooks/baseline-design.md  (no card for %s yet)' "$1" ;;
+  esac
+}
+
+# Which key did THIS session log in with?
+#
+# The tool reads this itself rather than trusting the operator's answer, because
+# the failure mode is locking yourself out of a box you are being scored on, and
+# a warning in the output is not protection - an interlock is.
+session_key_fingerprints() {
+  local port='' line
+  # SSH_CONNECTION is "clientip clientport serverip serverport". The client port
+  # pins the exact login in the log rather than "some recent login".
+  if [ -n "${SSH_CONNECTION:-}" ]; then
+    port=$(printf '%s' "$SSH_CONNECTION" | awk '{print $2}')
+  fi
+  if [ -n "$port" ]; then
+    line=$(journalctl -u ssh -u sshd --no-pager 2>/dev/null \
+           | grep "Accepted publickey" | grep " port $port " | tail -1)
+    if [ -n "$line" ]; then
+      printf '%s\n' "$line" | grep -oE 'SHA256:[A-Za-z0-9+/=]+'
+      return 0
+    fi
+  fi
+  # No match on this session: fall back to every key that has logged in
+  # recently. That is deliberately over-broad. Refusing to delete a key that
+  # might be yours is recoverable; deleting the one that is costs you the box.
+  journalctl -u ssh -u sshd --no-pager 2>/dev/null \
+    | grep "Accepted publickey" | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sort -u
+}
+
+remove_authorized_key() {
+  local want=$1 home u f line fp found=0 dest tmp mine
+  case "$want" in
+    SHA256:*) ;;
+    *) ccdc_die "--remove-key takes a fingerprint, e.g. SHA256:abc...
+  A key is named by what it IS, never by which line it sits on: a list can
+  re-sort between reading it and acting on it, and the cost of deleting the
+  wrong line here is losing access to a scored box.
+  The listing prints the fingerprint for each key." ;;
+  esac
+
+  mine=$(session_key_fingerprints)
+  if printf '%s\n' "$mine" | grep -Fqx -- "$want" && [ "$force_key" -eq 0 ]; then
+    ccdc_die "refusing to remove $want - that key has authenticated an SSH login to
+  this box, and it may be the one holding your current session open. Removing
+  it could lock you out of a machine you are being scored on.
+
+  Check which key your session used:
+    sudo journalctl -u ssh | grep 'Accepted publickey' | tail -1
+
+  If you have console access and are certain, re-run with
+  --i-have-console-access added to this command."
+  fi
+
+  { printf '%s\n' /root; (getent passwd 2>/dev/null || cat /etc/passwd) \
+      | awk -F: '$6 ~ /^\// {print $6}'; } | sort -u | while IFS= read -r home; do
+    for f in "$home/.ssh/authorized_keys" "$home/.ssh/authorized_keys2"; do
+      [ -w "$f" ] || continue
+      tmp="$f.ccdc.$$"
+      : >"$tmp"
+      while IFS= read -r line; do
+        case "$line" in ''|'#'*) printf '%s\n' "$line" >>"$tmp"; continue ;; esac
+        fp=$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        if [ "$fp" = "$want" ]; then
+          printf 'removing from %s:\n  %s\n' "$f" "$(printf '%s' "$line" | cut -c1-60)..." >&2
+          continue
+        fi
+        printf '%s\n' "$line" >>"$tmp"
+      done <"$f"
+      if ! cmp -s "$f" "$tmp"; then
+        dest=$(evidence_copy "$f")
+        cat "$tmp" >"$f"
+        printf 'removed the key from %s\n  the original file is in %s\n' "$f" "$dest"
+        ccdc_append_log "$baseline_dir/actions.log" "REMOVE-KEY $want file=$f evidence=$dest"
+      fi
+      rm -f "$tmp"
+    done
+  done
+}
+
 severity_for() {
   local kind=$1 subject=$2 detail=${3:-} dangerous=0
   if [ "$kind" = procexe ]; then
@@ -712,7 +1212,7 @@ look_cmd() {
 # the parent with it - and the parent is how it comes back. So this prints a
 # sequence, not a command.
 live_guidance() {
-  local subject=$1 detail=$2 pid urgency
+  local subject=$1 detail=$2 mode=${3:-manual} pid urgency
   pid=$(printf '%s' "$detail" | sed -n 's/.*pids=\([0-9]*\).*/\1/p')
   [ -n "$pid" ] || return 0
 
@@ -735,6 +1235,18 @@ live_guidance() {
   esac
 
   printf '      live: %s\n\n' "$urgency"
+  if [ "$mode" = auto ]; then
+    # There is an approve command for this finding, and it performs exactly the
+    # sequence below in exactly this order. Printing both the one-command form
+    # and a four-step manual walkthrough left the operator to work out which
+    # one they were supposed to run.
+    printf '        The approve command above does all of this, in this order:\n'
+    printf '        capture the process to a case directory, read the ancestry into\n'
+    printf '        the case, kill it BY PID, then delete the file it ran from. It\n'
+    printf '        will not kill anything it could not capture first.\n\n'
+    printf '        To do it by hand instead, see CARD 6.\n'
+    return 0
+  fi
   printf '        1. capture it. This freezes the process, copies the executable\n'
   printf '           out through /proc, records its ancestry and open sockets,\n'
   printf '           and hashes the lot into a case directory:\n\n'
@@ -781,7 +1293,10 @@ report() {
     # them, and a first screen with sixty of those on it is not a report.
     # uid0 and svcshell are the exceptions: a second root account is worth
     # saying out loud whether or not anything has been blessed yet.
-    if [ ! -r "$blessed" ]; then
+    # --all means all. This used to bypass only the predates-the-box filter, so
+    # the footer advised "see them all: --all" on a run that WAS --all, and the
+    # readings stayed hidden either way.
+    if [ ! -r "$blessed" ] && [ "$show_all" -eq 0 ]; then
       case "$kind" in
         module|listener|sshd|sshkey|suid) suppressed=$((suppressed + 1)); continue ;;
       esac
@@ -817,38 +1332,86 @@ report() {
     return 0
   fi
 
-  printf '  %s thing(s) nothing explains:\n\n' "${#findings[@]}"
+  # Freeze the queue before printing it. The listing and the approval are two
+  # separate commands with a human in between, and a box that changes underneath
+  # the operator must not be able to move item 2 onto something else. --approve
+  # reads THIS file, and re-verifies each subject against the live box before
+  # touching it.
+  mkdir -p "$baseline_dir" 2>/dev/null; chmod 700 "$baseline_dir" 2>/dev/null
+  : >"$queue.tmp"
+
+  local -a auto=() manual=()
   for line in "${findings[@]}"; do
     kind=$(printf '%s' "$line" | cut -d'|' -f1)
     subject=$(printf '%s' "$line" | cut -d'|' -f2)
     detail=$(printf '%s' "$line" | cut -d'|' -f3-)
     i=$((i + 1))
-    sev=$(severity_for "$kind" "$subject" "$detail")
-    printf '  [%s] %-5s %-11s %s\n' "$i" "$sev" "$kind" "$subject"
-    printf '      why:  %s\n' "$(why_for "$kind" "$subject" "$detail")"
-    if [ "$kind" = procexe ]; then
-      live_guidance "$subject" "$detail"
+    printf '%s|%s\n' "$i" "$line" >>"$queue.tmp"
+    if [ -n "$(action_for "$kind" "$subject" "$detail")" ]; then
+      auto+=("$i|$line")
     else
-      printf '      look: %s\n' "$(look_cmd "$kind" "$subject")"
+      manual+=("$i|$line")
     fi
-    printf '\n'
   done
+  mv "$queue.tmp" "$queue" 2>/dev/null; chmod 600 "$queue" 2>/dev/null
+
+  printf '  %s thing(s) nothing explains: %s you can approve, %s need you.\n\n' \
+    "${#findings[@]}" "${#auto[@]}" "${#manual[@]}"
+
+  if [ "${#auto[@]}" -gt 0 ]; then
+    printf '  APPROVE THESE - each copies to evidence first, then acts, then checks\n'
+    printf '  its work. Nothing here is irreversible.\n\n'
+    for line in "${auto[@]}"; do
+      i=$(printf '%s' "$line" | cut -d'|' -f1)
+      kind=$(printf '%s' "$line" | cut -d'|' -f2)
+      subject=$(printf '%s' "$line" | cut -d'|' -f3)
+      detail=$(printf '%s' "$line" | cut -d'|' -f4-)
+      sev=$(severity_for "$kind" "$subject" "$detail")
+      printf '  [%s] %-5s %-11s %s\n' "$i" "$sev" "$kind" "$subject"
+      printf '      why:  %s\n' "$(why_for "$kind" "$subject" "$detail")"
+      printf '      will: %s\n' "$(action_for "$kind" "$subject" "$detail")"
+      printf '      run:  sudo %s --config %s --approve %s --apply\n' "$qself" "$qconfig" "$i"
+      [ "$kind" = procexe ] && live_guidance "$subject" "$detail" auto
+      printf '      look: %s\n' "$(look_cmd "$kind" "$subject")"
+      printf '      more: %s\n\n' "$(card_for "$kind")"
+    done
+  fi
+
+  if [ "${#manual[@]}" -gt 0 ]; then
+    printf '  NEEDS YOU - and here is exactly why\n\n'
+    for line in "${manual[@]}"; do
+      i=$(printf '%s' "$line" | cut -d'|' -f1)
+      kind=$(printf '%s' "$line" | cut -d'|' -f2)
+      subject=$(printf '%s' "$line" | cut -d'|' -f3)
+      detail=$(printf '%s' "$line" | cut -d'|' -f4-)
+      sev=$(severity_for "$kind" "$subject" "$detail")
+      printf '  [%s] %-5s %-11s %s\n\n' "$i" "$sev" "$kind" "$subject"
+      needs_you_for "$kind" "$subject" "$detail" \
+        || printf '       %s\n       look: %s\n' \
+             "$(why_for "$kind" "$subject" "$detail")" "$(look_cmd "$kind" "$subject")"
+      printf '\n       more: %s\n\n' "$(card_for "$kind")"
+    done
+  fi
+
+  if [ "${#auto[@]}" -gt 1 ]; then
+    printf '  Several at once:   sudo %s --config %s --approve 1,3,4 --apply\n' "$qself" "$qconfig"
+    printf '  Everything safe:   sudo %s --config %s --approve all-green --apply\n' "$qself" "$qconfig"
+    printf '                     (all-green refuses to touch anything in NEEDS YOU)\n\n'
+  fi
   if [ "$predating" -gt 0 ] || [ "$suppressed" -gt 0 ]; then
     printf '  Held back from this screen:\n'
     [ "$predating" -gt 0 ] && \
       printf '    %s unexplained file(s) that have been here since the box was built\n' "$predating"
     [ "$suppressed" -gt 0 ] && \
       printf '    %s reading(s) - modules, sockets, keys - that only mean something as drift\n' "$suppressed"
-    printf '    see them all:  sudo %s --config %s --all\n\n' "$qself" "$qconfig"
+    if [ "$show_all" -eq 0 ]; then
+      printf '    see them all:  sudo %s --config %s --all\n\n' "$qself" "$qconfig"
+    else
+      printf '\n'
+    fi
   fi
   print_exceptions
-  # Say plainly what this tool cannot yet do. A report that implies an action it
-  # does not have is the finish-line problem this whole design exists to fix.
-  printf '\n  Approve-and-remove is not wired up yet (build step 2 of 4 in\n'
-  printf '  playbooks/baseline-design.md). Today this tool tells you what is\n'
-  printf '  unexplained and how to look at it; you remove things with triage.sh\n'
-  printf '  and the remediation cards.\n'
-  printf '\n  Full detail on any finding:  playbooks/remediation-cards.md\n'
+
 }
 
 case "$mode" in
@@ -895,6 +1458,82 @@ case "$mode" in
     printf '  see drift:     sudo %s --config %s --status\n' "$qself" "$qconfig"
     printf '  read it:       sudo less %q\n' "$blessed"
     printf '  start watching: sudo %q/arm.sh --config %s --apply\n' "$SCRIPT_DIR" "$qconfig"
+    ;;
+
+  removekey)
+    load_sets
+    if [ "$apply" -eq 0 ]; then
+      printf '[dry-run] would remove the authorised key %s\n' "$remove_key"
+      printf '          the file it lives in is copied to evidence first\n'
+      printf '          re-run with --apply\n'
+      exit 0
+    fi
+    remove_authorized_key "$remove_key"
+    ;;
+
+  approve)
+    [ -r "$queue" ] || ccdc_die "nothing has been listed yet, so there is no item $approve_items to approve.
+  Look at the box first, which writes the numbered queue this reads:
+    sudo $qself --config $qconfig"
+    load_sets
+    # Work out which item numbers were asked for.
+    wanted=''
+    if [ "$approve_items" = all-green ]; then
+      while IFS='|' read -r n kind subject detail; do
+        [ -n "${n:-}" ] || continue
+        [ -n "$(action_for "$kind" "$subject" "$detail")" ] && wanted="$wanted $n"
+      done <"$queue"
+      [ -n "$wanted" ] || ccdc_die "nothing in the queue has an automatic action"
+    else
+      wanted=$(printf '%s' "$approve_items" | tr ',' ' ')
+      for n in $wanted; do
+        case "$n" in
+          ''|*[!0-9]*)
+            ccdc_die "approval item must be a positive integer, got: $n
+  the [N] in the listing is a label, not part of the command - use the bare number" ;;
+        esac
+      done
+    fi
+
+    if [ "$apply" -eq 0 ]; then
+      printf 'These would run. Nothing has changed yet.\n\n'
+    fi
+    acted=0; skipped=0
+    for n in $wanted; do
+      entry=$(awk -F'|' -v want="$n" '$1 == want {print; exit}' "$queue")
+      if [ -z "$entry" ]; then
+        ccdc_warn "no item $n in the queue; re-run the listing to renumber"
+        skipped=$((skipped + 1)); continue
+      fi
+      kind=$(printf '%s' "$entry" | cut -d'|' -f2)
+      subject=$(printf '%s' "$entry" | cut -d'|' -f3)
+      detail=$(printf '%s' "$entry" | cut -d'|' -f4-)
+      what=$(action_for "$kind" "$subject" "$detail")
+      if [ -z "$what" ]; then
+        ccdc_warn "[$n] $kind $subject has no automatic action - it is in the NEEDS YOU block for a reason.
+  Read it:  sudo $qself --config $qconfig"
+        skipped=$((skipped + 1)); continue
+      fi
+      printf '[%s] %s  %s\n' "$n" "$kind" "$subject"
+      printf '     %s\n' "$what"
+      if [ "$apply" -eq 0 ]; then
+        printf '     [dry-run] not executed. Re-run with --apply.\n\n'
+        continue
+      fi
+      if do_action "$kind" "$subject" "$detail"; then
+        acted=$((acted + 1))
+      else
+        skipped=$((skipped + 1))
+      fi
+      printf '\n'
+    done
+    if [ "$apply" -eq 1 ]; then
+      printf '%s done, %s skipped.\n' "$acted" "$skipped"
+      printf '\nRe-run the listing to see what is left - the numbers change:\n'
+      printf '  sudo %s --config %s\n' "$qself" "$qconfig"
+    else
+      printf 'Re-run with --apply to actually do this.\n'
+    fi
     ;;
 
   allow)
