@@ -721,6 +721,28 @@ else
   no "asks about provenance without sourcing lib/provenance.sh:$missing"
 fi
 
+# --------------------- a sed s-command whose delimiter is also its alternation
+# `s|foo\|bar|baz|` does not mean "foo or bar". The delimiter is |, so \| is an
+# ESCAPED DELIMITER - a literal pipe - and the pattern matches nothing it was
+# meant to. It fails silently: sed exits 0 and passes the string through
+# untouched.
+#
+# Measured: the port suffix was never stripped from a live-process subject, so
+# sentry printed "then delete /usr/sbin/.sysmon tcp/4446, which no package
+# owns" - a filename that does not exist, in the line that tells the operator
+# what approving will do.
+delim=$(for t in "$ROOT"/linux/*.sh "$ROOT"/linux/lib/*.sh "$ROOT"/redteam/*.sh; do
+  grep -nE "s\|[^|]*\\\\\|" "$t" 2>/dev/null \
+    | grep -vE '^[0-9]+:[[:space:]]*#' \
+    | sed "s|^|$(basename "$t"):|"
+done)
+if [ -z "$delim" ]; then
+  ok 'no sed s-command uses | as both its delimiter and its alternation'
+else
+  no 'a sed alternation is being read as an escaped delimiter and matches nothing'
+  printf '%s\n' "$delim" | sed 's/^/    /' | head -6
+fi
+
 # =========================================================================
 # WHOLE-KIT SWEEPS
 #

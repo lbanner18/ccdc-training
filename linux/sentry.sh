@@ -1071,7 +1071,11 @@ render_action() {
       printf 'preserve %q; stop, disable and remove it, reload systemd, then re-check every scored service and restore the unit if one stopped answering' "$base" ;;
     tmpproc|netproc|netunpackaged)
       pid=$(subject_pid "$subject" 2>/dev/null) || pid=''
-      target=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s| \(tcp\|udp\)/[0-9]*$||')
+      # The delimiter is @, not |. Written as s|...\(tcp\|udp\)...| the \| is an
+      # ESCAPED DELIMITER - a literal pipe - not an alternation, so the suffix
+      # was never stripped and the will: line offered to delete a file called
+      # "/usr/sbin/.sysmon tcp/4446".
+      target=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s@ \(tcp\|udp\)/[0-9]*$@@')
       if [ -n "$pid" ]; then
         printf 'capture pid %s (%s) with preserve.sh - socket, parent and executable - and only then kill it' "$pid" "$target"
         # Say which of the two it will be. "delete the executable afterwards"
@@ -1105,7 +1109,8 @@ render_action() {
       fi ;;
     netprocsvc)
       pid=$(subject_pid "$subject" 2>/dev/null) || pid=''
-      printf 'no systemd unit owns pid %s (%s), so it is not a scored service; capture it, kill it, then re-check every scored service. The interpreter itself is package-owned and STAYS - what the attacker put here is the script it was told to run, and that is a different finding' "${pid:-?}" "${subject#pid*:}" ;;
+      target=$(printf '%s' "${subject#pid*:}" | sed 's@ \(tcp\|udp\)/[0-9]*$@@')
+      printf 'no systemd unit owns pid %s (%s), so it is not a scored service; capture it, kill it, then re-check every scored service. The interpreter itself is package-owned and STAYS - what the attacker put here is the script it was told to run, and that is a different finding' "${pid:-?}" "$target" ;;
     rcdeep) target=${subject#*::}; printf 'preserve and remove launched payload %q' "$target" ;;
     rcfile) printf 'preserve %q and remove only the exact lines that still match the detector' "$subject" ;;
     *) printf 'no automatic action' ;;
@@ -1726,7 +1731,7 @@ action_live_process() {
     || { slog "warning: $subject is no longer running"; return 1; }
   path=$(pid_exe "$pid" 2>/dev/null)
   [ -n "$path" ] || path=$(printf '%s' "$subject" \
-    | sed 's/^pid[0-9]*://; s/ (deleted)$//; s| \(tcp\|udp\)/[0-9]*$||')
+    | sed 's/^pid[0-9]*://; s/ (deleted)$//; s@ \(tcp\|udp\)/[0-9]*$@@')
   # Asked again here, a second time, immediately before anything irreversible.
   # can_automate cleared this pid when the queue was built, which can be a
   # minute ago, and pids are recycled: the number that named a dropper then can
