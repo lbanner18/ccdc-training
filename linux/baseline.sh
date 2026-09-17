@@ -120,7 +120,34 @@ exec_trigger_dirs='
 /etc/initramfs-tools/hooks
 /etc/NetworkManager/dispatcher.d
 /etc/rc.local.d
+/etc/init.d
+/etc/rc0.d
+/etc/rc1.d
+/etc/rc2.d
+/etc/rc3.d
+/etc/rc4.d
+/etc/rc5.d
+/etc/rc6.d
+/etc/rcS.d
+/etc/default
+/etc/security
+/etc/skel
+/etc/rsyslog.d
+/etc/syslog-ng/conf.d
+/etc/dhcp/dhclient-enter-hooks.d
+/etc/dhcp/dhclient-exit-hooks.d
+/etc/kernel/postinst.d
+/etc/apparmor.d/local
+/etc/polkit-1/rules.d
+/etc/sysctl.d
+/usr/lib/systemd/system-generators
+/usr/share/initramfs-tools/hooks
 '
+# The eight entries above /usr/lib came from cross-referencing this list against
+# Atomic Red Team's Linux atomics, which target /etc/init.d thirteen times and
+# /etc/default eight - both absent here, both able to run code as root. That is
+# the point of using a maintained corpus as the denominator instead of a list
+# written from memory: it names the mechanisms you did not think of.
 
 # Single files that are execution triggers in their own right.
 exec_trigger_files='
@@ -138,7 +165,13 @@ kind_for() {
     /etc/update-motd.d/*)                    printf 'motd' ;;
     /etc/profile*|/etc/bash.bashrc|/etc/rc.local*) printf 'profile' ;;
     /etc/ld.so.*)                            printf 'loader' ;;
-    /etc/pam.d/*)                            printf 'pam' ;;
+    /etc/pam.d/*|/etc/security/*)            printf 'pam' ;;
+    /etc/init.d/*|/etc/rc[0-6S].d/*)         printf 'initscript' ;;
+    /etc/default/*)                          printf 'envfile' ;;
+    /etc/skel/*)                             printf 'skel' ;;
+    /etc/rsyslog.d/*|/etc/syslog-ng/*)       printf 'syslog' ;;
+    /etc/dhcp/*)                             printf 'dhcphook' ;;
+    /etc/polkit-1/*)                         printf 'polkit' ;;
     /etc/sudoers*)                           printf 'sudoers' ;;
     /etc/apt/apt.conf.d/*)                   printf 'aptconf' ;;
     /etc/udev/rules.d/*)                     printf 'udev' ;;
@@ -241,8 +274,137 @@ inventory_semantic() {
     | while IFS= read -r f; do printf 'suid|%s|\n' "$f"; done
 }
 
+# --- what is RUNNING -----------------------------------------------------
+#
+# A file-only baseline misses the whole live half. The drill's /dev/shm payload
+# had already unlinked its executable, so there was no file to enumerate - the
+# only copy left in the world was /proc/PID/exe.
+#
+# Three things make this harder than listing processes:
+#
+#   1. The interesting subject is often not the executable. A payload launched
+#      as `/bin/sh /usr/local/lib/.web-metrics` has /bin/sh as its exe, which is
+#      package-owned and boring. The SCRIPT is the finding, so for a known
+#      interpreter we look past it to the first argument that is a real file.
+#   2. An executable can be deleted while it runs. readlink reports
+#      "/path (deleted)", and that process can never be explained by anything -
+#      there is no file left for a package to own.
+#   3. PIDs are not baseline material. They change every boot. The inventory is
+#      keyed on the executable or script PATH; the PIDs live in the detail so
+#      the operator can act, and so the same payload under four PIDs is one
+#      finding rather than four.
+
+# Interpreters whose first script argument is the thing worth looking at.
+proc_interpreters='sh bash dash zsh ksh csh tcsh python python2 python3 perl ruby php node busybox'
+
+is_interpreter() {
+  case " $proc_interpreters " in *" $1 "*) return 0 ;; esac
+  return 1
+}
+
+# Directories a legitimate long-running daemon has no business executing from.
+volatile_exec_dir() {
+  case "$1" in
+    /tmp/*|/var/tmp/*|/dev/shm/*|/run/*|/run/shm/*) return 0 ;;
+  esac
+  return 1
+}
+
+inventory_processes() {
+  local pid raw exe base subject flags arg argi cmdfile sockets
+  declare -A PROC_PIDS=()
+  declare -A PROC_FLAGS=()
+
+  for pid in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+    [ -e "/proc/$pid/exe" ] || continue
+    raw=$(readlink "/proc/$pid/exe" 2>/dev/null) || continue
+    [ -n "$raw" ] || continue
+    flags=''
+    case "$raw" in
+      *' (deleted)')
+        exe=${raw% (deleted)}
+        flags="$flags deleted"
+        ;;
+      *) exe=$raw ;;
+    esac
+    subject=$exe
+    base=$(basename -- "$exe")
+
+    # Look past an interpreter to the script it is running.
+    #
+    # Two things have to be skipped and the first is not obvious. argv[0] is the
+    # command NAME, and it is frequently not the resolved executable: a process
+    # started as `/bin/sh /usr/local/lib/.web-metrics` has argv[0]="/bin/sh"
+    # while /proc/pid/exe resolves to /usr/bin/dash. Comparing the argument
+    # against the resolved exe therefore does not match, /bin/sh IS a real file,
+    # and the loop happily concluded the script was /bin/sh - which is
+    # package-owned and boring. Every interpreter-launched payload on the box
+    # was being attributed to /bin/sh, including a live drill foothold.
+    if is_interpreter "$base"; then
+      cmdfile="/proc/$pid/cmdline"
+      if [ -r "$cmdfile" ]; then
+        argi=0
+        while IFS= read -r arg; do
+          argi=$((argi + 1))
+          [ "$argi" -eq 1 ] && continue          # argv[0] is the command name
+          [ -n "$arg" ] || continue
+          case "$arg" in -*) continue ;; esac
+          [ "$arg" = "$exe" ] && continue
+          is_interpreter "$(basename -- "$arg")" && continue
+          if [ -f "$arg" ]; then subject=$arg; flags="$flags via-$base"; break; fi
+        done < <(tr '\0' '\n' <"$cmdfile" 2>/dev/null)
+      fi
+    fi
+
+    volatile_exec_dir "$subject" && flags="$flags volatile-dir"
+
+    # LD_PRELOAD injected into a running process. This never shows up in any
+    # file listing, because the library may have been unlinked after load.
+    if [ -r "/proc/$pid/environ" ] \
+       && tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q '^LD_PRELOAD='; then
+      flags="$flags ld-preload"
+    fi
+
+    # Resolve to an absolute path. A process started as ./linux/baseline.sh
+    # records exactly that in argv, and a relative path cannot be looked up in a
+    # package database, matched against an allowlist, or blessed.
+    case "$subject" in
+      /*) ;;
+      # readlink -f, not `cd && pwd`: pwd prints the LOGICAL path, so resolving
+      # ./linux/baseline.sh through /proc/<pid>/cwd came back as the literal
+      # string /proc/1590599/cwd/linux/baseline.sh - which matches no package,
+      # no allowlist and no baseline, and differs per PID, so one script
+      # reported three times.
+      *) subject=$(readlink -f -- "/proc/$pid/cwd/$subject" 2>/dev/null) || continue
+         [ -n "$subject" ] || continue ;;
+    esac
+    PROC_PIDS["$subject"]="${PROC_PIDS["$subject"]:-}$pid "
+    case "${PROC_FLAGS["$subject"]:-}" in
+      *"$flags"*) ;;
+      *) PROC_FLAGS["$subject"]="${PROC_FLAGS["$subject"]:-}$flags" ;;
+    esac
+  done
+
+  for subject in "${!PROC_PIDS[@]}"; do
+    # Which sockets does this thing hold? An outbound C2 channel has no
+    # listener, so "what is listening" never sees it; the connection is the
+    # only evidence, and it belongs next to the process that owns it.
+    sockets=''
+    if ccdc_have ss; then
+      sockets=$(ss -tunapH 2>/dev/null \
+        | grep -F "pid=$(printf '%s' "${PROC_PIDS["$subject"]}" | awk '{print $1}')," \
+        | awk '{print $2 "/" $5 ">" $6}' | sort -u | tr '\n' ' ')
+    fi
+    printf 'procexe|%s|pids=%s%s%s\n' \
+      "$subject" \
+      "$(printf '%s' "${PROC_PIDS["$subject"]}" | tr ' ' ',' | sed 's/,$//')" \
+      "$(printf '%s' "${PROC_FLAGS["$subject"]}" | tr -s ' ' | sed 's/^ */ flags=/;s/ /,/g2')" \
+      "${sockets:+ sockets=$(printf '%s' "$sockets" | sed 's/ *$//')}"
+  done
+}
+
 inventory() {
-  { inventory_files; inventory_semantic; } | LC_ALL=C sort -u
+  { inventory_files; inventory_semantic; inventory_processes; } | LC_ALL=C sort -u
 }
 
 # --- the explained test ------------------------------------------------------
@@ -312,6 +474,15 @@ unit_is_expected() {
   for svc in ${CCDC_SYSTEMD_SERVICES:-} ${CCDC_PROTECT_SERVICES:-}; do
     [ "$name" = "$svc" ] || [ "$name" = "${svc%.service}" ] && return 0
   done
+  # This kit's own code, wherever it happens to live: the tree you are running
+  # from, and the private copies guardian and sentry install. Without this the
+  # tool reports ITSELF as an unexplained running script, which is not a good
+  # look for a report whose whole job is to be believed.
+  case "$subject" in
+    "$SCRIPT_DIR"/*|"$(dirname -- "$SCRIPT_DIR")"/*) return 0 ;;
+    /usr/local/lib/"${CCDC_SENTRY_NAME:-ccdc-sentry}"/*) return 0 ;;
+    /usr/local/lib/"${CCDC_GUARDIAN_NAME:-node-health}"/*) return 0 ;;
+  esac
   # This kit's own layers, under whatever names the config gave them.
   for own in "${CCDC_GUARDIAN_NAME:-node-health}" \
              "${CCDC_GUARDIAN_WATCH_NAME:-${CCDC_GUARDIAN_NAME:-node-health}-watch}" \
@@ -323,7 +494,7 @@ unit_is_expected() {
 }
 
 explained() {
-  local kind=$1 subject=$2 target
+  local kind=$1 subject=$2 detail=${3:-} target
   [ -n "${BLESSED_SET["$kind|$subject"]:-}" ] && return 0
   allowlisted "$kind" "$subject" && return 0
   case "$kind" in
@@ -332,6 +503,17 @@ explained() {
     # Semantic readings are never "explained" by a package. An account, a key or
     # a listening socket is either in the blessed baseline or it is news.
     svcshell|sshkey|sshd|listener|module) return 1 ;;
+    procexe)
+      # These three can never be explained by anything, and the blessed
+      # baseline must not be able to whitewash them either. A deleted
+      # executable has no file left for a package to own; a daemon running out
+      # of /dev/shm is not a packaging question; and LD_PRELOAD injected into a
+      # live process leaves no file listing at all.
+      case "$detail" in
+        *deleted*|*volatile-dir*|*ld-preload*) return 1 ;;
+      esac
+      unit_is_expected "$subject" && return 0
+      ;;&
     unit|userunit|cron)
       unit_is_expected "$subject" && return 0
       ;;&
@@ -366,6 +548,19 @@ why_for() {
     return
   fi
   case "$kind" in
+    procexe)
+      case "$detail" in
+        *deleted*)
+          printf 'RUNNING from a deleted executable - /proc/PID/exe is now the only copy in existence (%s)' "$detail" ;;
+        *volatile-dir*)
+          printf 'RUNNING from a world-writable directory, which no packaged daemon does (%s)' "$detail" ;;
+        *ld-preload*)
+          printf 'RUNNING with LD_PRELOAD set - a library was injected into it (%s)' "$detail" ;;
+        *via-*)
+          printf 'script being run by an interpreter; no package owns the script (%s)' "$detail" ;;
+        *)
+          printf 'running executable that no package owns (%s)' "$detail" ;;
+      esac ;;
     uid0)     printf 'account with UID 0 - it IS root, whatever it is called' ;;
     svcshell) printf 'service account with a real login shell (%s)' "$detail" ;;
     sshkey)   printf 'SSH key authorised on this box (%s)' "$detail" ;;
@@ -377,7 +572,13 @@ why_for() {
     motd)     printf 'runs as root on every SSH login; no package owns it%s' "$age" ;;
     aptconf)  printf 'runs as root on every apt operation; no package owns it%s' "$age" ;;
     udev)     printf 'runs as root on device events; no package owns it%s' "$age" ;;
-    cron)     printf 'scheduled job that no package owns%s' "$age" ;;
+    cron)      printf 'scheduled job that no package owns%s' "$age" ;;
+    initscript) printf 'SysV init script - runs as root at boot; no package owns it%s' "$age" ;;
+    envfile)   printf 'sourced by init scripts as root; no package owns it%s' "$age" ;;
+    dhcphook)  printf 'runs as root on every DHCP lease; no package owns it%s' "$age" ;;
+    polkit)    printf 'polkit rule - decides who may do privileged things%s' "$age" ;;
+    syslog)    printf 'syslog config, which can execute programs on matching lines%s' "$age" ;;
+    skel)      printf 'copied into the home directory of every NEW user%s' "$age" ;;
     *)        printf 'no package owns this file%s' "$age" ;;
   esac
 }
@@ -388,9 +589,23 @@ why_for() {
 # RED next to a drop-in planted twenty minutes ago teaches the operator that RED
 # means nothing.
 severity_for() {
-  local kind=$1 subject=$2 dangerous=0
+  local kind=$1 subject=$2 detail=${3:-} dangerous=0
+  if [ "$kind" = procexe ]; then
+    case "$detail" in
+      *deleted*|*volatile-dir*|*ld-preload*) printf 'RED'; return ;;
+    esac
+    # A dot-prefixed executable outside a home directory is not a naming
+    # convention, it is an attempt not to be noticed in an ls. Packages do not
+    # ship /usr/local/lib/.web-metrics.
+    case "$subject" in
+      /home/*|/root/*) ;;
+      */.*) printf 'RED'; return ;;
+    esac
+    printf 'AMBER'; return
+  fi
   case "$kind" in
-    uid0|suid|motd|aptconf|udev|unit|userunit|cron|loader|sudoers|pam|generator|initramfs)
+    uid0|suid|motd|aptconf|udev|unit|userunit|cron|loader|sudoers|pam|generator|initramfs|\
+    initscript|envfile|dhcphook|polkit|syslog|skel)
       dangerous=1 ;;
   esac
   if [ -e "$subject" ] && newer_than_box "$subject"; then
@@ -417,6 +632,52 @@ look_cmd() {
   esac
 }
 
+# A live process is the one finding where the ORDER of your actions decides
+# whether you keep the evidence. kill -9 takes the memory, the open sockets and
+# the parent with it - and the parent is how it comes back. So this prints a
+# sequence, not a command.
+live_guidance() {
+  local subject=$1 detail=$2 pid urgency
+  pid=$(printf '%s' "$detail" | sed -n 's/.*pids=\([0-9]*\).*/\1/p')
+  [ -n "$pid" ] || return 0
+
+  case "$detail" in
+    *deleted*)
+      urgency='The executable has already been deleted. /proc/'"$pid"'/exe is the
+      only copy of it left in existence, and it disappears when this process
+      dies. Do not kill this first.' ;;
+    *ld-preload*)
+      urgency='A library has been injected into this process. The .so may already
+      be unlinked, in which case capturing the process is the only way to
+      recover it.' ;;
+    *volatile-dir*)
+      urgency='It is executing from a world-writable directory, which no packaged
+      daemon does. The file is still on disk, but /dev/shm and /tmp do not
+      survive a reboot, so the copy you have is the one you keep.' ;;
+    *)
+      urgency='Capture before you kill: the open sockets and the parent process
+      are only readable while it is alive.' ;;
+  esac
+
+  printf '      live: %s\n\n' "$urgency"
+  printf '        1. capture it. This freezes the process, copies the executable\n'
+  printf '           out through /proc, records its ancestry and open sockets,\n'
+  printf '           and hashes the lot into a case directory:\n\n'
+  printf '             sudo %q/preserve.sh --config %s --pid %s --freeze --apply\n\n' \
+    "$SCRIPT_DIR" "$qconfig" "$pid"
+  printf '        2. read what you captured before you touch anything. The step\n'
+  printf '           above finishes by printing a "read this first:" line with the\n'
+  printf '           case directory in it - run that command. What you are looking\n'
+  printf '           for is the PARENT, because the parent is how this comes back,\n'
+  printf '           and killing the child alone just means it returns.\n\n'
+  printf '        3. only then kill it, BY PID, never by name. This box runs a\n'
+  printf '           scored python3 web server; "pkill python3" here is an\n'
+  printf '           outage you caused yourself:\n\n'
+  printf '             sudo kill -9 %s\n\n' "$pid"
+  printf '        4. remove what started it, or it comes back. Check the parent\n'
+  printf '           from step 2 against the other findings on this screen.\n'
+}
+
 print_exceptions() {
   local n key
   n=${#EXCEPT_SET[@]}
@@ -438,7 +699,7 @@ report() {
     subject=$(printf '%s' "$line" | cut -d'|' -f2)
     detail=$(printf '%s' "$line" | cut -d'|' -f3-)
     [ -n "$kind" ] || continue
-    explained "$kind" "$subject" && continue
+    explained "$kind" "$subject" "$detail" && continue
     # A semantic reading - a loaded module, a listening socket, an sshd setting -
     # only means something as DRIFT. Before there is a baseline to drift from,
     # "nothing explains this kernel module" is equally true of all sixty of
@@ -449,12 +710,14 @@ report() {
       case "$kind" in
         module|listener|sshd|sshkey|suid) suppressed=$((suppressed + 1)); continue ;;
       esac
+      # procexe is deliberately NOT in that list. Something unexplained running
+      # right now is news on a box with no baseline as much as on one with.
     fi
     # An unexplained file that predates the box is usually an installer
     # artifact. Keep it available, keep it off the first screen.
     if [ "$show_all" -eq 0 ] && [ -e "$subject" ] && ! newer_than_box "$subject"; then
       case "$kind" in
-        uid0|svcshell) ;;
+        uid0|svcshell|procexe) ;;
         *) predating=$((predating + 1)); continue ;;
       esac
     fi
@@ -484,10 +747,14 @@ report() {
     subject=$(printf '%s' "$line" | cut -d'|' -f2)
     detail=$(printf '%s' "$line" | cut -d'|' -f3-)
     i=$((i + 1))
-    sev=$(severity_for "$kind" "$subject")
+    sev=$(severity_for "$kind" "$subject" "$detail")
     printf '  [%s] %-5s %-11s %s\n' "$i" "$sev" "$kind" "$subject"
     printf '      why:  %s\n' "$(why_for "$kind" "$subject" "$detail")"
-    printf '      look: %s\n' "$(look_cmd "$kind" "$subject")"
+    if [ "$kind" = procexe ]; then
+      live_guidance "$subject" "$detail"
+    else
+      printf '      look: %s\n' "$(look_cmd "$kind" "$subject")"
+    fi
     printf '\n'
   done
   if [ "$predating" -gt 0 ] || [ "$suppressed" -gt 0 ]; then
