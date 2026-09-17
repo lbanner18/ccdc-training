@@ -413,8 +413,17 @@ can_automate() {
 # The shape, for every one of these: what I found and when, why I will not touch
 # it, the one command that resolves the ambiguity, and what to do if the answer
 # is surprising. Never a bare path - a path is not a command.
+# Is guardian currently holding sentry's tree to a frozen copy?
+guardian_is_armed() {
+  local g=${CCDC_GUARDIAN_DIR:-/usr/local/lib/node-health}
+  [ -d "$g/.repair/sentry" ] || return 1
+  systemctl is-active --quiet node-health.service 2>/dev/null && return 0
+  systemctl is-active --quiet node-health-watch.service 2>/dev/null && return 0
+  return 1
+}
+
 held_reason() {
-  local check=$1 subject=$2 desc=$3 payload unit home f fp comment n
+  local check=$1 subject=$2 desc=$3 payload unit home f fp comment n pid
   case "$check" in
 
     sshkey)
@@ -473,6 +482,11 @@ held_reason() {
       return 0 ;;
 
     tmpproc|netproc)
+      # The subject carries the pid, so fill it in. Printing "--pid PID" next to
+      # a finding that already names the pid is the same defect as printing
+      # "[N]" - it asks the operator to translate, under time pressure, for no
+      # reason.
+      pid=$(printf '%s' "$subject" | sed -n 's/^pid\([0-9][0-9]*\):.*/\1/p')
       printf '\n       A process is running that should not be, and its evidence only\n'
       printf '       exists while it is alive: the socket to whoever is on the other\n'
       printf '       end, its parent - which is the way back in - and, if the file was\n'
@@ -480,10 +494,20 @@ held_reason() {
       printf '       Kill it first and the incident report becomes "we found something\n'
       printf '       and removed it". Capture first and it names an address and a\n'
       printf '       parent process.\n\n'
-      printf '       Find it, then capture it, then kill it BY PID:\n\n'
-      printf '         sudo ls -l /proc/*/exe 2>/dev/null | grep -E "/(tmp|var/tmp|dev/shm)/"\n'
-      printf '         sudo %s/preserve.sh --config %s --pid PID --freeze --apply\n' "$qkit" "$qconfig"
-      printf '         sudo kill -9 PID\n\n'
+      if [ -n "$pid" ]; then
+        printf '       Capture it, then kill it BY PID - never by name, because this\n'
+        printf '       box runs a scored python web server:\n\n'
+        printf '         sudo %s/preserve.sh --config %s --pid %s --freeze --apply\n' \
+          "$qkit" "$qconfig" "$pid"
+        printf '         sudo kill -9 %s\n\n' "$pid"
+        printf '       What started it, which is the part that stops it coming back:\n\n'
+        printf '         sudo ps -o ppid= -p %s | xargs -r ps -o pid,user,cmd -p\n\n' "$pid"
+      else
+        printf '       Find it, then capture it, then kill it BY PID:\n\n'
+        printf '         sudo ls -l /proc/*/exe 2>/dev/null | grep -E "/(tmp|var/tmp|dev/shm)/"\n'
+        printf '         sudo %s/preserve.sh --config %s --pid PID --freeze --apply\n' "$qkit" "$qconfig"
+        printf '         sudo kill -9 PID\n\n'
+      fi
       printf '       Or let baseline.sh do the whole sequence, in order, and refuse to\n'
       printf '       kill anything it could not capture first:\n\n'
       printf '         sudo %s/baseline.sh --config %s\n' "$qkit" "$qconfig"
@@ -696,9 +720,25 @@ write_alerts() {
       printf '%s\n' "$drift" | head -8 | sed 's/^/      /'
       [ "$(printf '%s\n' "$drift" | grep -c .)" -gt 8 ] \
         && printf '      ... and %s more\n' "$(($(printf '%s\n' "$drift" | grep -c .) - 8))"
-      printf '\n  Bring it up to date (this reinstalls the copy and restarts the\n'
-      printf '  service; your approval queue and evidence are kept):\n\n'
-      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --install --apply\n'
+      printf '\n  Bring it up to date. Your approval queue and evidence are kept.\n\n'
+      # Guardian repairs sentry's installed tree from a copy frozen when
+      # GUARDIAN was installed, and it cannot tell your legitimate update from
+      # someone tampering with sentry - that ambiguity is the entire point of
+      # it. So reinstalling sentry underneath an armed guardian appears to
+      # succeed and is silently reverted on the next tick. Measured: a fixed
+      # triage.sh was installed at 05:25 and was back to the old one at 05:26.
+      if guardian_is_armed; then
+        printf '  Guardian is armed, and it restores sentry from a copy taken when\n'
+        printf '  GUARDIAN was installed - so reinstalling sentry on its own looks\n'
+        printf '  like it worked and is undone within a minute. Take guardian down\n'
+        printf '  first, update, then put it back so it re-takes its copy:\n\n'
+        printf '      sudo '"$qkit"'/guardian.sh --config '"$qconfig"' --uninstall --apply\n'
+        printf '      sudo '"$qkit"'/sentry.sh   --config '"$qconfig"' --install   --apply\n'
+        printf '      sudo '"$qkit"'/guardian.sh --config '"$qconfig"' --install   --apply\n\n'
+        printf '  Nothing is watching for that gap. Do it in one go.\n'
+      else
+        printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --install --apply\n'
+      fi
     fi
     printf '==================================================================\n\n'
     if [ -s "$triage_health" ] || [ -s "$watch_health" ]; then
@@ -740,8 +780,9 @@ write_alerts() {
           printf '  RED findings sentry will NOT touch - YOU must decide:\n'
           heldred=1
         fi
-        printf -v quoted '%q' "$subject"
-        printf '    %-12s %s\n' "$check" "$quoted"
+        # A label, not a command: %q rendered "/dev/shm/.kworkerd (deleted)"
+        # as "\ \(deleted\)". The commands under it are quoted where it matters.
+        printf '    %-12s %s\n' "$check" "$subject"
         printf '                 %s\n' "$desc"
         if ! held_reason "$check" "$subject" "$desc"; then
           case "$check" in
@@ -767,8 +808,9 @@ write_alerts() {
       printf '  NEEDS YOU - and here is exactly why\n\n'
       while IFS='|' read -r sev check subject desc; do
         [ "${sev:-}" = AMBER ] || continue
-        printf -v quoted '%q' "$subject"
-        printf '    %-12s %s\n' "$check" "$quoted"
+        # Not %q here: this is a label being read, not a command being pasted,
+        # and %q rendered "/dev/shm/.kworkerd (deleted)" as "\ \(deleted\)".
+        printf '    %-12s %s\n' "$check" "$subject"
         printf '                 %s\n' "$desc"
         held_reason "$check" "$subject" "$desc" || \
           printf '                 held: no written guidance for a %s finding yet.\n' "$check"
