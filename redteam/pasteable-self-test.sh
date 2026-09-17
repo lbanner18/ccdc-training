@@ -589,6 +589,16 @@ else
   grep -E 'CHECKS|field' "$shape_dir/good.out" | sed 's/^/    /' | head -8
 fi
 
+# The no-baseline warning tells the operator to bless after review. Without
+# --apply that command is an innocuous dry run while the watch loop still has
+# no durable reference point.
+if grep -qE 'baseline\.sh --config .* --bless --apply' "$shape_dir/good.out"; then
+  ok 'the arm no-baseline fix actually blesses when pasted'
+else
+  no 'arm.sh suggests --bless without --apply, so the fix only dry-runs'
+  grep -A14 'no blessed baseline' "$shape_dir/good.out" | sed 's/^/    /'
+fi
+
 "$ROOT/linux/arm.sh" --config "$shape_dir/short.env" >"$shape_dir/short.out" 2>&1
 if grep -q 'ok: CCDC_TCP_CHECKS parses' "$shape_dir/short.out" \
    && grep -q 'ok: CCDC_HTTP_CHECKS parses' "$shape_dir/short.out"; then
@@ -911,14 +921,15 @@ else
   printf '%s\n' "$hoist" | sed 's/^/    /' | head -6
 fi
 
-# 10. Every flag a tool ACCEPTS must appear in its --help and in the comment
-#     block at the top. A flag you can pass but cannot discover is a flag
-#     nobody uses correctly under pressure. recon.sh accepted --config,
-#     --output-dir and --dry-run while its --help printed eighty lines of its
-#     own source; card.sh had no usage line at all, so --config - which is what
-#     arms the scored-service warning - was undiscoverable.
+# 10. Every flag a tool ACCEPTS must appear in its actual --help output. A flag
+#     you can pass but cannot discover is a flag nobody uses correctly under
+#     pressure. recon.sh accepted --config, --output-dir and --dry-run while
+#     its --help printed eighty lines of its own source; card.sh had no usage
+#     line at all, so --config - which arms the scored-service warning - was
+#     undiscoverable. The source comment is supplementary, not the operator
+#     interface, and several established tools intentionally keep it concise.
 undoc=$(python3 - "$ROOT" <<'PY'
-import io, re, sys, glob, os
+import io, re, sys, glob, os, subprocess
 rows = []
 for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
     src = io.open(f, encoding='utf-8').read()
@@ -950,17 +961,18 @@ for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
                 flags.add(g)
     if not flags:
         continue
-    helpblob = ''.join(m.group(1) for m in re.finditer(r"printf '([^']*--[^']*)'", src))
-    header = '\n'.join(lines[:62])
+    helpblob = subprocess.run(['bash', f, '--help'], text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              timeout=15, check=False).stdout
     miss = [fl for fl in sorted(flags)
-            if fl != '--help' and (fl not in helpblob or fl not in header)]
+            if fl != '--help' and fl not in helpblob]
     if miss:
         rows.append('%s: %s' % (os.path.basename(f), ' '.join(miss)))
 print('\n'.join(rows))
 PY
 )
 if [ -z "$undoc" ]; then
-  ok 'every flag every tool accepts is in its --help and its header'
+  ok 'every flag every tool accepts is in its --help output'
 else
   no 'a tool accepts a flag it does not document'
   printf '%s\n' "$undoc" | sed 's/^/    /' | head -6

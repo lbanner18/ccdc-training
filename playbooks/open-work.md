@@ -5,7 +5,7 @@ done. Audit date: 2026-09-16. Competition: 2026-09-26.
 
 Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 
-## P0 — the headline feature is untested
+## P0 — headline features verified on the lab VM
 
 - [x] **1. Run `baseline.sh --bless --apply` on the lab box and exercise `--status`.**
       `/var/tmp/ccdc-evidence/baseline/` has `queue`, `actions.log`, `dpkg-verify.cache`

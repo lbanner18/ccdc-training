@@ -385,7 +385,7 @@ for name, got in (('execute_action', execs), ('can_automate', auto), ('render_ac
         problems.append('cannot find %s' % name)
 if not problems:
     # can_automate lists rcdeep|rcfile as an explicit refusal, not an offer.
-    refused = set(re.findall(r'^ {4}([A-Za-z0-9_|]+)\) return 1 ;;', 
+    refused = set(re.findall(r'^ {4}([A-Za-z0-9_|]+)\) return 1 ;;',
                   re.search(r'\ncan_automate\(\) \{\n(.*?)\n\}\n', src, re.S).group(1), re.M))
     refused = {p for label in refused for p in label.split('|')}
     offered = auto - refused

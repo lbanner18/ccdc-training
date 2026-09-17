@@ -36,6 +36,12 @@ set -u
 # Every cut is recorded with the exact command that reverses it, and every cut
 # is followed by a check that the scored services still answer. If one does
 # not, that cut is rolled back automatically before the tool moves on.
+#
+# Package purge and offline restoration are currently Debian/Ubuntu paths:
+# they use apt-get and cached .deb files. On another package family, package
+# cuts safely stop at the purge-simulation check; unit masking and SUID-bit
+# removal remain separate actions. Do not infer RPM/APK support from a clean
+# read-only report.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"

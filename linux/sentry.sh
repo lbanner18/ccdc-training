@@ -11,10 +11,16 @@ set -u
 #
 #   sudo ./sentry.sh --config FILE --install --apply   install/start service
 #   sudo ./sentry.sh --config FILE --status            current findings
-#   sudo ./sentry.sh --config FILE --approve --apply   approve current queue
-#   sudo ./sentry.sh --config FILE --approve 3 --apply approve one item
+#   sudo ./sentry.sh --config FILE --approve N --apply approve one item
 #   sudo ./sentry.sh --config FILE --ack               acknowledge watch events
-#   sudo ./sentry.sh --config FILE --uninstall --apply remove service/copy
+#   sudo ./sentry.sh --config FILE --reload-config --apply  load a changed config
+#   sudo ./sentry.sh --config FILE --mute CHECK SUBJECT --reason TEXT --apply
+#   sudo ./sentry.sh --config FILE --unmute CHECK SUBJECT --apply
+#   sudo ./sentry.sh --config FILE --muted              show exceptions
+#   sudo ./sentry.sh --config FILE --once               one diagnostic pass
+#   sudo ./sentry.sh --config FILE --uninstall --apply  remove service/copy
+#   --loop --interval N --watch-interval N --triage-timeout N --watch-timeout N
+#   --reload --revert --dry-run --no-bell
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
@@ -67,7 +73,10 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; shift ;;
     --no-bell) bell=0; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--interval N] [--watch-interval N] [--triage-timeout N] [--watch-timeout N]\n' "$0"
+      printf 'usage: %s --config FILE [--status|--approve [N]|--ack|--once|--loop]\n' "$0"
+      printf '       [--install|--uninstall|--reload-config|--revert] [--apply|--dry-run]\n'
+      printf '       [--mute CHECK SUBJECT --reason TEXT|--unmute CHECK SUBJECT|--muted]\n'
+      printf '       [--interval N] [--watch-interval N] [--triage-timeout N] [--watch-timeout N] [--no-bell]\n'
       printf '\n'
       printf '  The supervision loop: refreshes triage every minute, runs the broader\n'
       printf '  sweep every two, and maintains a numbered queue of findings you can\n'
@@ -75,9 +84,9 @@ while [ "$#" -gt 0 ]; do
       printf '\n'
       printf '  Install it, do not run the loop by hand - systemd keeps it alive and\n'
       printf '  leaves your one terminal free:\n'
-      printf '      sudo ./sentry.sh --config FILE --install\n'
-      printf '      sudo ./sentry.sh --config FILE --status      what is queued now\n'
-      printf '      sudo ./sentry.sh --config FILE --approve N   act on one finding\n'
+      printf '      sudo ./sentry.sh --config FILE --install --apply\n'
+      printf '      sudo ./sentry.sh --config FILE --status      # what is queued now\n'
+      printf '      sudo ./sentry.sh --config FILE --approve N --apply\n'
       printf '\n'
       printf '  When a finding turns out to be yours:\n'
       printf '      --reload-config --apply             after editing your config, so the\n'
@@ -85,10 +94,17 @@ while [ "$#" -gt 0 ]; do
       printf '                                          file alone does not reach it, and\n'
       printf '                                          editing the installed copy is\n'
       printf '                                          reverted by guardian within a tick.\n'
-      printf '      --mute CHECK SUBJECT --reason T     record a standing exception for\n'
+      printf '      --mute CHECK SUBJECT --reason T --apply\n'
+      printf '                                          record a standing exception for\n'
       printf '                                          something the config has no word for\n'
       printf '      --muted                             everything silenced, with reasons\n'
-      printf '      --unmute CHECK SUBJECT              report it again\n'
+      printf '      --unmute CHECK SUBJECT --apply      report it again\n'
+      printf '      --once                              run one diagnostic pass\n'
+      printf '      --uninstall --apply                 remove the supervised copy\n'
+      printf '\n'
+      printf '  --dry-run is the default for every mutating mode. --loop is used by the\n'
+      printf '  installed service; do not start it by hand. --revert undoes the last\n'
+      printf '  approved action, and --no-bell suppresses terminal bells for that loop.\n'
       printf '\n'
       printf '  The queue is rebuilt from current findings rather than replayed from\n'
       printf '  stored shell, and approving re-runs detection before it touches\n'

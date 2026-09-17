@@ -11,35 +11,38 @@ post-change snapshot.
 cd ccdc-training
 cp config/example.env /tmp/ccdc-linux.env
 # Edit /tmp/ccdc-linux.env for this box. Do not commit it.
+CFG=/tmp/ccdc-linux.env
 
 # 1. See the box before you change it (both read-only)
-./linux/recon.sh --config /tmp/ccdc-linux.env
-./linux/hunt.sh  --config /tmp/ccdc-linux.env
+sudo ./linux/triage.sh --config "$CFG"
+./linux/recon.sh --config "$CFG"
+./linux/hunt.sh --config "$CFG"
 
-# 2. Arm everything persistent: backup + canaries + sentry + guardian/watchdog.
+# 2. Resolve the findings you understand, then freeze the box you intend to keep.
+#    Do NOT bless a box with an unresolved foothold.
+sudo ./linux/baseline.sh --config "$CFG"
+sudo ./linux/baseline.sh --config "$CFG" --bless --apply
+
+# 3. Arm everything persistent: backup + canaries + sentry + guardian/watchdog.
 #    Both monitoring loops become supervised services; your terminal stays free.
-./linux/arm.sh      --config /tmp/ccdc-linux.env
-sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
+./linux/arm.sh --config "$CFG"
+sudo ./linux/arm.sh --config "$CFG" --apply
 
-# 3. Check in between injects (both commands return immediately).
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply
+# 4. Check in between injects (both commands return immediately).
+sudo ./linux/sentry.sh --config "$CFG" --status
+sudo ./linux/sentry.sh --config "$CFG" --approve --apply
 ```
 
 The supervised sentry keeps a current ranked queue, folds in canary and broader
 host-change events, and works out the exact remediation. It never acts on its
 own — findings queue for your sign-off:
 
-Set this once per shell and every command below pastes as-is:
+The quick start above sets `CFG` to the filled-in config for this box.
 
 ```bash
-CFG=/tmp/ccdc-linux.env      # your filled-in config for THIS box
-```
-
-```bash
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status             # what is waiting
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply    # do it
-sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --ack                # reviewed change events
+sudo ./linux/sentry.sh --config "$CFG" --status             # what is waiting
+sudo ./linux/sentry.sh --config "$CFG" --approve --apply    # do it
+sudo ./linux/sentry.sh --config "$CFG" --ack                # reviewed change events
 ```
 
 That split is the point: detection, diagnosis, evidence capture, and typing are
@@ -171,9 +174,11 @@ linux/                    Bash tools for Linux boxes:
   scan.sh banner.sh       AV/YARA wrapper; login-banner inject
   users.sh backup.sh      accounts; restore points
   diff-evidence.sh        compare two evidence snapshots
+workstation/              tools for the assigned external workstation:
+  perimeter.sh            scope-confirmed nmap evidence + inject table
 windows/                  PowerShell first-pass tools
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (386 assertions, non-root)
+  self-test.sh            runs every suite below (391 assertions, non-root)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag
                           without documentation, and no flag a tool advertises

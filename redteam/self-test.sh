@@ -107,6 +107,9 @@ fi
 printf '\n== hardening: what nothing scored needs ==\n'
 run_suite "$ROOT/redteam/harden-self-test.sh" || failed=$((failed + 1))
 
+printf '\n== external perimeter workflow ==\n'
+run_suite "$ROOT/redteam/perimeter-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== the adversary harness itself ==\n'
 run_suite "$ROOT/redteam/atomic-self-test.sh" || failed=$((failed + 1))
 

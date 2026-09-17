@@ -196,7 +196,6 @@ ccdc_hash_file() {
     ccdc_warn "no SHA-256 utility available for $path"
   fi
 }
-
 # Is an installed private copy of the kit behind the tree it was copied from?
 #
 # sentry.sh and guardian.sh deliberately run from their OWN copies, so that an

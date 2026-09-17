@@ -250,7 +250,7 @@ else
 '
   printf '      sudo %s/baseline.sh --config %s
 ' "$qkit" "$qconfig"
-  printf '      sudo %s/baseline.sh --config %s --bless
+  printf '      sudo %s/baseline.sh --config %s --bless --apply
 ' "$qkit" "$qconfig"
   printf '
 '

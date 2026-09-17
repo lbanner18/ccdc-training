@@ -21,6 +21,22 @@ it names.
 against only the range the inject names. Scanning outside your assigned network
 is the one thing in CCDC that gets a team disqualified rather than penalized.
 
+**The external evidence path, on that workstation:**
+
+```bash
+CFG=/tmp/ccdc-linux.env  # filled from the packet, including CCDC_PERIMETER_SCOPE
+./workstation/perimeter.sh --config "$CFG" --plan
+./workstation/perimeter.sh --config "$CFG" --tcp --apply --confirm-scope
+# Copy the .gnmap path printed above into this command:
+./workstation/perimeter.sh --config "$CFG" --report /tmp/ccdc-perimeter/SCAN.gnmap
+```
+
+The TCP scan is a conservative `nmap` connect scan capped at 1,000 packets per
+second; its exact command and normal/XML/grepable outputs are saved and hashed.
+The report joins observed ports to `CCDC_ALLOWED_TCP_PORTS`, producing the
+yes/REVIEW column for the memo. Run the optional UDP pass only when the inject
+requires it: `sudo ./workstation/perimeter.sh --config "$CFG" --udp --apply --confirm-scope`.
+
 ---
 
 ```text
@@ -56,14 +72,11 @@ Summary: We were asked to assess what our network exposes to the outside world
 
 2. Commands used
 
-   Step 1, discovery sweep:
-     masscan <RANGE> -p1-65535 --rate <RATE> -oL <OUTPUT>
+   Step 1, conservative TCP reachability and version scan:
+     <PASTE THE SAVED COMMAND FROM perimeter.sh HERE>
 
-   Step 2, service and version identification:
-     nmap -sV -sC -p<PORTS FOUND> <LIVE HOSTS> -oA <OUTPUT>
-
-   Step 3, UDP:
-     nmap -sU --top-ports 100 <LIVE HOSTS> -oA <OUTPUT>
+   Step 2, optional UDP scan if the inject requires it:
+     <PASTE THE SAVED COMMAND FROM perimeter.sh HERE>
 
    Screenshots of each command and its output are attached.
 
@@ -113,12 +126,12 @@ Team <XX>
 
 ## The trap: your own scan can take a scored service down
 
-`masscan` defaults to a transmit rate that will saturate a small competition
-network and can knock over the exact services you are being scored on. You lose
-uptime points for the duration, and the cause looks like a red team action.
+An unconstrained scan can saturate a small competition network and knock over
+the exact services you are being scored on. You lose uptime points for the
+duration, and the cause looks like a red team action.
 
-- Start at `--rate 1000` or lower. There is no prize for finishing the sweep
-  faster.
+- Keep the wrapper's 1,000-packet TCP and 100-packet UDP caps. There is no
+  prize for finishing the sweep faster.
 - Do not run the sweep during a period when you are already firefighting a
   service — you will not be able to tell your scan from an attack.
 - Tell your team before you start. On a real team, a scan nobody announced gets

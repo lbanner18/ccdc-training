@@ -269,7 +269,7 @@ changed. Each finding carries what it will do, the command that does it, and
 `--explain N` for which of the three tests it failed and why. `watch.sh` runs it
 every pass on its own and will tell you without being asked.
 
-### 2e. Then, only the exploitable
+### 2f. Then, only the exploitable
 
 Do not patch everything - you do not have the bandwidth and you will break
 things. Patch what has a public exploit and is reachable.
