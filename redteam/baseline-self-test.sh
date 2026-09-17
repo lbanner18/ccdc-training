@@ -455,7 +455,7 @@ fi
 
 # A path-only blessing must not explain a CONTENT change. Blessing /etc/profile
 # freezes the fact that it exists, which it always did.
-if grep -q 'changed-from-shipped\*)' "$BASE" && grep -q 'BLESSED_LINE' "$BASE"; then
+if grep -qE 'changed-from-shipped\*(\||\))' "$BASE" && grep -q 'BLESSED_LINE' "$BASE"; then
   ok 'a changed file needs its CONTENT blessed, not just its path'
 else
   no 'blessing a path explains away every later edit to that file forever'
@@ -471,6 +471,30 @@ if grep -q 'rootadj|' "$BASE"; then
   ok 'an account with GID 0 or root as its home is reported'
 else
   no 'useradd -g 0 -d /root creates an account this tool cannot see'
+fi
+
+# --- per-user shell startup files --------------------------------------------
+#
+# ~/.bashrc, ~/.profile, ~/.shrc, ~/.bash_logout. No package owns them - they
+# are copied out of /etc/skel at account creation - so the package clause has
+# nothing to check, and appending a line does not change the path, so the
+# baseline clause has nothing to compare. Both halves of the provenance test are
+# structurally unable to see an append, which is how six T1546.004/005 atomics
+# walked through. Inventoried by hash instead.
+if grep -q "printf 'usershell|" "$BASE"; then
+  ok 'per-user shell startup files are inventoried'
+else
+  no 'appending a command to ~/.bashrc is invisible to this tool'
+fi
+if awk '/^inventory_files\(\)/,/^}/' "$BASE" | grep -q 'content md5='; then
+  ok 'and they are inventoried BY CONTENT, since the path never changes'
+else
+  no 'shell startup files are tracked by path, which an append does not change'
+fi
+if grep -q 'bash_logout' "$BASE"; then
+  ok '.bash_logout is covered too - it runs on the way OUT of a shell'
+else
+  no '.bash_logout is not covered, and T1546.004 targets it specifically'
 fi
 
 printf 'baseline self-test: %s passed, %s failed\n' "$pass" "$fail"

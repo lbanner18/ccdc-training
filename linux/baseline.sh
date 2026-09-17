@@ -163,7 +163,15 @@ exec_trigger_dirs='
 /etc/sysctl.d
 /usr/lib/systemd/system-generators
 /usr/share/initramfs-tools/hooks
+/run/systemd/transient
 '
+# /run/systemd/transient is where `systemd-run` puts a unit, and Atomic Red
+# Team's T1053.006 uses exactly that to get a timer with no file in /etc. Its
+# sibling /run/systemd/system is deliberately NOT here: that is where systemd's
+# generators write their output, it is a tmpfs regenerated on every boot, and
+# blessing it means a reboot reads as drift. The generators themselves are
+# inventoried, which is the thing that actually decides what lands there.
+#
 # The eight entries above /usr/lib came from cross-referencing this list against
 # Atomic Red Team's Linux atomics, which target /etc/init.d thirteen times and
 # /etc/default eight - both absent here, both able to run code as root. That is
@@ -181,7 +189,7 @@ exec_trigger_files='
 
 kind_for() {
   case "$1" in
-    /etc/systemd/*|/usr/local/lib/systemd/*) printf 'unit' ;;
+    /etc/systemd/*|/usr/local/lib/systemd/*|/run/systemd/*) printf 'unit' ;;
     /etc/cron*|/var/spool/cron/*)            printf 'cron' ;;
     /etc/update-motd.d/*)                    printf 'motd' ;;
     /etc/profile*|/etc/bash.bashrc|/etc/rc.local*) printf 'profile' ;;
@@ -215,19 +223,52 @@ kind_for() {
   esac
 }
 
+# Every execution trigger, identified by what it SAYS and not only by where it
+# is.
+#
+# Three separate findings this session were the same bug. A blessed baseline
+# records kind|subject, and for a file the subject is its path - so blessing
+# /etc/profile, /var/spool/cron/crontabs/root or ~/.bashrc froze the fact that
+# each one exists, which was never in doubt. Appending a line to any of them
+# leaves the path identical, so a path-only match explained the edit away
+# forever. Atomic Red Team walked through all three: T1546.004 appends to the
+# shell profiles, T1053.003 replaces root's crontab wholesale, and the conffiles
+# are not covered by dpkg --verify at all.
+#
+# So every trigger file carries a hash. A symlink is recorded by where it points
+# instead, because that is its content - and reading through it would hash the
+# target and miss a repointed link.
+file_content_tag() {
+  local f=$1
+  if [ -L "$f" ]; then
+    printf 'symlink-to=%s' "$(readlink -- "$f" 2>/dev/null)"
+    return
+  fi
+  [ -f "$f" ] || return 0
+  printf 'md5=%s' "$(md5sum -- "$f" 2>/dev/null | cut -d' ' -f1)"
+}
+
 inventory_files() {
-  local d f cfmd5
+  local d f cfmd5 rc
   for d in $exec_trigger_dirs; do
     [ -d "$d" ] || continue
     # -L so a symlinked trigger directory is still walked; maxdepth 2 reaches
     # unit drop-ins (foo.service.d/override.conf) without descending forever.
     find -L "$d" -maxdepth 2 \( -type f -o -type l \) 2>/dev/null | while IFS= read -r f; do
-      printf '%s|%s|\n' "$(kind_for "$f")" "$f"
+      # systemd-logind creates a transient scope and slice for every login, and
+      # a transient unit for every `systemctl restart`. Those are the machine
+      # working, not someone persisting: reporting them means reporting your own
+      # SSH session on every pass, which is how a report earns the right to be
+      # skimmed. A unit systemd-run created is not in this shape.
+      case "${f##*/}" in
+        session-*.scope|user-*.slice|user@*.service|*.dbus-*|run-*.mount|run-*.service) continue ;;
+      esac
+      printf '%s|%s|%s\n' "$(kind_for "$f")" "$f" "$(file_content_tag "$f")"
     done
   done
   for f in $exec_trigger_files; do
     [ -e "$f" ] || continue
-    printf '%s|%s|\n' "$(kind_for "$f")" "$f"
+    printf '%s|%s|%s\n' "$(kind_for "$f")" "$f" "$(file_content_tag "$f")"
   done
   # Every conffile whose content differs from what the package shipped,
   # wherever it lives. This is not limited to exec_trigger_dirs on purpose:
@@ -237,6 +278,29 @@ inventory_files() {
     [ -f "$f" ] || continue
     cfmd5=$(conffile_changed "$f") || continue
     printf '%s|%s|changed-from-shipped md5=%s\n' "$(kind_for "$f")" "$f" "$cfmd5"
+  done
+
+  # Per-user shell startup files, BY CONTENT.
+  #
+  # Atomic Red Team's T1546.004 appends a command to ~/.bashrc, ~/.profile,
+  # ~/.shrc and ~/.bash_logout, and T1546.005 writes a shell trap into the same
+  # files. No package owns any of them - they are copied out of /etc/skel at
+  # account creation and then belong to the user - so there is nothing for the
+  # package clause to check, and the path never changes when a line is appended
+  # to the end of it. Both halves of the provenance test are structurally unable
+  # to see this, which is why six of these atomics walked straight through.
+  #
+  # So they are inventoried by hash. Blessing records what the file said; a line
+  # appended afterwards changes the hash and drifts.
+  { printf '%s\n' /root; (getent passwd 2>/dev/null || cat /etc/passwd) \
+      | awk -F: '$6 ~ /^\// {print $6}'; } | sort -u | while IFS= read -r home; do
+    [ -d "$home" ] || continue
+    for rc in .bashrc .bash_profile .bash_login .bash_logout .profile .shrc \
+              .zshrc .zprofile .zlogin .zlogout .kshrc .cshrc .tcshrc .login .logout; do
+      [ -f "$home/$rc" ] || continue
+      printf 'usershell|%s|content md5=%s\n' "$home/$rc" \
+        "$(md5sum -- "$home/$rc" 2>/dev/null | cut -d' ' -f1)"
+    done
   done
 
   # Per-user systemd units: these run as the user at login and are easy to miss.
@@ -727,12 +791,19 @@ explained() {
   # exists, which it always did; the line appended to it afterwards does not
   # change the path, so a path-only match would explain the edit away forever.
   case "$detail" in
-    changed-from-shipped*)
+    *md5=*|*symlink-to=*|changed-from-shipped*)
+      # Content unchanged since it was blessed.
       [ -n "${BLESSED_LINE["$kind|$subject|$detail"]:-}" ] && return 0
       allowlisted "$kind" "$subject" && return 0
-      return 1 ;;
+      # The PATH is blessed but the content is not the content that was
+      # blessed. That is the whole point of hashing these: report it.
+      [ -n "${BLESSED_SET["$kind|$subject"]:-}" ] && return 1
+      # Not blessed at all - fall through to the package clause below, so a
+      # stock packaged file on a box with no baseline is still explained.
+      ;;
+    *)
+      [ -n "${BLESSED_SET["$kind|$subject"]:-}" ] && return 0 ;;
   esac
-  [ -n "${BLESSED_SET["$kind|$subject"]:-}" ] && return 0
   allowlisted "$kind" "$subject" && return 0
   case "$kind" in
     # root having UID 0 is not a finding. Any OTHER account with UID 0 is.
@@ -785,6 +856,8 @@ why_for() {
     return
   fi
   case "$kind" in
+    usershell)
+      printf 'a shell startup file whose contents are not what was blessed' ;;
     rootadj)
       printf 'an account next to root without being root - %s' "$detail" ;;
     sudorule)
@@ -954,6 +1027,25 @@ needs_you_for() {
   local kind=$1 subject=$2 detail=$3 user fp who __l __k __now __want
 
   case "$kind" in
+    usershell)
+      printf '       A shell startup file that does not contain what it contained\n'
+      printf '       when you froze this box:\n\n'
+      printf '         %s\n\n' "$subject"
+      printf '       This file runs every time that user opens a shell. Nothing\n'
+      printf '       here is deleted for you, because the file is legitimately\n'
+      printf '       theirs and most of it is probably still their own config.\n\n'
+      printf '       The last few lines, which is where an append lands:\n\n'
+      tail -5 -- "$subject" 2>/dev/null | sed 's/^/         | /'
+      printf '\n       Compare it against the copy every new account starts from:\n\n'
+      printf '         diff /etc/skel/%s %q\n\n' "$(basename -- "$subject")" "$subject"
+      printf '       Look for anything that runs a command rather than setting a\n'
+      printf '       variable - a trap, a curl or wget, a background job, or a\n'
+      printf '       line ending in &. Remove just that line with an editor.\n\n'
+      printf '       If the change is yours, record it and the new contents\n'
+      printf '       become the blessed ones:\n\n'
+      printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
+      printf '              --reason "my own shell config" --apply\n'
+      return 0 ;;
     rootadj)
       printf '       An account that is next to root without being root, which is\n'
       printf '       why the UID check did not report it:\n\n'
@@ -1377,7 +1469,8 @@ card_for() {
                printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
-    sysctl)    printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
+    sysctl|usershell)
+               printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
     kernelhook|apparmor|file)
                printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
     unit|generator|initscript)
@@ -1611,7 +1704,7 @@ report() {
     # readings stayed hidden either way.
     if [ ! -r "$blessed" ] && [ "$show_all" -eq 0 ]; then
       case "$kind" in
-        module|listener|sshd|sshkey|suid) suppressed=$((suppressed + 1)); continue ;;
+        module|listener|sshd|sshkey|suid|usershell) suppressed=$((suppressed + 1)); continue ;;
       esac
       # procexe is deliberately NOT in that list. Something unexplained running
       # right now is news on a box with no baseline as much as on one with.

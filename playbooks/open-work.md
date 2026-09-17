@@ -58,8 +58,16 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       hand with a comment claiming the default arms handled it. They did not.
 - [ ] 6. Render pass — drive every tool through every mode and read the output as the
       operator sees it.
-- [ ] 7. ART harness (`redteam/atomic.sh`) — Atomic Red Team as adversary corpus, not
-      as a denominator.
+- [x] 7. ART harness — `redteam/atomic.sh`. Runs real atomics, asks baseline.sh
+      and triage.sh before and after each, cleans up, scores CAUGHT / MISSED /
+      NOOP / ERROR. Two interlocks (`CCDC_ATOMIC_LAB=1` on the sudo line **and**
+      `--i-accept-this-box-is-disposable`) and a deny-list of techniques that
+      destroy the box rather than persist on it.
+      First persistence sweep: 33 run, 13 caught, 15 missed. The misses were
+      worth the whole exercise — see the commit for what they found. Corpus is
+      not in this repo; sparse-clone `atomics/` and pass `--corpus`.
+      **Note:** a snapshot revert wipes `~/art` on the lab box, so the corpus
+      needs re-syncing after every revert.
 
 ## P2 — docs and tests
 
