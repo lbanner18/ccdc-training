@@ -210,7 +210,24 @@ Every daemon you do not need is attack surface you are defending for free. The
 firewall only hides it from the network; it still runs locally as a privesc
 target and a place to hide persistence.
 
+Two tools, and they take deliberately opposite positions. Run them in this
+order: `harden.sh` acts on the subset it has an opinion about, then
+`services.sh --review` shows you everything it left alone.
+
 ```
+[ ] sudo ./linux/harden.sh --config /tmp/ccdc-linux.env          # READ-ONLY
+    Grouped into families, so snapd is one decision and not eight. Read
+    NEEDS YOU properly - open-vm-tools is dead weight on KVM and is how the
+    competition infrastructure may reach a VMware box, and only the packet
+    tells you which you have.
+[ ] sudo ./linux/harden.sh --config /tmp/ccdc-linux.env --explain N
+    for any you are not sure about. cloud-init is the one to read: it
+    re-runs on EVERY boot and re-applies users and SSH keys from
+    /var/lib/cloud, so an account you removed comes back after a reboot
+    with nothing in the logs to explain it.
+[ ] sudo ./linux/harden.sh --config /tmp/ccdc-linux.env --cut all-safe --apply
+    It checks the scored services after every single cut and reverses that
+    cut by itself if one stops answering. Wrong? `--undo --apply`.
 [ ] ./linux/services.sh --config /tmp/ccdc-linux.env --review    # READ-ONLY
     Four buckets, with listening ports: PROTECTED / LIKELY SCORED /
     CANDIDATES / UNCLASSIFIED. Read the UNCLASSIFIED bucket properly - an
@@ -229,6 +246,28 @@ firewall, this kit's own units) and anything that merely looks scored - web,
 database, FTP, Samba, mail, DNS. If the packet says one of those really is
 disposable, name it in `CCDC_ACK_DISABLE_LIKELY_SCORED`; that second explicit
 acknowledgement is different from protecting it.
+
+### 2e. Freeze it — and this is the step the rest of the day depends on
+
+Once the box looks the way you want it, and **not before**, take the baseline.
+Everything that appears after this point is reported until you remove it or
+record it as an exception, and nothing decays back into normal on its own.
+
+```
+[ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
+[ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --status
+    Should say "Nothing unexplained." If it does not, you blessed something
+    you did not mean to - fix it and bless again.
+```
+
+Bless a box you have not cleaned and you bless the implants with it. That is
+why triage, harden and this come in that order, and why `--bless` says so
+before it does anything.
+
+From here on the question is `--status`, every time you wonder whether anything
+changed. Each finding carries what it will do, the command that does it, and
+`--explain N` for which of the three tests it failed and why. `watch.sh` runs it
+every pass on its own and will tell you without being asked.
 
 ### 2e. Then, only the exploitable
 

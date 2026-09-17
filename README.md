@@ -157,7 +157,11 @@ linux/                    Bash tools for Linux boxes:
                           every later change is measured against it forever
   watchdog.sh             restarts a dead scored service (run via guardian)
   guardian.sh             keeps the watchdog alive against an attacker w/ root
-  services.sh             review and reversibly disable unneeded daemons
+  harden.sh               what is running that nothing scored NEEDS. Cuts it,
+                          checks the scored services after every cut, and
+                          reverses that cut by itself if one stops answering
+  services.sh             review and reversibly disable unneeded daemons - the
+                          buckets harden.sh has no opinion about
   fw.sh                   firewall with an automatic lockout rollback
   sshd.sh                 SSH audit + transactional change with a rollback
   splunk.sh               is this box actually shipping its logs?

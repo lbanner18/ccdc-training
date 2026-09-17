@@ -44,10 +44,26 @@ checkbox.
     means nothing if a file in sshd_config.d says yes.
 [ ] Review the packet's scored users, ports, and firewall exceptions.
 [ ] sudo ./linux/surface.sh --config "$CFG"    # every port, with an owner
-[ ] `sudo ./linux/services.sh --config "$CFG" --review` — then decide deliberately what to disable.
+[ ] sudo ./linux/harden.sh --config "$CFG"      # what nothing scored NEEDS
+    Read it, then `--cut all-safe --apply`. Every cut is checked against the
+    scored services afterwards and reversed automatically if one stops
+    answering, so a wrong call costs one item and a few seconds. Anything it
+    purges has its .deb cached first, so `--undo` works with no network.
+[ ] `sudo ./linux/services.sh --config "$CFG" --review` — for everything harden.sh
+    had no opinion about. It disables only the list you write yourself.
 [ ] Apply one change at a time with --dry-run first.
 [ ] Verify the scored service after every change.
 [ ] Run recon.sh again and note the evidence path in the incident report.
+[ ] sudo ./linux/baseline.sh --config "$CFG" --bless --apply
+    ONLY once the box looks the way you want it. This freezes what is here as
+    known-good, and everything that appears afterwards is reported until you
+    remove it or record it as an exception. Nothing decays back into normal.
+    Bless a box you have not cleaned and you bless the implants with it - so
+    triage.sh and harden.sh come FIRST, and this comes after.
+[ ] From here on, the question is `--status`, and it is the one to keep asking:
+        sudo ./linux/baseline.sh --config "$CFG" --status
+    Each finding carries what it will do, the command that does it, and
+    `--explain N` for the full case. watch.sh runs this every pass on its own.
 ```
 
 ## When you find something live

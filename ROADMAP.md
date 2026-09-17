@@ -2,6 +2,18 @@
 
 ## Done in this workspace
 
+- **Provenance baseline (`baseline.sh`).** Asks the bounded question — is this
+  thing *explained* by the blessed baseline, by an intact package checksum, or
+  by an allowlist — instead of the unbounded one about what a file contains.
+  `--bless` freezes a known-good box, including the sudoers ruleset and
+  membership of the groups that grant root; drift is measured against it
+  forever, never against the previous pass. Every finding carries what
+  approving it will do and `--explain N` for why it failed.
+- **Necessity pass (`harden.sh`).** The other half: not what is unexplained but
+  what is unnecessary. Classifies into SAFE / NEEDS YOU / WILL NOT TOUCH,
+  purges rather than disables (with the `.deb` cached first so the undo needs no
+  network), and re-checks the scored services after every cut, reversing that
+  cut by itself if one stops answering.
 - Linux recon snapshot and evidence diff.
 - Linux report-only persistence hunt.
 - Configured service watchdog with TCP, HTTP, systemd, and file-hash checks.

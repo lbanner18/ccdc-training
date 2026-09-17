@@ -17,6 +17,16 @@ set -u
 # Order matters: harden FIRST, then bless. Blessing a box and then hardening it
 # makes every cut you make look like drift for the rest of the competition.
 #
+# This is not services.sh, and they are not interchangeable. services.sh sorts
+# everything running into buckets, shows you the listening ports, and disables
+# ONLY the list you write yourself afterwards - deliberately, because "should
+# this be off" is a question about your packet that no list shipped in a repo
+# can answer. This tool takes the opposite position on the subset it knows: it
+# classifies, it acts on its own classification, it purges rather than disables,
+# and it checks the scored services after every single cut so a wrong call
+# reverses itself. Run this first for the things it has an opinion about, then
+# services.sh --review for everything it left alone.
+#
 #   sudo ./harden.sh --config FILE                  look (read-only)
 #   sudo ./harden.sh --config FILE --explain 2      why item 2, in full
 #   sudo ./harden.sh --config FILE --cut 2 --apply  cut item 2
@@ -771,8 +781,12 @@ print_listing() {
     else
       printf '  %s more were considered and left alone because this tool has no\n' \
         "${#UNCLASSIFIED[@]}"
-      printf '  opinion about them. See them:  sudo %s --config %s --all\n\n' \
+      printf '  opinion about them. See them:  sudo %s --config %s --all\n' \
         "$qself" "$qconfig"
+      printf '  To decide about those, services.sh sorts everything running into\n'
+      printf '  buckets with its listening ports, and disables only the list YOU\n'
+      printf '  write after reading it:\n'
+      printf '      sudo %s/services.sh --config %s --review\n\n' "$SCRIPT_DIR" "$qconfig"
     fi
   fi
 

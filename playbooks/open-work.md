@@ -63,8 +63,14 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 
 ## P2 — docs and tests
 
-- [ ] 8. `baseline.sh` **and now `harden.sh`** appear in zero playbooks. Add to
-      `linux-first-15-minutes.md`, `competition-day-playbook.md`, `GUIDE.md`, `ROADMAP.md`.
+- [x] 8. `baseline.sh` and `harden.sh` are now in `linux-first-15-minutes.md`
+      (with bless placed *after* triage and harden, and the reason why),
+      `competition-day-playbook.md` (§2d rewritten, new §2e for the freeze),
+      `GUIDE.md`, `ROADMAP.md` and `README.md`.
+      Also settled the overlap with the pre-existing `services.sh`: they take
+      deliberately opposite positions (harden classifies and acts; services.sh
+      shows you buckets and disables only the list you write), so they now hand
+      off to each other rather than competing.
 - [x] 9. `CCDC_BASELINE_ALLOW` is missing from `config/example.env`, so the packet
       worksheet never teaches that the exception mechanism exists.
 - [x] 10. Documented commands that do not exist: `backup.sh --list` was real and
