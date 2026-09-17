@@ -104,6 +104,9 @@ fi
 printf '\n== hardening: what nothing scored needs ==\n'
 run_suite "$ROOT/redteam/harden-self-test.sh" || failed=$((failed + 1))
 
+printf '\n== the adversary harness itself ==\n'
+run_suite "$ROOT/redteam/atomic-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== log forwarding health ==\n'
 run_suite "$ROOT/redteam/splunk-self-test.sh" || failed=$((failed + 1))
 

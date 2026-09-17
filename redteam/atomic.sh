@@ -123,6 +123,17 @@ build_manifest() {
   [ -n "$corpus" ] || ccdc_die "--corpus is required: the path to atomic-red-team/atomics"
   [ -d "$corpus" ] || ccdc_die "no such corpus directory: $corpus"
   mkdir -p "$atomic_dir" 2>/dev/null; chmod 700 "$atomic_dir" 2>/dev/null
+  # --list is documented as read-only and runnable without root, and the evidence
+  # directory is 0700 root - so once any root run has written the manifest, an
+  # unprivileged --list could no longer refresh it and died on a redirect it
+  # never needed. The numbering is a deterministic function of the corpus (a
+  # sorted glob), so a temporary manifest produces exactly the same numbers as
+  # the shared one and --run still resolves what --list showed.
+  if ! : 2>/dev/null >>"$manifest"; then
+    manifest=$(mktemp "${TMPDIR:-/tmp}/ccdc-atomic-manifest.XXXXXX") || \
+      ccdc_die "cannot write a manifest anywhere"
+    trap 'rm -f -- "$manifest"' EXIT INT TERM HUP
+  fi
   python3 - "$corpus" "$DENY" >"$manifest" <<'PY'
 import glob, os, sys, json
 try:
@@ -203,8 +214,17 @@ state_fingerprint() {
   {
     cat /etc/passwd /etc/group /etc/sudoers 2>/dev/null
     cat /etc/sudoers.d/* 2>/dev/null
+    # By CONTENT, not by mtime. T1098.004 reads authorized_keys and writes the
+    # identical bytes back: the mtime moves and nothing else does. Fingerprinting
+    # mtimes called that a change, so it scored as MISSED - the tool hunting a
+    # gap that does not exist, which is the one wrong answer that costs hours.
+    # Rewriting a file with the bytes it already had is not a security event.
+    find /etc /root /home /usr/local /var/spool/cron /srv /opt -xdev -type f \
+         -size -256k -print0 2>/dev/null | xargs -0 -r md5sum 2>/dev/null | sort
+    # Anything too big to hash cheaply, and every symlink by where it points.
     find /etc /root /home /usr/local /var/spool/cron /srv /opt -xdev \
-         \( -type f -o -type l \) -printf '%p %T@ %s %m\n' 2>/dev/null | sort
+         \( \( -type f -size +256k \) -o -type l \) \
+         -printf '%p %s %m %l\n' 2>/dev/null | sort
     systemctl list-units --all --no-legend --plain 2>/dev/null | awk '{print $1, $3, $4}'
     systemctl list-unit-files --no-legend --no-pager 2>/dev/null | awk '{print $1, $2}'
     ss -tulnH 2>/dev/null | awk '{print $1, $5}' | sort

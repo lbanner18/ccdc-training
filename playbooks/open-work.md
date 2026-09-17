@@ -69,9 +69,11 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       NOOP / ERROR. Two interlocks (`CCDC_ATOMIC_LAB=1` on the sudo line **and**
       `--i-accept-this-box-is-disposable`) and a deny-list of techniques that
       destroy the box rather than persist on it.
-      First persistence sweep: 33 run, 13 caught, 15 missed. The misses were
-      worth the whole exercise — see the commit for what they found. Corpus is
-      not in this repo; sparse-clone `atomics/` and pass `--corpus`.
+      First persistence sweep: 33 run, 13 caught, **15 missed**. After the
+      fixes those misses drove: 33 run, **21 caught, 0 missed**, 5 that do not
+      execute on this image, 7 no-ops. 14 assertions in
+      `redteam/atomic-self-test.sh`. Corpus is not in this repo; sparse-clone
+      `atomics/` and pass `--corpus`.
       **Note:** a snapshot revert wipes `~/art` on the lab box, so the corpus
       needs re-syncing after every revert.
 
