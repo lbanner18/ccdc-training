@@ -30,6 +30,25 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       left, http 200. Seven bugs found by running it, four of them safety
       checks that passed without comparing anything.
 
+## P0 — agreed with Luke and not built (found 2026-09-17 by auditing the
+## transcript instead of my own framing)
+
+- [ ] **A. One approval queue, three sources.** `harden.sh` was agreed to
+      PROPOSE into `baseline.sh`'s numbered list and be actioned by the same
+      `--approve N --apply`. It was built with its own `--cut`/`--undo` instead.
+      Fix: necessity findings appear in baseline's list; `harden.sh` keeps its
+      engine but loses its own action verbs.
+- [ ] **B. `baseline.sh` prints unexplained AND unnecessary together**, one
+      numbered sequence. Today it prints only unexplained.
+- [ ] **C. A denominator.** Report coverage as a fraction of the known
+      root-execution mechanisms rather than as a count of checks. The mechanism
+      list already exists (`exec_trigger_dirs`); nothing divides by it.
+- [ ] **D. Generate drills from that list**, not from what I thought of. A
+      hand-written plant set measures whether I imagined the mechanism, which is
+      the exact bias the whole redesign was meant to remove.
+- [ ] **E. Prompt indicator** — `[!3]` in `PS1` for findings below RED.
+      Described in `baseline-design.md:338`, never built.
+
 ## P1 — promised in writing, not built
 
 - [x] 3. `--explain N` — built in `harden.sh` and back-ported to `baseline.sh`.
