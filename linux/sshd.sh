@@ -40,6 +40,7 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
+. "$SCRIPT_DIR/lib/provenance.sh"
 
 umask 077
 
@@ -307,12 +308,7 @@ file_provenance() {
   else
     printf 'written %s\n' "$when"
   fi
-  if ccdc_have dpkg-query; then
-    owner=$(dpkg-query -S "$path" 2>/dev/null | head -1 | cut -d: -f1)
-  elif ccdc_have rpm; then
-    owner=$(rpm -qf "$path" 2>/dev/null | head -1)
-    case "$owner" in *'not owned'*|*'No such file'*) owner='' ;; esac
-  fi
+  owner=$(pkg_owner "$path") || owner=''
   [ -n "$owner" ] && printf 'shipped by package %s\n' "$owner"
   return "$late"
 }

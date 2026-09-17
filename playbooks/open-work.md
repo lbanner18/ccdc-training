@@ -56,15 +56,50 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 - [x] Cards 13-16 written to close the gaps found by enumerating all 60 finding
       kinds the kit can emit.
 - [x] Actions written: `nopasswd`, `suidunpackaged`, `rogueunit`, `tmpproc`,
-      `netproc`. **NOT YET TESTED against the live box.**
-- [ ] Actions still to write: `port`, `udpport`, `netunpackaged`, `netprocsvc`.
-      Each names a port or a process that may BE the scored service, so each
-      needs harden.sh's scored-check-and-rollback pattern.
+      `netproc`.
+- [x] Actions written: `port`, `udpport`, `netunpackaged`, `netprocsvc`. A port
+      held by a unit is stopped and disabled (reversible, preferred); a port
+      held by a bare process is captured and killed.
+- [x] **Proven end to end on the lab box, 2026-09-17.** One of each of the nine
+      planted -> 16 numbered items -> bulk approve applied 8 RED and handed back
+      8 AMBER by number -> each AMBER approved individually -> "Nothing waiting
+      for your sign-off", with scored-web answering 200 at every step.
+- [x] Installed under guardian in the right order; no drift warning, no revert.
 - [ ] Wire `card_for` completeness into baseline.sh too, and assert every one of
-      the 60 kinds resolves to a card that exists.
-- [ ] Prove each new action end to end on a planted box.
+      the 60 kinds resolves to a card that exists. **Still open.**
 - [ ] **Remember:** every sentry change needs guardian uninstall -> sentry
       install -> guardian install, or guardian reverts it within a tick.
+
+### What testing found that writing did not (2026-09-17)
+
+Every one of these was live in code that read correctly and had passed the
+suite. This is the argument for running it rather than reading it.
+
+1. **The five actions were unreachable.** `can_automate` had no arm for any of
+   them, so the queue never held one and `--approve` never routed to one. Dead
+   code that read like a feature. A three-way parity assertion now fails the
+   suite if `execute_action`, `can_automate` and `render_action` ever disagree.
+2. **Approving `netprocsvc` deleted `/usr/bin/python3.12`** — the interpreter
+   the scored service runs on. See D14.
+3. **`exe_is_unpackaged` called `/usr/bin/nc.openbsd` unowned**, because dpkg
+   recorded it as `/bin/nc.openbsd`. The library that has always handled this
+   was never sourced by sentry. See D14.
+4. **The rollback did nothing.** Both rollbacks rebuilt the preserved path by
+   hand and missed the sequence number `preserve_into_case` writes, then sent
+   the error to `/dev/null`. A rogue unit holding a scored port was removed, the
+   scored check correctly failed, the report correctly said FAILED — and the
+   unit file was gone, under a line promising it would be put back.
+5. **Net findings named a binary, not a process.** Three `netproc` findings all
+   naming `/usr/bin/nc.openbsd` resolved to one arbitrary pid; two `netprocsvc`
+   findings naming `/usr/bin/python3.12` both resolved to scored-web, which is
+   protected, so neither could ever be acted on. Subjects now carry the pid.
+6. **Queued findings were printed twice** — once with an approve command, once
+   under NEEDS YOU. Queueing AMBER made the two sets overlap for the first time.
+7. **Sentry refused its own offer.** `can_automate` cleared an item and the
+   action's pre-kill re-check rejected it. See D15.
+8. **`action_unit` had no scored re-check** while `action_rogueunit` did, so the
+   same unit file had two different safety levels depending on which detector
+   named it first.
 
 ## P1 — promised in writing, not built
 

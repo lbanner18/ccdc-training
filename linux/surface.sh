@@ -26,6 +26,7 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
+. "$SCRIPT_DIR/lib/provenance.sh"
 
 umask 077
 
@@ -73,18 +74,11 @@ pid_unit() {
   printf '%s\n' "$line"
 }
 
+# Through lib/provenance.sh, which asks the merged-/usr spelling too: asking
+# only the literal path returns an empty owner for a stock /usr/bin binary,
+# which reads as "no package ships this".
 pkg_for_path() {
-  local path=$1 pkg
-  [ -n "$path" ] || return 1
-  if ccdc_have dpkg-query; then
-    pkg=$(dpkg-query -S "$path" 2>/dev/null | head -1 | cut -d: -f1)
-  elif ccdc_have rpm; then
-    pkg=$(rpm -qf "$path" 2>/dev/null | head -1)
-  fi
-  case "$pkg" in
-    ''|*'not owned'*|*'no package'*) return 1 ;;
-  esac
-  printf '%s\n' "$pkg"
+  pkg_owner "$1"
 }
 
 # The whole point of the report. Three answers only:

@@ -351,5 +351,216 @@ else
   hno "sentry points at cards that do not exist: $missing"
 fi
 
+# The three lists that have to agree, and silently did not.
+#
+# Five actions were written, dispatched by execute_action, and unreachable:
+# can_automate had no arm for any of them, so the queue never held one and
+# --approve never routed to one. They were dead code that read like a feature.
+# The same gap in render_action prints "no automatic action" as the `will:`
+# line directly above an approve command - a line that contradicts itself.
+#
+# So: every check execute_action can run must be one can_automate can accept
+# and render_action can describe, and nothing can_automate accepts may be
+# undispatchable. Checked against the source, because the alternative is
+# noticing on the box during an event.
+mismatch=$(python3 - "$ROOT" <<'PARITY'
+import re, sys, os
+src = open(os.path.join(sys.argv[1], 'linux', 'sentry.sh'), encoding='utf-8').read()
+
+def arms(fn):
+    m = re.search(r'\n%s\(\) \{\n(.*?)\n\}\n' % fn, src, re.S)
+    if not m:
+        return None
+    found = set()
+    for label in re.findall(r'^ {4}([A-Za-z0-9_*|]+)\)', m.group(1), re.M):
+        found.update(p for p in label.split('|') if p != '*')
+    return found
+
+execs = arms('execute_action')
+auto  = arms('can_automate')
+rend  = arms('render_action')
+problems = []
+for name, got in (('execute_action', execs), ('can_automate', auto), ('render_action', rend)):
+    if got is None:
+        problems.append('cannot find %s' % name)
+if not problems:
+    # can_automate lists rcdeep|rcfile as an explicit refusal, not an offer.
+    refused = set(re.findall(r'^ {4}([A-Za-z0-9_|]+)\) return 1 ;;', 
+                  re.search(r'\ncan_automate\(\) \{\n(.*?)\n\}\n', src, re.S).group(1), re.M))
+    refused = {p for label in refused for p in label.split('|')}
+    offered = auto - refused
+    for k in sorted(offered - execs):
+        problems.append('can_automate offers %s but execute_action cannot run it' % k)
+    for k in sorted(offered - rend):
+        problems.append('%s has no render_action arm, so its will: line reads "no automatic action"' % k)
+    for k in sorted(execs - auto):
+        problems.append('execute_action runs %s but can_automate never accepts it: dead code' % k)
+print('; '.join(problems))
+PARITY
+)
+if [ -z "$mismatch" ]; then
+  hok 'can_automate, render_action and execute_action all cover the same checks'
+else
+  hno "$mismatch"
+fi
+
+# An AMBER action stops a port or kills a process. A bulk approve that took
+# those would be the self-inflicted outage the kit exists to prevent.
+if awk '/^do_approve\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q 'NOT APPLIED by a bulk approve'; then
+  hok 'a bulk --approve refuses AMBER items and hands over their numbers'
+else
+  hno 'a bulk --approve would sweep AMBER items, which may be the scored service'
+fi
+
+# Nothing may kill a pid without asking a second time, immediately before the
+# kill: the queue can be a minute old and pids are recycled.
+if awk '/^action_live_process\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q 'pid_is_protected'; then
+  hok 'the live-process action re-checks protection immediately before killing'
+else
+  hno 'the live-process action trusts a queue decision made up to a minute ago'
+fi
+
+# A rollback decision that only looks at TCP calls a 500-ing web service healthy.
+if awk '/^scored_still_answering\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q 'ccdc_http_checks'; then
+  hok 'the scored re-check asks the HTTP checks, not just the TCP handshake'
+else
+  hno 'the scored re-check never asks whether the web service actually serves'
+fi
+
+# Queueing AMBER made the numbered list and the NEEDS YOU list overlap for the
+# first time, and the operator saw the same finding twice: once with an approve
+# command, once under a heading saying it needed them.
+if awk '/^write_alerts\(\)/,/^}/' "$ROOT/linux/sentry.sh" \
+   | grep -c 'queue_has "$check" "$subject" && continue' | grep -qx 2; then
+  hok 'neither held list reprints a finding that already has its own number'
+else
+  hno 'a queued finding is printed again under RED-held or NEEDS YOU'
+fi
+
+# Anything offerable at AMBER must be something can_automate can actually vet.
+gap=$(python3 - "$ROOT" <<'AMBER'
+import re, sys, os
+src = open(os.path.join(sys.argv[1], 'linux', 'sentry.sh'), encoding='utf-8').read()
+m = re.search(r'\nofferable_at_amber\(\) \{\n(.*?)\n\}\n', src, re.S)
+amber = set()
+for label in re.findall(r'^ {4}([A-Za-z0-9_|]+)\) return 0 ;;', m.group(1) if m else '', re.M):
+    amber.update(label.split('|'))
+c = re.search(r'\ncan_automate\(\) \{\n(.*?)\n\}\n', src, re.S).group(1)
+auto = set()
+for label in re.findall(r'^ {4}([A-Za-z0-9_*|]+)\)', c, re.M):
+    auto.update(p for p in label.split('|') if p != '*')
+print(' '.join(sorted(amber - auto)))
+AMBER
+)
+if [ -z "$gap" ]; then
+  hok 'every check offerable at AMBER is one can_automate vets'
+else
+  hno "offerable at AMBER but can_automate never sees it: $gap"
+fi
+
+# A rollback that reconstructs the preserved path by hand gets it wrong: the
+# copy is written with a sequence number in front of the basename, and without
+# it the cp finds nothing. Both rollbacks did this, and both sent the error to
+# /dev/null - so the report said FAILED while the unit file stayed deleted.
+if awk '/^action_/,/^}/' "$ROOT/linux/sentry.sh" \
+   | grep -qE 'cp -a -- "\$evidence_case/'; then
+  hno 'a rollback rebuilds the preserved path by hand instead of using restore_from_case'
+else
+  hok 'rollbacks restore through restore_from_case, not a hand-built path'
+fi
+
+# And the round trip itself, run for real rather than read.
+rt=$(bash -c '
+  set -u
+  slog() { :; }
+  evidence_case=$(mktemp -d); evidence_copy_seq=0; evidence_last=""
+  '"$(awk '/^preserve_into_case\(\) \{/,/^}/' "$ROOT/linux/sentry.sh")"'
+  '"$(awk '/^restore_from_case\(\) \{/,/^}/' "$ROOT/linux/sentry.sh")"'
+  src=$(mktemp); printf "the original contents\n" >"$src"
+  preserve_into_case "$src" || { echo "preserve failed"; exit 1; }
+  saved=$evidence_last
+  rm -f -- "$src"
+  restore_from_case "$saved" "$src" || { echo "restore reported failure"; exit 1; }
+  [ -f "$src" ] || { echo "restore did not put the file back"; exit 1; }
+  grep -qx "the original contents" "$src" || { echo "restored contents differ"; exit 1; }
+  # And it must refuse, loudly, when there is no copy to restore from.
+  if restore_from_case "" "$src" 2>/dev/null; then echo "restore claimed success with no saved copy"; exit 1; fi
+  rm -rf -- "$evidence_case" "$src"
+  echo ok
+' 2>&1 | tail -1)
+if [ "$rt" = ok ]; then
+  hok 'preserve then restore puts the original file back, byte for byte'
+else
+  hno "preserve/restore round trip: $rt"
+fi
+
+# Removing a unit can take the scored service with it, whichever detector
+# named the unit first. The same file must not have two different safety
+# levels depending on whether it was reported as `unit` or as `rogueunit`.
+gap=$(for fn in action_unit action_unitdeep action_rogueunit action_port_common; do
+  sed -n "/^$fn() {/,/^}/p" "$ROOT/linux/sentry.sh" \
+    | grep -q scored_still_answering || printf ' %s' "$fn"
+done)
+if [ -z "$gap" ]; then
+  hok 'every action that can stop a unit re-checks the scored services'
+else
+  hno "removes or stops a unit with nothing watching:$gap"
+fi
+
+# A pid holding a port the packet or the watchdog accounts for is as protected
+# as the port is: killing the process closes the port just the same.
+if awk '/^pid_is_protected\(\)/,/^}/' "$ROOT/linux/sentry.sh" | grep -q pid_holds_protected_port; then
+  hok 'a process holding a scored port is protected from the live-process actions'
+else
+  hno 'a live-process action can kill the holder of a port the watchdog probes'
+fi
+
+# The worst thing this kit has done to a box: approving a netprocsvc finding
+# for a python web shell deleted /usr/bin/python3.12, the interpreter the
+# SCORED service runs on. Killing a process and deleting its executable are
+# two different decisions, and only the second is about provenance.
+if sed -n '/^action_live_process() {/,/^}/p' "$ROOT/linux/sentry.sh" \
+   | grep -B4 'rm -f -- "$path"' | grep -q exe_is_unpackaged; then
+  hok 'an executable is only deleted when no package owns it'
+else
+  hno 'a live-process action can delete a shared, package-owned interpreter'
+fi
+
+# And the will: line must not promise a deletion that will not happen, or one
+# that must not happen.
+if sed -n '/^render_action() {/,/^}/p' "$ROOT/linux/sentry.sh" | grep -q 'so the file STAYS'; then
+  hok 'the will: line says whether the executable is deleted or kept'
+else
+  hno 'the will: line promises "delete the executable" whatever the file is'
+fi
+
+# Exactly one check may skip the protected-port test, and only because it
+# substitutes a stricter one. An exemption left without its compensating
+# control is worse than no exemption.
+mode_fn=$(sed -n '/^protection_mode_for() {/,/^}/p' "$ROOT/linux/sentry.sh")
+arm=$(sed -n '/^can_automate() {/,/^}/p' "$ROOT/linux/sentry.sh" \
+      | sed -n '/^    netprocsvc)/,/;;/p')
+if [ "$(printf '%s' "$mode_fn" | grep -c 'ignore-port')" = 1 ] \
+   && printf '%s' "$mode_fn" | grep -q "netprocsvc) printf 'ignore-port'" \
+   && printf '%s' "$arm" | grep -q 'pid_service'; then
+  hok 'only netprocsvc skips the port test, and only with the no-unit test in its place'
+else
+  hno 'the protected-port exemption is not confined to netprocsvc, or has lost its no-unit test'
+fi
+
+# can_automate offers the item; the action re-checks before the kill. If that
+# second check is stricter, sentry refuses its own offer and the operator gets
+# FAILED with nothing to do next. Both must go through protection_mode_for.
+bare=$(for fn in can_automate action_live_process action_port_common; do
+  sed -n "/^$fn() {/,/^}/p" "$ROOT/linux/sentry.sh" \
+    | grep -n 'pid_is_protected' | grep -v 'protection_mode_for' | sed "s|^|$fn:|"
+done)
+if [ -z "$bare" ]; then
+  hok 'the offer and the pre-kill re-check ask the protection question the same way'
+else
+  hno 'can_automate and the live-process action can disagree about the same pid'
+  printf '%s\n' "$bare" | sed 's/^/    /'
+fi
+
 printf 'sentry source checks: %s passed, %s failed\n' "$hpass" "$hfail"
 [ "$hfail" -eq 0 ] || exit 1

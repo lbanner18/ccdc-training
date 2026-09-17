@@ -1002,3 +1002,95 @@ sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
 
 Blessing first and hardening after makes every cut you make read as drift for
 the rest of the event.
+
+---
+
+## CARD 17 — a binary no package installed is talking on the network
+
+`netunpackaged  pid1777307:/usr/sbin/.sysmon` · reported by `triage.sh` and
+carried into `sentry.sh --status`
+
+Every file that arrived through `apt` can be traced back to a package and
+checked against a recorded checksum. This one cannot. It is a compiled binary
+sitting in a system directory, it belongs to nothing, and it is using the
+network — either reaching out, or holding a port the packet does not account
+for.
+
+That is not proof of anything. It is also exactly what every from-source
+install looks like: `make install` does not tell dpkg anything. So this is
+AMBER, and the question it asks you is the only one that separates the two
+cases: **do you know what put it there?**
+
+### Why this is not CARD 8
+
+CARD 8 is about a port you did not expect. This is about a *file* you cannot
+account for, and it fires just as loudly for an outbound connection, where
+there is no listening port to look at at all. Exfiltration has no port to
+close.
+
+### Find it yourself
+
+```bash
+sudo ss -tulnp | grep -F /usr/sbin/.sysmon   # what socket, which direction
+ls -l -- /usr/sbin/.sysmon
+dpkg -S -- /usr/sbin/.sysmon                 # "no path found" is the finding
+sha256sum -- /usr/sbin/.sysmon               # then look that hash up OFF the box
+```
+
+Two questions decide it, in this order:
+
+1. **Does its hash match something you can name?** A copy of `nc`, `busybox`
+   or a language runtime under a different name is not a from-source install.
+   `cmp -s -- /usr/sbin/.sysmon "$(command -v nc)" && echo 'it IS netcat'`
+2. **Is there any record of it being built here?** Source tree, a `make`
+   in your shell history, an entry in the packet. No record and a
+   hidden-looking name — a leading dot, a plausible system word like
+   `.sysmon` or `.netcheck` — is the answer.
+
+### Fix it
+
+Sentry will do the whole sequence, in order, and refuse to kill anything it
+could not capture first:
+
+```bash
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve N --apply
+```
+
+It captures the process — socket, parent, and the executable, including when
+the file has already been unlinked — kills it by PID, then preserves and
+removes the binary, and finally re-checks every scored service.
+
+By hand, capture before you kill, always:
+
+```bash
+sudo ./linux/preserve.sh --config /tmp/ccdc-linux.env --pid PID --freeze --apply
+sudo kill -9 PID
+sudo cp -a -- /usr/sbin/.sysmon /var/tmp/ccdc-evidence/
+sudo rm -f -- /usr/sbin/.sysmon
+```
+
+### The part that matters more than the kill
+
+Something started it, and that something is still there. A binary does not
+install itself:
+
+```bash
+sudo ps -o ppid= -p PID | xargs -r ps -o pid,user,cmd -p   # who launched it
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --status
+```
+
+If it comes back after you remove it, you removed the payload and left the
+mechanism. Work CARD 3, CARD 4 and CARD 11 until nothing rebuilds it.
+
+### If it turns out to be yours
+
+Say so once and stop being asked:
+
+```bash
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
+```
+
+Blessing records it as a standing exception. Do that only after you have
+answered both questions above — a blessed implant is invisible for the rest
+of the event.

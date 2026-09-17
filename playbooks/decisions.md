@@ -175,7 +175,7 @@ Cards written 2026-09-17 to close the gaps found by enumerating all 60:
   findings, which are a different category from every other card: nothing on it
   is an implant)
 
-## D12 — Sentry's finish line (2026-09-17) — **IN PROGRESS**
+## D12 — Sentry's finish line (2026-09-17) — **DONE, proven on the lab box**
 
 The original count: 27 check types, 14 with an action, 13 without. Of the 13,
 nine were "simply unwritten" and four are deliberate holds (`sshrootlogin`,
@@ -186,11 +186,97 @@ nine were "simply unwritten" and four are deliberate holds (`sshrootlogin`,
 services and restores the unit if one stops answering; the live-process actions
 refuse to kill anything they could not capture.
 
-**Still to do:** `port`, `udpport`, `netunpackaged`, `netprocsvc`. These name a
-PORT or a process that may BE the scored service, so each needs the
-scored-check-and-rollback that harden.sh --cut uses. Not yet written.
+**Built 2026-09-17, second pass:** `port`, `udpport`, `netunpackaged`,
+`netprocsvc`. Each names a port or a process that may BE the scored service, so
+each re-checks the scored services afterwards. A port held by a *unit* is
+stopped and disabled, which is reversible and is the preferred branch; a port
+held by a bare process is captured and killed, which is not, so everything that
+could be ours is refused before the function is ever reached.
+
+**Proven end to end on the lab box, 2026-09-17 06:18–06:24.** One instance of
+each of the nine planted, `--status` showed **16 numbered items**, a bulk
+`--approve --apply` applied 8 RED and handed back 8 AMBER by number, each AMBER
+was then approved individually, and the run ended at "Nothing waiting for your
+sign-off" with scored-web answering 200 at every single step. What is left in
+NEEDS YOU is the agreed set: `crondeep`, `sshkey`, `etcchange`, and the two
+AMBER holds that are correctly not offered.
 
 **Also fixed on the way:** `nopasswd` emitted the literal subject `"sudoers"` —
 a category, not a target, so it could never be acted on. It now emits one
 finding per file, RED for a drop-in that postdates the box and AMBER for the
 rest. Same defect as the old `see-log` subjects.
+
+## D13 — AMBER findings get numbers too, but never a bulk sweep (2026-09-17)
+
+The queue was RED-only. Every finding about a listening port or a
+socket-holding process is AMBER — because every one of them might be yours —
+so the entire class could be detected, described, and never offered. That is
+the finish line the operator kept falling off.
+
+So the queue admits AMBER, and the split is at the **bulk** approve instead:
+
+- `--approve N --apply` applies any item, RED or AMBER.
+- `--approve --apply` with no number applies the RED items and prints each
+  AMBER one with its own number and the reason it was skipped.
+
+Because an AMBER action stops a port or kills a process, and a sweep that took
+those would be the self-inflicted outage this kit exists to prevent.
+
+**Not every check is offerable at AMBER.** `offerable_at_amber()` lists the
+ones that are: `port`, `udpport`, `rogueunit`, `netunpackaged`, `netprocsvc` —
+either reversible, or a live process holding a port nothing accounts for. Two
+measured cases decided the exclusions. An AMBER `nopasswd` is a sudoers drop-in
+that *predates* the box: on the lab VM it was `/etc/sudoers.d/90-cloud-init-users`,
+and approving its removal would have taken the operator's own passwordless sudo
+with it. An AMBER `suidunpackaged` predates the box too, and triage says so in
+as many words. Neither is incident response.
+
+## D14 — Killing a process and deleting its executable are different decisions
+
+Only the second one is about provenance, and getting that wrong is the worst
+thing this kit has done to a box.
+
+Measured 2026-09-17: approving a `netprocsvc` finding for a python web shell
+deleted **`/usr/bin/python3.12`** — the interpreter the *scored service* runs
+on. The running service kept serving, because its binary was already mapped, so
+nothing looked wrong; the next restart would have failed, and `/usr/bin/python3`
+was left as a dangling symlink. It was recovered byte-for-byte from sentry's own
+evidence copy, which is the argument for capture-before-destroy demonstrated on
+itself.
+
+The rule now: **an executable is deleted only when no package owns it.** A
+dropper in `/dev/shm` is owned by nothing and goes. A shared, package-owned
+interpreter is not the attacker's file — the attacker's file is the script it
+was told to run, and that is a different finding. The `will:` line says which
+of the two will happen, per file.
+
+**And "owned by no package" has to be asked correctly.** `dpkg-query -S
+/usr/bin/nc.openbsd` says *no path found*, because dpkg recorded it as
+`/bin/nc.openbsd` on a merged-/usr system. `lib/provenance.sh` has handled this
+since it was written, and its own header says baseline, harden and sentry all
+ask through it — sentry never sourced it, and triage sourced it and then kept a
+private copy of the question without the fix. Three more tools (`sshd.sh`,
+`surface.sh`, `baseline.sh`) asked dpkg directly for the owning package *name*
+and would print an empty owner for a stock binary, which reads as "no package
+ships this". All of them now go through `pkg_owns()` / `pkg_owner()`, and a
+sweep assertion fails the suite if a new one appears.
+
+## D15 — The offer and the pre-kill re-check must ask the same question
+
+`can_automate` decides whether to offer an item; the action re-checks
+immediately before the kill, because the queue can be a minute old and pids are
+recycled. If that second check is *stricter* than the first, it is not extra
+safety — it is sentry printing an approve command and then refusing its own
+offer with "FAILED — partial changes may have occurred" and nothing to do next.
+
+Measured: `netprocsvc` was cleared with the protected-port test skipped and
+re-checked with it applied, so the approval could never succeed no matter how
+many times it was run. Both now go through one `protection_mode_for()`, and an
+assertion fails the suite if either calls `pid_is_protected` without it.
+
+`netprocsvc` is the one check that skips the protected-port test, and only
+because it substitutes a stricter one: this finding exists *because* the port
+is one the packet accounts for — that is the shape of it, and it is the nastiest
+place to hide, since every port-based check waves it through. What is asked
+instead is whether a `.service` or `.socket` owns the process. A scored service
+arrives as a unit; an interpreter holding a scored port under no unit is not it.

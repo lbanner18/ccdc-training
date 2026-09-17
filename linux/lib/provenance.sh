@@ -33,22 +33,65 @@
 # above a SUID root shell planted twenty minutes earlier.
 #
 # So: ask about the path, and about the same path with the merge undone.
+# The same path with the merge undone, or the empty string. Both questions
+# below need it, and two copies of this table is how they drift apart.
+pkg_alt_path() {
+  case "$1" in
+    /usr/bin/*)  printf '/bin/%s' "${1#/usr/bin/}" ;;
+    /usr/sbin/*) printf '/sbin/%s' "${1#/usr/sbin/}" ;;
+    /usr/lib/*)  printf '/lib/%s' "${1#/usr/lib/}" ;;
+    /bin/*)      printf '/usr/bin/%s' "${1#/bin/}" ;;
+    /sbin/*)     printf '/usr/sbin/%s' "${1#/sbin/}" ;;
+    /lib/*)      printf '/usr/lib/%s' "${1#/lib/}" ;;
+  esac
+}
+
 pkg_owns() {
   local f=$1 alt=''
-  case "$f" in
-    /usr/bin/*)  alt="/bin/${f#/usr/bin/}" ;;
-    /usr/sbin/*) alt="/sbin/${f#/usr/sbin/}" ;;
-    /usr/lib/*)  alt="/lib/${f#/usr/lib/}" ;;
-    /bin/*)      alt="/usr/bin/${f#/bin/}" ;;
-    /sbin/*)     alt="/usr/sbin/${f#/sbin/}" ;;
-    /lib/*)      alt="/usr/lib/${f#/lib/}" ;;
-  esac
+  alt=$(pkg_alt_path "$f")
   if ccdc_have dpkg-query; then
     dpkg-query -S "$f" >/dev/null 2>&1 && return 0
     [ -n "$alt" ] && dpkg-query -S "$alt" >/dev/null 2>&1 && return 0
   elif ccdc_have rpm; then
     rpm -qf "$f" >/dev/null 2>&1 && return 0
     [ -n "$alt" ] && rpm -qf "$alt" >/dev/null 2>&1 && return 0
+  fi
+  return 1
+}
+
+# WHICH package owns this file? Prints the package name, or nothing.
+#
+# The same merged-/usr trap as pkg_owns, and three tools were in it: sshd.sh,
+# surface.sh and baseline.sh each asked dpkg for the owner of the literal path
+# only, so a stock binary under /usr/bin came back with an empty owner - which
+# reads to an operator as "no package ships this", the exact wrong conclusion
+# and the one this library was written to stop.
+#
+# Note where the status is read. `owner=$(dpkg-query -S "$f" | head -1)` reads
+# HEAD's status, which is zero whether or not dpkg found anything; baseline.sh
+# printed "owned by a package? yes - " with an empty name because of it.
+pkg_owner() {
+  local f=$1 alt out=''
+  [ -n "$f" ] || return 1
+  alt=$(pkg_alt_path "$f")
+  if ccdc_have dpkg-query; then
+    out=$(dpkg-query -S -- "$f" 2>/dev/null) || out=''
+    if [ -z "$out" ] && [ -n "$alt" ]; then
+      out=$(dpkg-query -S -- "$alt" 2>/dev/null) || out=''
+    fi
+    [ -n "$out" ] || return 1
+    out=$(printf '%s\n' "$out" | head -1)
+    printf '%s\n' "${out%%:*}"
+    return 0
+  fi
+  if ccdc_have rpm; then
+    out=$(rpm -qf -- "$f" 2>/dev/null) || out=''
+    if [ -z "$out" ] && [ -n "$alt" ]; then
+      out=$(rpm -qf -- "$alt" 2>/dev/null) || out=''
+    fi
+    case "$out" in ''|*'not owned'*|*'no package'*|*'No such file'*) return 1 ;; esac
+    printf '%s\n' "$(printf '%s\n' "$out" | head -1)"
+    return 0
   fi
   return 1
 }

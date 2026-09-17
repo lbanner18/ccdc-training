@@ -18,6 +18,7 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$SCRIPT_DIR/lib/common.sh"
+. "$SCRIPT_DIR/lib/provenance.sh"
 
 umask 077
 
@@ -337,6 +338,202 @@ protected_payload() {
 # matching lines and removes only exact whole-line matches.
 rc_patterns='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat|nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
 
+# --- what the network-facing actions all need to know -------------------------
+#
+# Every one of the remaining actions names either a port or a process, and on a
+# scored box either of those may BE the thing you are being graded on. So they
+# share one question - "could this be ours?" - asked four ways: the unit that
+# owns the process, the binary behind it, the session it belongs to, and the
+# port itself. A no from any of them is enough to refuse.
+
+# Which systemd unit owns this pid? Empty when it belongs to none, and that
+# emptiness is itself a discriminator: a scored service arrives as a unit, a
+# web shell spawned by one does not.
+pid_unit() {
+  local pid=$1
+  [ -r "/proc/$pid/cgroup" ] || return 1
+  tr '/' '\n' <"/proc/$pid/cgroup" 2>/dev/null \
+    | grep -E '\.(service|socket|scope)$' | tail -1
+}
+
+pid_exe() {
+  local pid=$1 exe
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+  printf '%s' "${exe% (deleted)}"
+}
+
+# Is this pid ours, the system's, or a scored service's? Anything that cannot
+# be resolved is treated as protected, because the failure mode of guessing
+# wrong here is killing the service being graded.
+# The second argument, "ignore-port", is used by exactly one caller and is
+# explained at that caller: netprocsvc exists BECAUSE the port is one the
+# packet accounts for, so the port test would disqualify every instance of it
+# by construction. That caller substitutes a stricter test of its own.
+pid_is_protected() {
+  local pid=$1 mode=${2:-} unit exe mysid itssid
+  case "$pid" in ''|*[!0-9]*) return 0 ;; esac
+  [ -d "/proc/$pid" ] || return 0
+  if [ "$pid" -le 2 ]; then return 0; fi
+  if [ "$pid" -eq "$$" ] || [ "$pid" -eq "${PPID:-0}" ]; then return 0; fi
+  unit=$(pid_unit "$pid" 2>/dev/null) || unit=''
+  if [ -n "$unit" ] && protected_unit "$unit"; then return 0; fi
+  exe=$(pid_exe "$pid" 2>/dev/null) || exe=''
+  case "$exe" in
+    /usr/sbin/sshd|/usr/sbin/init|/sbin/init) return 0 ;;
+    /lib/systemd/systemd|/usr/lib/systemd/systemd) return 0 ;;
+  esac
+  if [ -n "$exe" ] && protected_payload "$exe"; then return 0; fi
+  if [ "$mode" != ignore-port ] && pid_holds_protected_port "$pid"; then return 0; fi
+  # Our own login session: killing anything in it ends the shell that is doing
+  # the approving, and the approval goes with it.
+  mysid=$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ')
+  itssid=$(ps -o sid= -p "$pid" 2>/dev/null | tr -d ' ')
+  if [ -n "$mysid" ] && [ "$mysid" = "$itssid" ]; then return 0; fi
+  return 1
+}
+
+# Does this pid hold a listening port the packet or the watchdog accounts for?
+#
+# port_is_protected asks the same question from the port's side, and every
+# action that starts from a port goes through it. A live-process action starts
+# from a pid instead, and killing the process closes the port just as surely -
+# so without this the two doors have different locks.
+#
+# Measured on the lab VM: a rollback correctly restored a rogue unit that held
+# a scored TCP check port, and the netcat underneath it came straight back as a
+# RED netproc finding that sentry offered to kill.
+pid_holds_protected_port() {
+  local pid=$1 addr port
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  ccdc_have ss || return 1
+  while read -r addr; do
+    port=${addr##*:}
+    port_is_protected "$port" && return 0
+  done < <(ss -H -lntupn 2>/dev/null | awk -v p="pid=$pid," 'index($0, p) { print $5 }')
+  return 1
+}
+
+# Which protection mode does this check's live-process action run under?
+#
+# can_automate decides whether to offer an item; the action re-checks
+# immediately before the kill, because the queue can be a minute old and pids
+# are recycled. Those two checks must ask the SAME question. A second check
+# that is stricter than the first is not extra safety - it is sentry offering
+# an item, printing an approve command for it, and then refusing its own offer
+# with "FAILED - partial changes may have occurred" and nothing to do next.
+#
+# Measured: can_automate cleared a netprocsvc item with ignore-port, the action
+# re-checked without it, and the approval failed on a finding that was never
+# going to be actionable no matter how many times the operator tried.
+protection_mode_for() {
+  case "$1" in
+    netprocsvc) printf 'ignore-port' ;;
+    *)          printf '' ;;
+  esac
+}
+
+# Is this port one the packet accounts for, one the watchdog probes, or the one
+# carrying this session? Any of those and nothing here touches it - the finding
+# may simply be stale, and a stale finding must not close a scored port.
+port_is_protected() {
+  local port=$1 name host p svc
+  case "$port" in ''|*[!0-9]*) return 0 ;; esac
+  if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then return 0; fi
+  ccdc_list_contains "$port" "${CCDC_ALLOWED_TCP_PORTS:-} ${CCDC_ALLOWED_UDP_PORTS:-}" && return 0
+  [ "$port" = "${CCDC_SSH_PORT:-22}" ] && return 0
+  [ "$port" = 22 ] && return 0
+  while IFS='|' read -r name host p svc; do
+    [ "$p" = "$port" ] && return 0
+  done < <(ccdc_tcp_checks 2>/dev/null)
+  return 1
+}
+
+# The pid holding a listening port, or empty. netid is tcp or udp.
+holder_of_port() {
+  local netid=$1 port=$2 flag=t
+  case "$netid" in udp) flag=u ;; tcp) flag=t ;; *) return 1 ;; esac
+  ccdc_have ss || return 1
+  ss -H -ln"$flag"p "sport = :$port" 2>/dev/null \
+    | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | head -1
+}
+
+# Owned by no package - re-asked here rather than trusted from the finding,
+# because a finding can be minutes old and the answer decides a deletion.
+#
+# Two shapes matter and both were got wrong once. dpkg-query's own status is
+# read, not a pipeline's: an earlier version wrote
+# `if dpkg-query -S "$f" | head -1; then` and read head's status, which is
+# always zero, so every file looked package-owned. And the merged-/usr spelling
+# is asked for too, which is lib/provenance.sh's pkg_owns()'s whole job -
+# without it /usr/bin/nc.openbsd reads as owned by nothing, because dpkg
+# recorded it as /bin/nc.openbsd. That library says in its own header that
+# baseline, harden and sentry all ask the question through it; sentry was the
+# one that never sourced it.
+exe_is_unpackaged() {
+  local path=$1
+  [ -n "$path" ] || return 1
+  ccdc_have dpkg-query || ccdc_have rpm || return 1
+  pkg_owns "$path" && return 1
+  return 0
+}
+
+# Only a .service or .socket - a .scope is a session, not a unit someone
+# installed, and the difference is what decides netprocsvc.
+pid_service() {
+  local pid=$1
+  [ -r "/proc/$pid/cgroup" ] || return 1
+  tr '/' '\n' <"/proc/$pid/cgroup" 2>/dev/null \
+    | grep -E '\.(service|socket)$' | tail -1
+}
+
+# The live pid behind a finding's subject, whether the subject names the pid
+# (tmpproc says pid1234:/dev/shm/x) or only the executable (netproc says the
+# path). Empty or dead means there is nothing left to act on.
+subject_pid() {
+  local subject=$1 pid path
+  pid=$(printf '%s' "$subject" | sed -n 's/^pid\([0-9][0-9]*\):.*/\1/p')
+  if [ -z "$pid" ]; then
+    path=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s/ (deleted)$//')
+    pid=$(resolve_pid_for_exe "$path") || return 1
+  fi
+  [ -n "$pid" ] && [ -d "/proc/$pid" ] || return 1
+  printf '%s' "$pid"
+}
+
+# A sudoers drop-in this box's own kit put there, or the main file. Never ours
+# to remove automatically.
+protected_sudoers() {
+  local f=$1
+  case "$f" in
+    /etc/sudoers) return 0 ;;
+    /etc/sudoers.d/*) ;;
+    *) return 0 ;;
+  esac
+  case "${f##*/}" in
+    "${CCDC_SENTRY_NAME:-ccdc-sentry}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*) return 0 ;;
+  esac
+  return 1
+}
+
+# AMBER means "this may well be yours", and for most checks that is a reason to
+# describe rather than offer. Two measured cases decide the list.
+#
+# An AMBER nopasswd is a sudoers drop-in that PREDATES the box - on the lab VM
+# it was /etc/sudoers.d/90-cloud-init-users, cloud-init's own, and approving its
+# removal would have taken the operator's passwordless sudo with it. An AMBER
+# suidunpackaged predates the box too and triage says so in as many words:
+# "most likely a packaging quirk". Neither is incident response.
+#
+# What IS listed here is either reversible - stopping and disabling a unit puts
+# straight back - or a live process holding a port nothing in the packet
+# accounts for, which is precisely the hand-over this tool exists to make.
+offerable_at_amber() {
+  case "$1" in
+    port|udpport|rogueunit|netunpackaged|netprocsvc) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 can_automate() {
   local check=$1 subject=$2 user group unit target owner rest dropin
   case "$check" in
@@ -393,6 +590,86 @@ can_automate() {
     suid)
       safe_root_owned_path "$subject" && [ -u "$subject" ] || return 1
       ;;
+    # A sudoers drop-in written after the box was built. Only ever a file in
+    # /etc/sudoers.d: a mistake in /etc/sudoers itself locks every account out
+    # of root and the only way back is the console.
+    nopasswd)
+      safe_root_owned_path "$subject" || return 1
+      protected_sudoers "$subject" && return 1
+      ccdc_have visudo || return 1
+      ;;
+
+    # Setuid root and owned by no package. The package question is asked again
+    # here rather than trusted from the finding, because the finding can be a
+    # minute old and the answer decides a deletion.
+    suidunpackaged)
+      safe_root_owned_path "$subject" || return 1
+      [ -u "$subject" ] || return 1
+      protected_payload "$subject" && return 1
+      exe_is_unpackaged "$subject" || return 1
+      ;;
+
+    # An enabled unit nothing accounts for. Same shape as `unit`, with the
+    # scored re-check on top: removing a unit that a scored service quietly
+    # pulls in takes the scored service with it.
+    rogueunit)
+      valid_unit_path "$subject" && [ -e "$subject" ] || return 1
+      protected_unit "$(unit_name_from_path "$subject")" && return 1
+      ;;
+
+    # Live processes. The pid must still exist and must not be ours, the
+    # system's, or a scored service's.
+    tmpproc|netproc)
+      target=$(subject_pid "$subject") || return 1
+      pid_is_protected "$target" "$(protection_mode_for "$check")" && return 1
+      ;;
+
+    netunpackaged)
+      target=$(subject_pid "$subject") || return 1
+      pid_is_protected "$target" "$(protection_mode_for "$check")" && return 1
+      exe_is_unpackaged "$(pid_exe "$target")" || return 1
+      ;;
+
+    # A listening port nothing in the packet accounts for. There is no such
+    # thing as removing a port, so the subject of the action is whatever holds
+    # it - and if that is a scored service, an allow-listed port, a watchdog
+    # probe target or SSH, nothing here touches it.
+    port|udpport)
+      case "$subject" in ''|*[!0-9]*) return 1 ;; esac
+      port_is_protected "$subject" && return 1
+      if [ "$check" = udpport ]; then target=$(holder_of_port udp "$subject")
+      else target=$(holder_of_port tcp "$subject"); fi
+      [ -n "$target" ] || return 1
+      pid_is_protected "$target" "$(protection_mode_for "$check")" && return 1
+      ;;
+
+    # An interpreter holding a socket. This is the genuinely ambiguous one -
+    # a scored service written in python and a web shell look identical from
+    # the process name - so it is automatable only in the case where the
+    # ambiguity collapses: NO systemd unit owns it. A scored service arrives as
+    # a unit. Anything with a unit stays held, and held_reason says what to read.
+    netprocsvc)
+      target=$(subject_pid "$subject") || return 1
+      # The port test is deliberately skipped here, and the no-unit test below
+      # is what replaces it.
+      #
+      # This finding is raised precisely when an interpreter holds a port the
+      # packet DOES account for - that is the whole shape of it, and it is the
+      # nastiest place to hide, because every port-based check waves it
+      # through. Asking "is this port accounted for?" therefore disqualifies
+      # every netprocsvc finding there will ever be, which is how this one
+      # silently left the queue after pid_holds_protected_port was added.
+      #
+      # What is asked instead is stricter for this case: does a .service or
+      # .socket own the process? A scored service arrives as a unit - the
+      # packet names services, scored_still_answering iterates units, and
+      # protected_unit is a list of unit names. An interpreter holding a
+      # scored port under NO unit is not the scored service; if it were, the
+      # unit would be failed and the operator has a louder problem than this.
+      pid_is_protected "$target" "$(protection_mode_for "$check")" && return 1
+      [ -z "$(pid_service "$target" 2>/dev/null)" ] || return 1
+      ;;
+
     # Login startup files live in user-writable directories and deep payloads
     # can frame legitimate paths. Report them prominently, but do not race a
     # user-controlled parent or delete the referenced file automatically.
@@ -430,8 +707,11 @@ card_for() {
     suid|suidunpackaged)    printf 'CARD 5 - SUID interpreter' ;;
     tmpproc|netproc)        printf 'CARD 6 - process running from /tmp, or with a deleted executable' ;;
     nopasswd)               printf 'CARD 7 - passwordless sudo you did not configure' ;;
-    port|udpport|netunpackaged)
-                            printf 'CARD 8 - unexpected listening port' ;;
+    port|udpport)           printf 'CARD 8 - unexpected listening port' ;;
+    # Not CARD 8. That card is about a port; this finding is about a file
+    # nothing can account for, and it fires just as loudly for an OUTBOUND
+    # connection, where there is no listening port to close at all.
+    netunpackaged)          printf 'CARD 17 - a binary no package installed is talking on the network' ;;
     etcchange)              printf 'CARD 9 - /etc changed and it was not you' ;;
     svcshell|admingroup)    printf 'CARD 10 - service account with a shell, or in an admin group' ;;
     rcdeep|rcfile)          printf 'CARD 11 - shell start-up file that launches something' ;;
@@ -665,7 +945,7 @@ held_reason() {
 }
 
 render_action() {
-  local check=$1 subject=$2 user group unit target base owner rest dropin
+  local check=$1 subject=$2 user group unit target base owner rest dropin pid
   case "$check" in
     uid0) printf 'lock account, remove login shell, then delete UID-0 alias while retaining its home (no pkill): %q' "$subject" ;;
     emptypw) printf 'lock account and remove login shell: %q' "$subject" ;;
@@ -689,6 +969,50 @@ render_action() {
       owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
       printf 'preserve all; remove drop-in %q from %q, then delete the payload %q; reload and restart the unit' "$dropin" "$owner" "$target" ;;
     suid) printf 'strip the SUID bit from %q (do not delete it)' "$subject" ;;
+    nopasswd)
+      printf 'preserve and remove the sudoers drop-in %q, then run visudo -c and put it straight back if the ruleset no longer parses' "$subject" ;;
+    suidunpackaged)
+      printf 'preserve %q, clear its setuid/setgid bits FIRST so the escalation is dead even if the delete fails, then remove it' "$subject" ;;
+    rogueunit)
+      base=$(basename -- "$subject")
+      printf 'preserve %q; stop, disable and remove it, reload systemd, then re-check every scored service and restore the unit if one stopped answering' "$base" ;;
+    tmpproc|netproc|netunpackaged)
+      pid=$(subject_pid "$subject" 2>/dev/null) || pid=''
+      target=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://')
+      if [ -n "$pid" ]; then
+        printf 'capture pid %s (%s) with preserve.sh - socket, parent and executable - and only then kill it' "$pid" "$target"
+        # Say which of the two it will be. "delete the executable afterwards"
+        # read as a promise about a file that, for a packaged interpreter, must
+        # not be deleted at all.
+        case "$target" in
+          *' (deleted)')
+            printf '. Its executable is already unlinked, so the capture is the only copy that will ever exist' ;;
+          *)
+            if exe_is_unpackaged "$target"; then
+              printf '; then delete %s, which no package owns' "$target"
+            else
+              printf '; a package owns %s and the rest of the box shares it, so the file STAYS' "$target"
+            fi ;;
+        esac
+      else
+        printf 'capture and kill the process running %s - but nothing is running it now, so this will be skipped' "$target"
+      fi ;;
+    port|udpport)
+      if [ "$check" = udpport ]; then target=$(holder_of_port udp "$subject"); else target=$(holder_of_port tcp "$subject"); fi
+      if [ -n "$target" ]; then
+        unit=$(pid_service "$target" 2>/dev/null) || unit=''
+        owner=$(pid_exe "$target" 2>/dev/null) || owner='?'
+        if [ -n "$unit" ]; then
+          printf 'port %s is held by %s (pid %s, %s); stop and disable that unit, then re-check every scored service and start it again if one stopped answering' "$subject" "$unit" "$target" "$owner"
+        else
+          printf 'port %s is held by pid %s (%s) under no unit at all; capture it, kill it, then re-check every scored service' "$subject" "$target" "$owner"
+        fi
+      else
+        printf 'nothing holds port %s any more - this will be skipped' "$subject"
+      fi ;;
+    netprocsvc)
+      pid=$(subject_pid "$subject" 2>/dev/null) || pid=''
+      printf 'no systemd unit owns pid %s (%s), so it is not a scored service; capture it, kill it, then re-check every scored service. The interpreter itself is package-owned and STAYS - what the attacker put here is the script it was told to run, and that is a different finding' "${pid:-?}" "${subject#pid*:}" ;;
     rcdeep) target=${subject#*::}; printf 'preserve and remove launched payload %q' "$target" ;;
     rcfile) printf 'preserve %q and remove only the exact lines that still match the detector' "$subject" ;;
     *) printf 'no automatic action' ;;
@@ -726,7 +1050,7 @@ publish_review_snapshot() {
 }
 
 write_alerts() {
-  local n=0 sev check subject desc i=0 heldred=0 action watch_count=0 tmp quoted
+  local n=0 sev check subject desc i=0 heldred=0 heldamber=0 action watch_count=0 tmp quoted
   tmp=$(new_state_file) || return 1
   [ -f "$queue" ] && n=$(wc -l <"$queue" 2>/dev/null | tr -d ' ') || true
   [ -n "$n" ] || n=0
@@ -797,6 +1121,8 @@ write_alerts() {
         # "2" to match, it reaches the tool as the literal string "[2]" and is
         # rejected as not a number. The operator did exactly what was printed.
         printf '        approve: sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve %s --apply\n' "$i"
+        [ "$sev" = RED ] \
+          || printf '        note:  AMBER - this may well be yours, so a bulk approve skips it. It needs its own number.\n'
         printf '        more:  playbooks/remediation-cards.md  %s\n\n' "$(card_for "$check")"
       done <"$queue"
     fi
@@ -836,9 +1162,18 @@ write_alerts() {
       done <"$findings"
       [ "$heldred" -eq 1 ] && printf '\n'
 
-      printf '  NEEDS YOU - and here is exactly why\n\n'
+      # Anything already carrying its own number above does NOT belong here.
+      # Queueing AMBER items made the two sets overlap for the first time, and
+      # the operator got the same finding twice: once with an approve command
+      # and once, further down, under a heading that says it needs them.
+      heldamber=0
       while IFS='|' read -r sev check subject desc; do
         [ "${sev:-}" = AMBER ] || continue
+        queue_has "$check" "$subject" && continue
+        if [ "$heldamber" -eq 0 ]; then
+          printf '  NEEDS YOU - and here is exactly why\n\n'
+          heldamber=1
+        fi
         # Not %q here: this is a label being read, not a command being pasted,
         # and %q rendered "/dev/shm/.kworkerd (deleted)" as "\ \(deleted\)".
         printf '    %-12s %s\n' "$check" "$subject"
@@ -892,7 +1227,14 @@ rebuild_queue() {
       new=$((new + 1)); [ "$sev" = RED ] && newred=$((newred + 1))
       slog "new sev=$sev check=$check subject=$subject"
     fi
-    if [ "$sev" = RED ] && can_automate "$check" "$subject"; then
+    # The queue used to be RED-only, which quietly meant that every finding
+    # about a listening port or a socket-holding process - all of them AMBER,
+    # because all of them might be yours - could be detected, described, and
+    # never offered. That is the finish line the operator kept falling off.
+    # AMBER items are queued and numbered like anything else; what they do NOT
+    # get is the bulk sweep. See do_approve.
+    if { [ "$sev" = RED ] || offerable_at_amber "$check"; } \
+      && can_automate "$check" "$subject"; then
       printf '%s|%s|%s\n' "$sev" "$check" "$subject" >>"$queue.next"
     fi
   done <"$findings"
@@ -1005,14 +1347,44 @@ new_evidence_case() {
   mkdir -p -- "$evidence_case" || return 1
   chmod 0700 "$evidence_case" 2>/dev/null || true
   evidence_copy_seq=0
+  evidence_last=''
 }
 
 preserve_into_case() {
   local path=$1 destination
+  evidence_last=''
   [ -e "$path" ] || [ -L "$path" ] || return 0
   evidence_copy_seq=$((evidence_copy_seq + 1))
   destination="$evidence_case/$evidence_copy_seq-$(basename -- "$path")"
   cp -a -- "$path" "$destination" || return 1
+  evidence_last=$destination
+}
+
+# Put a preserved copy back where it came from.
+#
+# Every caller is a rollback after a scored service stopped answering, which is
+# the one moment where silently doing nothing is worst - so this says whether
+# it worked instead of discarding the error.
+#
+# It exists because two rollbacks reconstructed the saved path by hand, as
+# "$evidence_case/$(basename -- "$path")", and preserve_into_case writes
+# "$evidence_case/1-$(basename ...)" - the sequence number is what keeps two
+# files with the same name apart. Neither cp could ever find its source, and
+# both sent the error to /dev/null. Measured on the lab VM: a rogue unit that
+# held a scored port was removed, the scored check correctly failed, the report
+# correctly said FAILED - and the unit file was gone, the service not-found,
+# the port dead, under a line promising it would be put back.
+restore_from_case() {
+  local saved=$1 dest=$2
+  if [ -z "$saved" ] || [ ! -e "$saved" ]; then
+    slog "CANNOT ROLL BACK $dest: no preserved copy in ${evidence_case:-<no case>}"
+    return 1
+  fi
+  if ! cp -a -- "$saved" "$dest"; then
+    slog "CANNOT ROLL BACK $dest: restoring it from $saved failed"
+    return 1
+  fi
+  return 0
 }
 
 action_uid0() {
@@ -1074,28 +1446,71 @@ action_crondeep() {
   rm -f -- "$target"
 }
 
+# The scored re-check belongs here too, not only in action_rogueunit.
+#
+# protected_unit only knows the names in the packet. A unit the scored service
+# quietly depends on - or, as measured on the lab VM, one holding a port the
+# watchdog probes - passes that check and is removed with nothing watching.
+# The same unit reported as `rogueunit` got a re-check and a rollback; reported
+# as `unit` it did not, so the same file had two different safety levels
+# depending on which detector named it first.
 action_unit() {
-  local unit=$1 base
+  local unit=$1 base saved_unit saved_dropins
   base=$(basename -- "$unit")
   new_evidence_case unit || return 1
-  preserve_into_case "$unit" && preserve_into_case "$unit.d" || return 1
+  preserve_into_case "$unit" || return 1
+  saved_unit=$evidence_last
+  preserve_into_case "$unit.d" || return 1
+  saved_dropins=$evidence_last
   systemctl disable --now "$base" >/dev/null 2>&1 || slog "warning: could not disable $base before removal"
   rm -f -- "$unit" || return 1
   [ ! -e "$unit.d" ] || rm -rf -- "$unit.d" || return 1
   systemctl daemon-reload && systemctl reset-failed >/dev/null 2>&1
+  if ! scored_still_answering; then
+    slog "warning: a scored service stopped answering after removing $unit; restoring"
+    restore_from_case "$saved_unit" "$unit" || return 1
+    [ -z "$saved_dropins" ] || cp -a -- "$saved_dropins" "$unit.d" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable --now "$base" >/dev/null 2>&1
+    if scored_still_answering; then
+      slog "rolled back $unit; scored services are answering again"
+    else
+      slog "ROLLED BACK $unit and a scored service is STILL not answering - look now"
+    fi
+    return 1
+  fi
+  return 0
 }
 
 action_unitdeep() {
   local unit=${1%%::*} target=${1#*::} base stem timer
+  local saved_unit saved_dropins saved_timer
   base=$(basename -- "$unit"); stem=${base%.service}; timer="$(dirname -- "$unit")/$stem.timer"
   new_evidence_case unitdeep || return 1
-  preserve_into_case "$unit" && preserve_into_case "$unit.d" \
-    && preserve_into_case "$timer" && preserve_into_case "$target" || return 1
+  preserve_into_case "$unit" || return 1;    saved_unit=$evidence_last
+  preserve_into_case "$unit.d" || return 1;  saved_dropins=$evidence_last
+  preserve_into_case "$timer" || return 1;   saved_timer=$evidence_last
+  preserve_into_case "$target" || return 1
   systemctl disable --now "$base" "$stem.timer" >/dev/null 2>&1 \
     || slog "warning: could not disable $base/$stem.timer before removal"
   rm -f -- "$unit" "$timer" "$target" || return 1
   [ ! -e "$unit.d" ] || rm -rf -- "$unit.d" || return 1
   systemctl daemon-reload && systemctl reset-failed >/dev/null 2>&1
+  if ! scored_still_answering; then
+    # The unit and its timer go back. The payload does NOT: this finding exists
+    # because a unit launches a file that reads as a reverse shell, and putting
+    # that file back to keep a service green is not a trade anyone should make
+    # silently. Say so instead, and say the unit will fail to start without it.
+    slog "warning: a scored service stopped answering after removing $unit; restoring the unit, NOT the payload"
+    restore_from_case "$saved_unit" "$unit" || return 1
+    [ -z "$saved_dropins" ] || cp -a -- "$saved_dropins" "$unit.d" 2>/dev/null || true
+    [ -z "$saved_timer" ] || cp -a -- "$saved_timer" "$timer" 2>/dev/null || true
+    systemctl daemon-reload >/dev/null 2>&1
+    systemctl enable --now "$base" >/dev/null 2>&1
+    slog "the payload $target was left deleted on purpose; $base will fail to start if it needed it, and a copy is in $evidence_case"
+    return 1
+  fi
+  return 0
 }
 
 action_suid() {
@@ -1136,13 +1551,19 @@ action_rcfile() {
 # yours. visudo -c decides whether it worked, because a sudoers file that no
 # longer parses locks every account out of root.
 action_nopasswd() {
-  local path=$1
+  local path=$1 saved
   new_evidence_case nopasswd || return 1
   preserve_into_case "$path" || return 1
+  saved=$evidence_last
   rm -f -- "$path" || return 1
   if ! visudo -c >/dev/null 2>&1; then
     slog "warning: visudo -c FAILED after removing $path; restoring it"
-    cp -a -- "$evidence_case/$(basename -- "$path")" "$path" 2>/dev/null
+    restore_from_case "$saved" "$path" || return 1
+    if visudo -c >/dev/null 2>&1; then
+      slog "restored $path; the sudoers ruleset parses again"
+    else
+      slog "RESTORED $path and sudoers STILL does not parse - keep a root shell open"
+    fi
     return 1
   fi
   return 0
@@ -1163,10 +1584,11 @@ action_suidunpackaged() {
 # scored service with it, and that is worth finding out in five seconds rather
 # than at the next scoring round.
 action_rogueunit() {
-  local unit=$1 base
+  local unit=$1 base saved
   base=$(basename -- "$unit")
   new_evidence_case rogueunit || return 1
   preserve_into_case "$unit" || return 1
+  saved=$evidence_last
   systemctl disable --now "$base" >/dev/null 2>&1 \
     || slog "warning: could not disable $base before removal"
   rm -f -- "$unit" || return 1
@@ -1174,9 +1596,14 @@ action_rogueunit() {
   systemctl reset-failed >/dev/null 2>&1
   if ! scored_still_answering; then
     slog "warning: a scored service stopped answering after removing $unit; restoring"
-    cp -a -- "$evidence_case/$base" "$unit" 2>/dev/null
+    restore_from_case "$saved" "$unit" || return 1
     systemctl daemon-reload >/dev/null 2>&1
     systemctl enable --now "$base" >/dev/null 2>&1
+    if scored_still_answering; then
+      slog "rolled back $unit; scored services are answering again"
+    else
+      slog "ROLLED BACK $unit and a scored service is STILL not answering - look now"
+    fi
     return 1
   fi
   return 0
@@ -1187,12 +1614,18 @@ action_rogueunit() {
 # captured, because a kill with no capture destroys the only evidence there was.
 action_live_process() {
   local subject=$1 kind=$2 pid path
-  pid=$(printf '%s' "$subject" | sed -n 's/^pid\([0-9][0-9]*\):.*/\1/p')
-  path=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s/ (deleted)$//')
-  if [ -z "$pid" ]; then
-    pid=$(resolve_pid_for_exe "$path") || return 1
+  pid=$(subject_pid "$subject") \
+    || { slog "warning: $subject is no longer running"; return 1; }
+  path=$(pid_exe "$pid" 2>/dev/null)
+  [ -n "$path" ] || path=$(printf '%s' "$subject" | sed 's/^pid[0-9]*://; s/ (deleted)$//')
+  # Asked again here, a second time, immediately before anything irreversible.
+  # can_automate cleared this pid when the queue was built, which can be a
+  # minute ago, and pids are recycled: the number that named a dropper then can
+  # name the scored service now. A kill cannot be taken back.
+  if pid_is_protected "$pid" "$(protection_mode_for "$kind")"; then
+    slog "warning: pid $pid is now ours, the system's or a scored service's; NOT killed"
+    return 1
   fi
-  [ -n "$pid" ] && [ -d "/proc/$pid" ] || { slog "warning: $subject is no longer running"; return 1; }
   new_evidence_case "$kind" || return 1
   if ! "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" --freeze --apply \
        >/dev/null 2>&1; then
@@ -1205,15 +1638,98 @@ action_live_process() {
     }
   fi
   kill -9 "$pid" 2>/dev/null || true
+  # Killing the process and deleting its executable are two different
+  # decisions, and only the second one is about provenance.
+  #
+  # Measured on the lab VM, and it is the worst thing this kit has done to a
+  # box: approving a netprocsvc finding for a python web shell deleted
+  # /usr/bin/python3.12 - the interpreter the SCORED service runs on. The
+  # running service kept serving, because its binary was already mapped, so
+  # nothing looked wrong; the next restart would have failed, and every python
+  # on the box was gone, with /usr/bin/python3 left as a dangling symlink.
+  #
+  # A dropper in /dev/shm is owned by nothing and should go. A shared,
+  # package-owned interpreter is not the attacker's file - the attacker's file
+  # is the script it was told to run, and that is a different finding.
   if [ -f "$path" ]; then
-    preserve_into_case "$path" || return 1
-    rm -f -- "$path"
+    if exe_is_unpackaged "$path"; then
+      preserve_into_case "$path" || return 1
+      rm -f -- "$path"
+    else
+      slog "killed pid $pid but LEFT $path in place: a package owns it and the rest of the box shares it"
+    fi
   fi
   return 0
 }
 
 action_tmpproc() { action_live_process "$1" tmpproc; }
 action_netproc() { action_live_process "$1" netproc; }
+
+# An unpackaged binary that is talking on the network, and an interpreter
+# holding a socket that no unit owns. Both are the live-process shape: the
+# thing that makes each of them decidable was asked in can_automate, and what
+# is left to do is identical - capture, then kill, then delete the file.
+action_netunpackaged() { action_live_process "$1" netunpackaged; }
+action_netprocsvc()    { action_live_process "$1" netprocsvc; }
+
+# A listening port the packet does not account for.
+#
+# There is no such thing as removing a port, so the real subject is whatever
+# holds it, and there are two quite different cases. A unit holding it can be
+# stopped and disabled, and put straight back if a scored service notices -
+# that is a reversible action and it is preferred. A bare process holding it
+# can only be captured and killed, and a kill does not come back, which is why
+# can_automate refuses every pid that could be ours, the system's or a scored
+# service's before this function is ever reached.
+action_port_common() {
+  local netid=$1 port=$2 kind=$3 pid unit exe
+  pid=$(holder_of_port "$netid" "$port")
+  [ -n "$pid" ] || { slog "warning: nothing holds $netid port $port any more"; return 1; }
+  if pid_is_protected "$pid" "$(protection_mode_for "$kind")"; then
+    slog "warning: $netid port $port is now held by a protected process (pid $pid); NOT touched"
+    return 1
+  fi
+  unit=$(pid_service "$pid" 2>/dev/null) || unit=''
+  exe=$(pid_exe "$pid" 2>/dev/null) || exe=''
+  new_evidence_case "$kind" || return 1
+  {
+    printf '%s port %s\n' "$netid" "$port"
+    printf 'pid   %s\n' "$pid"
+    printf 'unit  %s\n' "${unit:-none}"
+    printf 'exe   %s\n' "${exe:-unknown}"
+    ss -H -lnp "sport = :$port" 2>/dev/null
+    ps -o pid,ppid,user,lstart,cmd -p "$pid" 2>/dev/null
+  } >"$evidence_case/holder.txt" 2>/dev/null || true
+
+  if [ -n "$unit" ]; then
+    systemctl stop "$unit" >/dev/null 2>&1 || slog "warning: could not stop $unit"
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+    if ! scored_still_answering; then
+      slog "warning: a scored service stopped answering after stopping $unit for $netid port $port; starting it again"
+      systemctl enable --now "$unit" >/dev/null 2>&1
+      return 1
+    fi
+    return 0
+  fi
+
+  if ! "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" --freeze --apply \
+       >/dev/null 2>&1; then
+    "$SCRIPT_DIR/preserve.sh" --config "$config" --pid "$pid" >/dev/null 2>&1 || {
+      slog "warning: could not capture pid $pid holding $netid port $port, so it was NOT killed"
+      return 1
+    }
+  fi
+  [ -n "$exe" ] && [ -f "$exe" ] && preserve_into_case "$exe"
+  kill -9 "$pid" 2>/dev/null || true
+  if ! scored_still_answering; then
+    slog "warning: a scored service stopped answering after killing pid $pid on $netid port $port - a kill cannot be undone; evidence is in $evidence_case"
+    return 1
+  fi
+  return 0
+}
+
+action_port()    { action_port_common tcp "$1" port; }
+action_udpport() { action_port_common udp "$1" udpport; }
 
 # netproc's subject is an executable path, not a pid. Find the live pid for it.
 resolve_pid_for_exe() {
@@ -1232,7 +1748,7 @@ resolve_pid_for_exe() {
 # one down, so a wrong call reverses itself in seconds rather than at the next
 # scoring round.
 scored_still_answering() {
-  local u name host port svc waited ok
+  local u name host port svc url waited ok
   for u in ${CCDC_SYSTEMD_SERVICES:-} ${CCDC_PROTECT_SERVICES:-}; do
     u=${u##*/}
     case "$u" in *.service|*.socket) ;; *) u="$u.service" ;; esac
@@ -1254,6 +1770,20 @@ scored_still_answering() {
     done
     [ "$ok" -eq 1 ] || return 1
   done < <(ccdc_tcp_checks 2>/dev/null)
+  # The HTTP checks are the ones that actually say a web service is serving.
+  # A port can be open while the service behind it returns 500, and scored-web
+  # is graded on the response, not the handshake - so a rollback decision that
+  # only looked at TCP would call a broken service healthy.
+  while IFS='|' read -r name url svc; do
+    [ -n "${url:-}" ] || continue
+    ccdc_have curl || continue
+    ok=0; waited=0
+    while [ "$waited" -lt 20 ]; do
+      curl -fsS -o /dev/null --max-time 3 -- "$url" >/dev/null 2>&1 && { ok=1; break; }
+      sleep 0.5; waited=$((waited + 1))
+    done
+    [ "$ok" -eq 1 ] || return 1
+  done < <(ccdc_http_checks 2>/dev/null)
   return 0
 }
 
@@ -1291,7 +1821,7 @@ action_unitdropindeep() {
 
 execute_action() {
   local check=$1 subject=$2
-  evidence_case=''
+  evidence_case=''; evidence_last=''
   case "$check" in
     uid0) action_uid0 "$subject" ;;
     emptypw) action_emptypw "$subject" ;;
@@ -1309,6 +1839,10 @@ execute_action() {
     rogueunit) action_rogueunit "$subject" ;;
     tmpproc) action_tmpproc "$subject" ;;
     netproc) action_netproc "$subject" ;;
+    netunpackaged) action_netunpackaged "$subject" ;;
+    netprocsvc) action_netprocsvc "$subject" ;;
+    port) action_port "$subject" ;;
+    udpport) action_udpport "$subject" ;;
     rcdeep) action_rcdeep "$subject" ;;
     rcfile) action_rcfile "$subject" ;;
     *) return 1 ;;
@@ -1369,7 +1903,7 @@ do_status() {
 }
 
 do_approve() {
-  local sev check subject i=0 done_n=0 failed_n=0 selected=0 action
+  local sev check subject i=0 done_n=0 failed_n=0 selected=0 amber_n=0 action
   ccdc_require_root
   ensure_state
   ccdc_have timeout || ccdc_die "timeout is required so a wedged detector cannot freeze approval-time triage"
@@ -1392,6 +1926,18 @@ do_approve() {
     [ -z "$item" ] || [ "$item" = "$i" ] || continue
     selected=$((selected + 1)); action=$(render_action "$check" "$subject")
     printf '\n[%s] %s %s  %s\n    %s\n' "$i" "$sev" "$check" "$subject" "$action"
+    # A bulk --approve with no number is for the unambiguous ones. AMBER means
+    # "this may well be yours", and the whole class of AMBER actions here stops
+    # a port or kills a process - so a sweep that took them would be the
+    # self-inflicted outage this kit exists to prevent. Named by number, they
+    # apply like anything else.
+    if [ -z "$item" ] && [ "$sev" != RED ]; then
+      amber_n=$((amber_n + 1))
+      printf '    NOT APPLIED by a bulk approve: AMBER means this may be yours.\n'
+      printf '    Look, then approve this one by number:\n'
+      printf '      sudo %s/sentry.sh --config %s --approve %s --apply\n' "$qkit" "$qconfig" "$i"
+      continue
+    fi
     if ! queue_has "$check" "$subject" \
       || ! finding_present "$sev" "$check" "$subject" \
       || ! can_automate "$check" "$subject"; then
@@ -1421,6 +1967,8 @@ do_approve() {
     run_watch_if_due || true
     write_alerts
     printf '\n%s action(s) applied, %s failed. Verify scored services FROM OFF THE BOX.\n' "$done_n" "$failed_n"
+    [ "$amber_n" -eq 0 ] \
+      || printf '%s AMBER action(s) were left for you to approve one at a time, by number.\n' "$amber_n"
     [ "$failed_n" -eq 0 ] || return 1
   else
     write_alerts

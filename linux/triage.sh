@@ -1210,10 +1210,13 @@ else
       fi
     done
     state=unknown
-    if ccdc_have dpkg-query; then
-      dpkg-query -S "$exe" >/dev/null 2>&1 && state=yes || state=no
-    elif ccdc_have rpm; then
-      rpm -qf "$exe" >/dev/null 2>&1 && state=yes || state=no
+    # Through lib/provenance.sh, which asks the merged-/usr spelling too. This
+    # file sources that library and then had its own copy of the question that
+    # did not: asking only the literal path calls /usr/bin/nc.openbsd
+    # unpackaged, because dpkg recorded it as /bin/nc.openbsd. All this
+    # function adds is the cache.
+    if ccdc_have dpkg-query || ccdc_have rpm; then
+      pkg_owns "$exe" && state=yes || state=no
     fi
     # Only cache path-shaped keys; a path with whitespace would corrupt the
     # parallel word lists, so such an executable simply is not cached.
@@ -1337,14 +1340,25 @@ else
         && ccdc_list_contains "$local_port" "${CCDC_ALLOWED_TCP_PORTS:-} ${CCDC_ALLOWED_UDP_PORTS:-}"; then
         severity=AMBER
       fi
-      key="$exe|$direction|$local_addr|$peer"
+      # Keyed on the PID, not the socket. A finding about a live process is
+      # about THAT process: three sockets on one pid are one thing to do, and
+      # keying on the socket printed the same row three times.
+      key="$pid|$direction"
       case " $seen_sockets " in *" $key "*) continue ;; esac
       seen_sockets="$seen_sockets $key"
 
+      # The subject carries the pid for the same reason tmpproc's does. With a
+      # bare executable path as the subject, remediation has to guess which of
+      # the processes running that binary was meant - and on this box the first
+      # /usr/bin/python3.12 it finds is the scored web server. Measured on the
+      # lab VM: three netproc findings, all naming /usr/bin/nc.openbsd, all
+      # resolving to one arbitrary pid; and two netprocsvc findings naming
+      # /usr/bin/python3.12, both resolving to scored-web, which is protected,
+      # so neither could ever be acted on.
       if [ "$severity" = RED ]; then
-        emit RED netproc "$exe" "$direction connection held by a process because $reason"
+        emit RED netproc "pid$pid:$exe" "$direction connection held by a process because $reason"
       else
-        emit AMBER netprocsvc "$exe" "$direction socket held by a process because $reason"
+        emit AMBER netprocsvc "pid$pid:$exe" "$direction socket held by a process because $reason"
       fi
 
       cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-88)
@@ -1413,14 +1427,14 @@ else
     esac
     ccdc_have dpkg-query || ccdc_have rpm || continue
     pkg_owned "$exe" && continue
-    case " $seen_unpackaged " in *" $exe "*) continue ;; esac
-    seen_unpackaged="$seen_unpackaged $exe"
+    case " $seen_unpackaged " in *" $pid|$direction "*) continue ;; esac
+    seen_unpackaged="$seen_unpackaged $pid|$direction"
     if [ "$direction" = outbound ]; then
-      emit AMBER netunpackaged "$exe" "outbound connection from an unpackaged binary"
+      emit AMBER netunpackaged "pid$pid:$exe" "outbound connection from an unpackaged binary"
       net_unpkg_buf="$net_unpkg_buf${D}$exe"$'\n'
       net_unpkg_buf="$net_unpkg_buf${D}  pid $pid  outbound $local_addr -> $peer"$'\n'
     else
-      emit AMBER netunpackaged "$exe" "unaccounted listening port served by an unpackaged binary"
+      emit AMBER netunpackaged "pid$pid:$exe" "unaccounted listening port served by an unpackaged binary"
       net_unpkg_buf="$net_unpkg_buf${D}$exe"$'\n'
       net_unpkg_buf="$net_unpkg_buf${D}  pid $pid  listening on $netid port $local_port"$'\n'
     fi

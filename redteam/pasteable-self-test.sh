@@ -645,25 +645,79 @@ else
   printf '%s\n' "$back" | sed 's/^/    /'
 fi
 
-# --------------------- one binary, many sockets: the legitimate one masked the implant
-# The socket dedup key was "exe|direction|peer" with no local address. The
-# scored service is `python3 -m http.server 8080`; an attacker's python3 UDP
-# listener on 49152 produced an identical key and was dropped as a duplicate.
-# The legitimate service masked the implant and triage printed "no unexpected
-# listening UDP ports" on a box that had one.
-if grep -q 'key="$exe|$direction|$local_addr|$peer"' "$tri"; then
-  ok 'the socket dedup key includes the local address'
+# --------------------- one binary, many sockets: two processes, one name
+# The socket dedup key was "exe|direction|peer". The scored service is
+# `python3 -m http.server 8080`; an attacker's python3 UDP listener on 49152
+# produced an identical key and was dropped as a duplicate, so the legitimate
+# service masked the implant and triage printed "no unexpected listening UDP
+# ports" on a box that had one. Adding the local address fixed that instance.
+#
+# The exe was never the right key, though, and the second half of the same bug
+# showed up in remediation: with the EXECUTABLE as the finding's subject, three
+# findings naming /usr/bin/nc.openbsd all resolved to one arbitrary pid, and
+# two naming /usr/bin/python3.12 both resolved to scored-web - which is
+# protected, so neither could ever be acted on.
+#
+# So the key is the pid, and the subject carries it. Two processes cannot
+# collapse into one finding however they are named or wherever they bind, and
+# every finding names the one process it is about.
+if grep -q 'key="$pid|$direction"' "$tri"; then
+  ok 'the socket dedup key is the pid, so two processes never collapse'
 else
-  no 'two listeners from one binary collapse into a single finding'
-  grep -n 'key="$exe' "$tri" | sed 's/^/    /'
+  no 'the socket dedup key is not the pid; one process can mask another'
+  grep -n 'key="' "$tri" | sed 's/^/    /'
 fi
-# and the key must be built after local_addr is known
-kl=$(grep -n 'key="$exe|' "$tri" | head -1 | cut -d: -f1)
-al=$(grep -n 'local_port=${local_addr##\*:}' "$tri" | head -1 | cut -d: -f1)
-if [ -n "$kl" ] && [ -n "$al" ] && [ "$al" -lt "$kl" ]; then
-  ok 'and is built after the local address is parsed'
+if grep -q 'emit RED netproc "pid$pid:$exe"' "$tri" \
+  && grep -q 'emit AMBER netprocsvc "pid$pid:$exe"' "$tri" \
+  && [ "$(grep -c 'emit AMBER netunpackaged "pid$pid:$exe"' "$tri")" = 2 ]; then
+  ok 'every socket finding names the pid it is about, not just the binary'
 else
-  no "dedup key at line $kl is built before local_addr at line $al"
+  no 'a socket finding names only an executable, so remediation must guess the pid'
+  grep -n 'emit \(RED netproc\|AMBER netprocsvc\|AMBER netunpackaged\)' "$tri" | sed 's/^/    /'
+fi
+# and the key must be built after the pid is resolved
+kl=$(grep -n 'key="$pid|' "$tri" | head -1 | cut -d: -f1)
+al=$(grep -n 'pids=$(printf' "$tri" | head -1 | cut -d: -f1)
+if [ -n "$kl" ] && [ -n "$al" ] && [ "$al" -lt "$kl" ]; then
+  ok 'and is built after the socket owners are resolved'
+else
+  no "dedup key at line $kl is built before the owning pid at line $al"
+fi
+
+# --------------------- one question, one answer: package ownership
+# lib/provenance.sh exists because `dpkg-query -S "$path"` is wrong on every
+# merged-/usr system, and wrong in the direction that matters: it says "nobody
+# owns this" about files the distribution shipped. Its own header says
+# baseline, harden and sentry all ask the question through it.
+#
+# They did not. sentry.sh never sourced the library and asked dpkg directly, so
+# /usr/bin/nc.openbsd read as unpackaged - and the action that deletes what
+# nothing owns would have deleted a stock binary. triage.sh sourced the library
+# and then kept its own copy of the question, with the same defect.
+#
+# So: any yes/no ownership test in any tool must go through pkg_owns.
+direct=$(for t in "$ROOT"/linux/*.sh; do
+  case "$t" in */lib/*) continue ;; esac
+  grep -nE '(dpkg-query -S|rpm -qf)[^|]*(>/dev/null|&&|\|\|)' "$t" 2>/dev/null \
+    | grep -vE '^\s*[0-9]+:\s*#' \
+    | sed "s|^|$(basename "$t"):|"
+done)
+if [ -z "$direct" ]; then
+  ok 'every yes/no package-ownership test goes through lib/provenance.sh'
+else
+  no 'a tool asks dpkg or rpm directly and will miss the merged-/usr spelling'
+  printf '%s\n' "$direct" | sed 's/^/    /' | head -6
+fi
+
+# And the tools that decide something destructive from it must source it.
+missing=''
+for t in sentry.sh triage.sh baseline.sh harden.sh; do
+  grep -q 'lib/provenance.sh' "$ROOT/linux/$t" || missing="$missing $t"
+done
+if [ -z "$missing" ]; then
+  ok 'every tool that acts on provenance sources the provenance library'
+else
+  no "asks about provenance without sourcing lib/provenance.sh:$missing"
 fi
 
 # =========================================================================

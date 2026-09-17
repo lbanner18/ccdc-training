@@ -1875,10 +1875,10 @@ explain_clauses() {
         # run: `if owner=$(dpkg-query -S ... | head -1)` reads HEAD's exit
         # status, which is zero whether or not dpkg found anything, so an
         # unowned file printed "owned by a package? yes - " with an empty name
-        # directly under a headline saying no package owned it.
-        owner=$(dpkg-query -S "$subject" 2>/dev/null) || owner=''
-        owner=$(printf '%s' "$owner" | head -1)
-        printf '    owned by a package?       yes - %s\n' "${owner%%:*}"
+        # directly under a headline saying no package owned it. pkg_owner()
+        # reads the right status and asks the merged-/usr spelling too.
+        owner=$(pkg_owner "$subject") || owner=''
+        printf '    owned by a package?       yes - %s\n' "$owner"
       else
         printf '    owned by a package?       no. No installed package ships this\n'
         printf '                              path.\n'
