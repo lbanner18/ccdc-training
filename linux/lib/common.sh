@@ -230,3 +230,40 @@ ccdc_tree_drift() {
     fi
   done
 }
+
+# Emit CCDC_TCP_CHECKS as normalised name|host|port|service lines.
+#
+# The documented format is name|host|port|systemd-service and arm.sh's preflight
+# checks for it. The common way to get it wrong is "127.0.0.1:8080 127.0.0.1:22",
+# and that spelling used to read as a single field that matched no service - so
+# every consumer silently skipped every port check while still reporting that a
+# service was "answering". baseline.sh said a scored web server "is back and
+# answering" on a box where the port had never been probed.
+#
+# So: accept both spellings rather than be right and useless. A check that
+# cannot run at all warns instead of disappearing.
+ccdc_tcp_checks() {
+  local line name host port svc tok
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    if [ "${line#*|}" != "$line" ]; then
+      IFS='|' read -r name host port svc <<INNER
+$line
+INNER
+      if [ -z "${port:-}" ]; then
+        ccdc_warn "CCDC_TCP_CHECKS: no port in '$line' (want name|host|port|service)"
+        continue
+      fi
+      printf '%s|%s|%s|%s\n' "${name:-$host:$port}" "$host" "$port" "${svc:-}"
+    else
+      for tok in $line; do
+        case "$tok" in
+          *:*) printf '%s|%s|%s|\n' "$tok" "${tok%:*}" "${tok##*:}" ;;
+          *) ccdc_warn "CCDC_TCP_CHECKS: cannot read '$tok' as host:port or name|host|port|service" ;;
+        esac
+      done
+    fi
+  done <<OUTER
+${CCDC_TCP_CHECKS:-}
+OUTER
+}

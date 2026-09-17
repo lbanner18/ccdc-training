@@ -938,7 +938,7 @@ needs_you_for() {
 # service must prove the service answers again, not merely that systemd says
 # "active" - a hung daemon reads active while the scorer gets nothing.
 verify_unit_back() {
-  local unit=$1 line name host port svc waited=0 ok
+  local unit=$1 line name host port svc waited=0 ok probed
   # `systemctl restart` returns once systemd has SPAWNED the process, not once
   # the application has bound its port - and with Type=simple that is
   # immediately. Probing straight away reported a healthy scored web server as
@@ -951,19 +951,31 @@ verify_unit_back() {
   done
   systemctl is-active --quiet "$unit" 2>/dev/null || return 1
 
+  # Read the checks through the shared parser. Parsing them here by hand meant
+  # that a config written as "127.0.0.1:8080 127.0.0.1:22" - which is how this
+  # kit's own operator config was written - produced one unmatched field, so
+  # this loop found nothing to probe, fell out, and returned success. The unit
+  # was then reported as "back and answering" having only been tested with
+  # systemctl is-active. A port check that cannot run must not read as a pass.
+  probed=0
   while IFS='|' read -r name host port svc; do
-    [ -n "${name:-}" ] || continue
-    [ "${svc:-}" = "$unit" ] || [ "${svc:-}" = "${unit%.service}" ] || continue
+    [ -n "${port:-}" ] || continue
+    # A check bound to a unit name applies to that unit. A check with no unit
+    # (the host:port spelling carries none) applies to whatever we just
+    # restarted - it is still evidence the box is serving.
+    if [ -n "${svc:-}" ]; then
+      [ "$svc" = "$unit" ] || [ "$svc" = "${unit%.service}" ] || continue
+    fi
     ccdc_have nc || continue
+    probed=1
     ok=0; waited=0
     while [ "$waited" -lt 20 ]; do
       if nc -z -w 2 "$host" "$port" >/dev/null 2>&1; then ok=1; break; fi
       sleep 0.5; waited=$((waited + 1))
     done
     [ "$ok" -eq 1 ] || return 1
-  done <<EOF
-${CCDC_TCP_CHECKS:-}
-EOF
+  done < <(ccdc_tcp_checks 2>/dev/null)
+  [ "$probed" -eq 1 ] || VERIFY_PORT_UNTESTED=1
   return 0
 }
 
@@ -1016,8 +1028,16 @@ do_action() {
         if is_scored_unit "$parent"; then
           printf '    %s is SCORED - restarting it and checking it answers\n' "$parent"
           systemctl restart "$parent" 2>/dev/null
+          VERIFY_PORT_UNTESTED=0
           if verify_unit_back "$parent"; then
-            printf '    %s is back and answering\n' "$parent"
+            if [ "${VERIFY_PORT_UNTESTED:-0}" -eq 1 ]; then
+              # Say what was actually tested. "answering" claims a port probe.
+              printf '    %s is active again - but no CCDC_TCP_CHECKS entry\n' "$parent"
+              printf '    covers it, so its port was never probed. Confirm by hand:\n'
+              printf '      curl -sS -o /dev/null -w "%%{http_code}\\n" http://127.0.0.1:PORT/\n'
+            else
+              printf '    %s is back and answering\n' "$parent"
+            fi
           else
             ccdc_warn "$parent did NOT come back cleanly. Check it now:
   sudo systemctl status $parent

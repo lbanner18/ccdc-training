@@ -18,15 +18,22 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       (http 200) throughout and SSH still worked afterwards. Two real bugs found
       and fixed, see commit.
 
-- [ ] **2. Build the "unnecessary" half — `harden.sh`.**
+- [x] **2. Build the "unnecessary" half — `harden.sh`.**
       The model is *harden to a baseline, cut everything else, keep it that way*.
       `baseline.sh` answers **unexplained**. Nothing answers **unnecessary**. The
       documented pipeline is recon -> harden -> triage -> bless -> arm and `harden`
       was never written.
+      **Done 2026-09-16.** `linux/harden.sh`, 20 assertions in
+      `redteam/harden-self-test.sh`. Proven on the lab box: 23 findings ->
+      `--cut all-safe --apply` -> 19 cut, scored services verified after every
+      single one -> `--undo --apply` -> 19 restored, SUID bits back, zero masks
+      left, http 200. Seven bugs found by running it, four of them safety
+      checks that passed without comparing anything.
 
 ## P1 — promised in writing, not built
 
-- [ ] 3. `baseline.sh --explain N` — appears in `baseline-design.md:143`, not implemented.
+- [~] 3. `--explain N` — built in `harden.sh`. Still to back-port to `baseline.sh`,
+      where `baseline-design.md:143` promises it.
 - [ ] 4. Bless the sudoers ruleset — design doc says `--bless` freezes it;
       `inventory_semantic()` does not enumerate sudoers content.
 - [ ] 5. The 13 unactioned check types in `triage.sh` / `sentry.sh`.
@@ -38,7 +45,7 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 
 ## P2 — docs and tests
 
-- [ ] 8. `baseline.sh` appears in **zero** playbooks. Add it to
+- [ ] 8. `baseline.sh` **and now `harden.sh`** appear in zero playbooks. Add to
       `linux-first-15-minutes.md`, `competition-day-playbook.md`, `GUIDE.md`, `ROADMAP.md`.
 - [ ] 9. `CCDC_BASELINE_ALLOW` is missing from `config/example.env`, so the packet
       worksheet never teaches that the exception mechanism exists.
