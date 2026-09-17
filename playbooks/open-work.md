@@ -56,8 +56,14 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       Separately, this closed a real gap it exposed: the generic `file` kind had
       no action and no written reason, and the coverage assertion excluded it by
       hand with a comment claiming the default arms handled it. They did not.
-- [ ] 6. Render pass — drive every tool through every mode and read the output as the
-      operator sees it.
+- [~] 6. Render pass. Done for `--help` across all 25 tools, which found that
+      **19 of 25 answered with a single usage line.** The flags were all there
+      (an assertion already enforced that), but `fw.sh --config FILE
+      [--dry-run|--apply] [--confirm|...]` never said that `--apply` arms a
+      rollback you must confirm or lose — the one fact you need at minute 12.
+      All 13 mutating tools now explain their modes, and a new assertion fails
+      the suite if a tool that accepts `--apply` has help shorter than four
+      lines. Still to do: read the main report bodies end to end on the box.
 - [x] 7. ART harness — `redteam/atomic.sh`. Runs real atomics, asks baseline.sh
       and triage.sh before and after each, cleans up, scores CAUGHT / MISSED /
       NOOP / ERROR. Two interlocks (`CCDC_ATOMIC_LAB=1` on the sudo line **and**

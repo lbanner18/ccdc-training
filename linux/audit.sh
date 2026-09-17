@@ -62,6 +62,22 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--check|--repair|--capture|--status|--uninstall] [--apply|--dry-run]\n' "$0"
+      printf '\n'
+      printf '  Persistent audit rules in /etc/audit/rules.d, so the watches survive\n'
+      printf '  the `systemctl restart auditd` that silently clears every runtime rule\n'
+      printf '  canary.sh loaded.\n'
+      printf '\n'
+      printf '  --check      are the rules present and loaded. Read-only.\n'
+      printf '  --apply      install them.\n'
+      printf '  --repair     idempotent, and silent when nothing is wrong, which is why\n'
+      printf '               guardian can run it every tick.\n'
+      printf '  --capture    a log baseline, so "they wiped the logs" is provable later.\n'
+      printf '  --status     what is installed now.\n'
+      printf '  --uninstall  remove the rules this tool added.\n'
+      printf '\n'
+      printf '  It detects log tampering without auditd at all, by size and inode: a\n'
+      printf '  log that shrank without rotating is truncation, and a replaced inode\n'
+      printf '  with no rotated sibling is someone starting the record over.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

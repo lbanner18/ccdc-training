@@ -57,6 +57,27 @@ while [ "$#" -gt 0 ]; do
     --status) mode=status; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--audit|--apply|--dry-run|--confirm|--rollback|--status]\n' "$0"
+      printf '\n'
+      printf '  The config that lets you in is the config that lets them in, and a\n'
+      printf '  mistake here is unrecoverable from where you are sitting.\n'
+      printf '\n'
+      printf '  --audit     what the daemon will ACTUALLY do. Read-only, the default.\n'
+      printf '              Reads `sshd -T`, which resolves every Include, and names\n'
+      printf '              the file that set each value - so a drop-in enabling root\n'
+      printf '              logins is found while sshd_config still says no.\n'
+      printf '  --dry-run   the change it would make.\n'
+      printf '  --apply     snapshot, write a drop-in, `sshd -t`, arm a rollback, THEN\n'
+      printf '              reload.\n'
+      printf '  --confirm   keep it. Open a SECOND connection and log in before you run\n'
+      printf '              this; the session you already have survives a config that\n'
+      printf '              locks everyone else out.\n'
+      printf '  --rollback  revert now.\n'
+      printf '  --status    is a change pending.\n'
+      printf '\n'
+      printf '  It also reports the access paths no authorized_keys check can see:\n'
+      printf '  AuthorizedKeysCommand, TrustedUserCAKeys, a non-default\n'
+      printf '  AuthorizedKeysFile, and Match blocks - which `sshd -T` does not\n'
+      printf '  evaluate, and it says so rather than implying it checked.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

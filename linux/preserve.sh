@@ -51,6 +51,25 @@ while [ "$#" -gt 0 ]; do
     --list) mode=list; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--pid PID [--freeze --apply]] [--list]\n' "$0"
+      printf '\n'
+      printf '  Takes the evidence that stops existing the moment you fix the\n'
+      printf '  problem: the socket to the attacker, the parent process that is\n'
+      printf '  the way back in, the open file descriptors, and a deleted\n'
+      printf '  executable - which exists ONLY in /proc while the process lives.\n'
+      printf '\n'
+      printf '  Run this BEFORE the kill, not after. Killing first turns the\n'
+      printf '  incident report into "we found a reverse shell and removed it",\n'
+      printf '  which is worth a fraction of naming the address and the parent.\n'
+      printf '\n'
+      printf '  --pid PID        capture this process in depth, read-only.\n'
+      printf '  --freeze --apply SIGSTOP it first so it holds still while it is\n'
+      printf '              photographed. This is the one thing here that changes\n'
+      printf '              state, which is why it needs --apply.\n'
+      printf '  --list      the cases captured so far.\n'
+      printf '\n'
+      printf '  --freeze refuses a process inside a scored unit: a stopped scored\n'
+      printf '  service is downtime that the watchdog cannot even see, because\n'
+      printf '  SIGSTOP leaves the unit "active".\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

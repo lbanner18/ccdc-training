@@ -34,7 +34,21 @@ while [ "$#" -gt 0 ]; do
     --apply) mode=${mode_override:-install}; apply=1; shift ;;
     --revert) mode_override=revert; mode=revert; shift ;;
     --show) mode=show; shift ;;
-    -h|--help) printf 'usage: %s --config FILE [--show|--apply|--revert --apply]\n' "$0"; exit 0 ;;
+    -h|--help)
+      printf 'usage: %s --config FILE [--show|--apply|--revert --apply]\n' "$0"
+      printf '\n'
+      printf '  The login-banner inject. Writes /etc/issue (console) and\n'
+      printf '  /etc/issue.net (network).\n'
+      printf '\n'
+      printf '  --show      what this box currently serves. Read-only, the default.\n'
+      printf '  --apply     install the banner.\n'
+      printf '  --revert --apply   put the previous one back.\n'
+      printf '\n'
+      printf '  Setting the files is only half of it: sshd does not show a banner\n'
+      printf '  unless it is told to. Set CCDC_SSH_BANNER=/etc/issue.net and run\n'
+      printf '  sshd.sh --apply, or you will pass a look at the console and fail the\n'
+      printf '  inject, because the grader connects over SSH.\n'
+      exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done

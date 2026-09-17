@@ -26,7 +26,22 @@ while [ "$#" -gt 0 ]; do
     --diff) mode=diff; restore_path=${2:?missing backup file}; shift 2 ;;
     --restore) mode=restore; restore_path=${2:?missing backup file}; shift 2 ;;
     --service-path) source_path=${2:?missing source path}; shift 2 ;;
-    -h|--help) printf 'usage: %s --config FILE [--dry-run|--apply] [--service-path PATH] [--list|--diff|--restore BACKUP]\n' "$0"; exit 0 ;;
+    -h|--help)
+      printf 'usage: %s --config FILE [--dry-run|--apply] [--service-path PATH] [--list|--diff|--restore BACKUP]\n' "$0"
+      printf '\n'
+      printf '  Restore points for the files you name in CCDC_BACKUP_PATHS, with a\n'
+      printf '  checksum taken at the time so you can tell a restore from a reinfection.\n'
+      printf '\n'
+      printf '  --dry-run   what would be backed up. The default.\n'
+      printf '  --apply     take the backup.\n'
+      printf '  --list      what restore points exist, and what is in each. Run this\n'
+      printf '              before --restore: you cannot name a file you have not seen.\n'
+      printf '  --diff PATH  what changed between the backup and the box right now.\n'
+      printf '  --restore PATH --apply   put the saved copy back.\n'
+      printf '\n'
+      printf '  Take one BEFORE you change anything. A backup taken after the intrusion\n'
+      printf '  preserves the intrusion.\n'
+      exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done

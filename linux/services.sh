@@ -51,6 +51,21 @@ while [ "$#" -gt 0 ]; do
     --mask) mask=1; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--review|--disable|--revert|--status] [--apply|--dry-run] [--mask]\n' "$0"
+      printf '\n'
+      printf '  --review    READ-ONLY, and the default. Sorts everything enabled\n'
+      printf '              or running into PROTECTED / LIKELY SCORED /\n'
+      printf '              CANDIDATES / UNCLASSIFIED with listening ports.\n'
+      printf '  --disable   act on CCDC_DISABLE_SERVICES, which you write\n'
+      printf '              yourself after reading the review. It will not choose\n'
+      printf '              for you: "should this be off" is a question about your\n'
+      printf '              packet, not one a list in a repo can answer.\n'
+      printf '  --revert    put back everything this tool disabled.\n'
+      printf '  --status    what is currently disabled by this tool.\n'
+      printf '  --mask      also mask, so a dependency cannot pull the unit back\n'
+      printf '              up. Recorded, and undone by --revert like the rest.\n'
+      printf '\n'
+      printf '  For the things a tool CAN have an opinion about, harden.sh runs\n'
+      printf '  first and hands its unclassified bucket to this one.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

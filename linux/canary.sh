@@ -36,6 +36,20 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE --deploy|--check|--status|--remove [--apply|--dry-run]\n' "$0"
+      printf '\n'
+      printf '  Decoy files that nobody has any business reading, plus auditd watches\n'
+      printf '  on them and on the real sensitive files. If one is touched, someone is\n'
+      printf '  looking around.\n'
+      printf '\n'
+      printf '  --deploy --apply   lay the decoys and load the watches.\n'
+      printf '  --check     has anything been touched. Read-only and loopable; this is\n'
+      printf '              what sentry runs.\n'
+      printf '  --status    what is currently laid.\n'
+      printf '  --remove --apply   take them away again.\n'
+      printf '\n'
+      printf '  Manifest-tracked, so --remove takes away exactly what --deploy laid and\n'
+      printf '  nothing else. The auditd rules it loads at runtime are cleared by a\n'
+      printf '  restart of auditd - audit.sh makes them persistent.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

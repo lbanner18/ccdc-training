@@ -19,7 +19,28 @@ while [ "$#" -gt 0 ]; do
     --confirm) confirm=1; shift ;;
     --rollback) rollback=1; shift ;;
     --status) status=1; shift ;;
-    -h|--help) printf 'usage: %s --config FILE [--dry-run|--apply] [--confirm|--rollback|--status]\n' "$0"; exit 0 ;;
+    -h|--help)
+      printf 'usage: %s --config FILE [--dry-run|--apply] [--confirm|--rollback|--status]\n' "$0"
+      printf '\n'
+      printf '  A firewall change you cannot undo from where you are sitting is\n'
+      printf '  the fastest way to lose a box for the rest of the event. So every\n'
+      printf '  apply here arms a dead man'"'"'s switch FIRST, verifies it is armed,\n'
+      printf '  and only then changes the rules.\n'
+      printf '\n'
+      printf '  --dry-run   render the ruleset and show it. The default.\n'
+      printf '  --apply     snapshot, arm the rollback, THEN apply. The rules\n'
+      printf '              revert on their own in CCDC_FIREWALL_ROLLBACK_SECONDS\n'
+      printf '              (default 60, minimum 30) unless you confirm.\n'
+      printf '  --confirm   keep the rules. Run this from a NEW connection, not\n'
+      printf '              the one you already had open - an existing session\n'
+      printf '              survives a rule that blocks new ones, so testing in\n'
+      printf '              place proves nothing.\n'
+      printf '  --rollback  revert now, without waiting for the timer.\n'
+      printf '  --status    is a change pending, and how long is left.\n'
+      printf '\n'
+      printf '  It refuses to start a second change while one is pending: that\n'
+      printf '  would destroy the only recovery path you have.\n'
+      exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done

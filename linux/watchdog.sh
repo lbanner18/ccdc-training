@@ -17,7 +17,23 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
     --once) once=1; shift ;;
     --interval) interval=${2:?missing interval}; shift 2 ;;
-    -h|--help) printf 'usage: %s --config FILE [--once] [--interval SECONDS] [--apply|--dry-run]\n' "$0"; exit 0 ;;
+    -h|--help)
+      printf 'usage: %s --config FILE [--once] [--interval SECONDS] [--apply|--dry-run]\n' "$0"
+      printf '\n'
+      printf '  Keeps the scored services up: TCP, HTTP and systemd checks, restarts\n'
+      printf '  what is dead, and verifies recovery with the same probe the scorer\n'
+      printf '  uses.\n'
+      printf '\n'
+      printf '  --dry-run   what it would restart. The default.\n'
+      printf '  --apply     actually restart.\n'
+      printf '  --once      one pass and exit, for diagnosis.\n'
+      printf '  --interval  seconds between passes when looping.\n'
+      printf '\n'
+      printf '  Run it through guardian rather than by hand: guardian is what keeps it\n'
+      printf '  alive against someone with root who kills it. It restarts once per\n'
+      printf '  pass and detects a crash loop, so it cannot mask a service that is\n'
+      printf '  failing for a reason restarting will not fix.\n'
+      exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done

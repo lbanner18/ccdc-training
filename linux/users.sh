@@ -15,7 +15,22 @@ while [ "$#" -gt 0 ]; do
     --apply) apply=1; CCDC_DRY_RUN=0; shift ;;
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
     --create-admin) admin_user=${2:?missing admin username}; shift 2 ;;
-    -h|--help) printf 'usage: %s --config FILE [--dry-run|--apply] [--create-admin USER]\n' "$0"; exit 0 ;;
+    -h|--help)
+      printf 'usage: %s --config FILE [--dry-run|--apply] [--create-admin USER]\n' "$0"
+      printf '\n'
+      printf '  Account audit and guarded password rotation. It acts ONLY on the\n'
+      printf '  accounts named in CCDC_USER_TARGETS - never on an account it\n'
+      printf '  merely found, because the account you did not mean to lock is\n'
+      printf '  usually the scored one.\n'
+      printf '\n'
+      printf '  --dry-run        show what would change. The default.\n'
+      printf '  --apply          make the changes.\n'
+      printf '  --create-admin USER  add a second administrator with sudo, so\n'
+      printf '              losing one account does not lose you the box.\n'
+      printf '\n'
+      printf '  Rotating a password the scoring engine uses will cost you that\n'
+      printf '  service. Check the packet before you rotate anything.\n'
+      exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
 done

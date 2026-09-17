@@ -1128,5 +1128,25 @@ else
   no "a suite exists that the entry point never runs:$orphan"
 fi
 
+# A tool that can change the box must say what its modes DO, not just name them.
+#
+# Nineteen of twenty-five tools answered --help with a single usage line. The
+# flags were all there - an assertion above enforces that - but `fw.sh --config
+# FILE [--dry-run|--apply] [--confirm|--rollback|--status]` does not tell you
+# that --apply arms a rollback you have to confirm or lose, which is the single
+# most important fact about that tool and the one you need at minute 12.
+thinhelp=''
+for tool in "$ROOT"/linux/*.sh; do
+  base=$(basename "$tool")
+  grep -qE '^\s*--apply\)' "$tool" || continue      # only the mutating ones
+  lines=$(bash "$tool" --help 2>&1 | grep -c .)
+  [ "$lines" -ge 4 ] || thinhelp="$thinhelp $base($lines)"
+done
+if [ -z "$thinhelp" ]; then
+  ok 'every tool that can change the box explains its modes in --help'
+else
+  no "a mutating tool answers --help with barely a usage line:$thinhelp"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -49,6 +49,20 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--check|--inventory|--test-event] [--apply|--dry-run]\n' "$0"
+      printf '\n'
+      printf '  Is this box actually shipping its logs, as opposed to being configured\n'
+      printf '  to?\n'
+      printf '\n'
+      printf '  --check      output targets, reachability, monitor:// inputs that are\n'
+      printf '               disabled or point at deleted files, blocked queues.\n'
+      printf '               Read-only, the default.\n'
+      printf '  --inventory  the logging inject'"'"'s table.\n'
+      printf '  --test-event --apply   write one tagged token and print the search that\n'
+      printf '               finds it.\n'
+      printf '\n'
+      printf '  --test-event is the only part that proves delivery. Everything else\n'
+      printf '  reads local configuration, and configuration is a claim. Run it, then\n'
+      printf '  go and FIND THE TOKEN in Splunk.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

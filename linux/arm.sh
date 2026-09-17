@@ -40,6 +40,19 @@ while [ "$#" -gt 0 ]; do
     --skip-sentry) skip_sentry=1; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--apply|--dry-run] [--skip-backup] [--skip-canary] [--skip-guardian] [--skip-sentry]\n' "$0"
+      printf '\n'
+      printf '  Brings up the whole standing defence in one command: preflight the\n'
+      printf '  config, take a restore point, lay the canaries, start sentry under\n'
+      printf '  supervision, then guardian and the watchdog. After this you have\n'
+      printf '  machinery working while you read evidence and write injects.\n'
+      printf '\n'
+      printf '  --dry-run   show the sequence without running it. The default.\n'
+      printf '  --apply     arm it. Exits non-zero if any layer fails.\n'
+      printf '  --skip-*    leave one layer out, for when it is already running.\n'
+      printf '\n'
+      printf '  It deliberately does NOT touch the firewall or services. fw.sh arms a\n'
+      printf '  dead man'"'"'s switch that needs a human inside the window, so it is never\n'
+      printf '  something a setup script fires on your behalf.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac

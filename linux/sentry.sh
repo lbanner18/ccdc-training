@@ -51,7 +51,21 @@ while [ "$#" -gt 0 ]; do
     --no-bell) bell=0; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--interval N] [--watch-interval N] [--triage-timeout N] [--watch-timeout N]\n' "$0"
-      printf '       [--status|--approve N|--ack|--revert|--once|--loop|--install|--uninstall] [--apply]\n'
+      printf '\n'
+      printf '  The supervision loop: refreshes triage every minute, runs the broader\n'
+      printf '  sweep every two, and maintains a numbered queue of findings you can\n'
+      printf '  approve one at a time.\n'
+      printf '\n'
+      printf '  Install it, do not run the loop by hand - systemd keeps it alive and\n'
+      printf '  leaves your one terminal free:\n'
+      printf '      sudo ./sentry.sh --config FILE --install\n'
+      printf '      sudo ./sentry.sh --config FILE --status      what is queued now\n'
+      printf '      sudo ./sentry.sh --config FILE --approve N   act on one finding\n'
+      printf '\n'
+      printf '  The queue is rebuilt from current findings rather than replayed from\n'
+      printf '  stored shell, and approving re-runs detection before it touches\n'
+      printf '  anything, so a finding that has already been fixed is not acted on\n'
+      printf '  twice.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
