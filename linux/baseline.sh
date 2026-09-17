@@ -40,6 +40,7 @@ mode='look'
 allow_what=''
 allow_reason=''
 approve_items=''
+explain_item=''
 remove_key=''
 force_key=0
 apply=0
@@ -51,6 +52,7 @@ while [ "$#" -gt 0 ]; do
     --config) config=${2:?missing config path}; shift 2 ;;
     --bless)  mode='bless'; shift ;;
     --status) mode='status'; shift ;;
+    --explain) mode='explain'; explain_item=${2:?missing item number}; shift 2 ;;
     --approve) mode='approve'; approve_items=${2:?missing item number(s)}; shift 2 ;;
     --remove-key) mode='removekey'; remove_key=${2:?missing key fingerprint}; shift 2 ;;
     --i-have-console-access) force_key=1; shift ;;
@@ -66,6 +68,9 @@ while [ "$#" -gt 0 ]; do
       printf '  (no mode)   look at everything; read-only; reports what nothing explains\n'
       printf '  --bless     freeze the current box as the known-good baseline\n'
       printf '  --status    what has drifted since the blessing\n'
+      printf '  --explain N the full case for item N: which of the three tests it\n'
+      printf '              failed, what it looks like on the box right now, and\n'
+      printf '              exactly what acting on it would do, in order\n'
       printf '  --approve N act on item N from the last listing (also 1,3,4 or all-green)\n'
       printf '  --remove-key FP  delete one authorised SSH key, named by fingerprint.\n'
       printf '              Refuses to remove a key that has logged in to this box\n'
@@ -234,7 +239,31 @@ inventory_files() {
 # So the baseline freezes readings, not just paths.
 
 inventory_semantic() {
-  local u fp comment line lineno proto addr port
+  local u fp comment line lineno proto addr port f g rule
+
+  # Who can become root, and by which of the two routes.
+  #
+  # The design doc has said since it was written that --bless freezes the
+  # sudoers ruleset, and it did not. Both routes matter and they are different
+  # mechanisms: a rule added to /etc/sudoers.d/, and a user added to a
+  # privileged GROUP. The second is the quieter one - `usermod -aG sudo mallory`
+  # grants root without editing a single sudoers file, so a tool that only reads
+  # /etc/sudoers.d/ watches the door while the window is open.
+  for f in /etc/sudoers /etc/sudoers.d/*; do
+    [ -f "$f" ] || continue
+    # Rules and Defaults only. Comments, #includedir and blank lines are noise,
+    # and normalising the whitespace keeps a reformat from reading as drift.
+    while IFS= read -r line; do
+      case "$line" in ''|'#'*) continue ;; esac
+      rule=$(printf '%s' "$line" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')
+      [ -n "$rule" ] || continue
+      printf 'sudorule|%s|%s\n' "$rule" "$f"
+    done <"$f" 2>/dev/null
+  done
+  for g in sudo admin wheel adm root staff; do
+    getent group "$g" 2>/dev/null | awk -F: -v g="$g" \
+      '{n=split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] != "") print "sudogrp|" g ":" m[i] "|"}'
+  done
 
   # Accounts that can log in as root, and service accounts with a real shell.
   awk -F: '$3 == 0 {print "uid0|" $1 "|shell=" $7}' /etc/passwd 2>/dev/null
@@ -629,7 +658,7 @@ explained() {
     uid0) [ "$subject" = root ] && return 0; return 1 ;;
     # Semantic readings are never "explained" by a package. An account, a key or
     # a listening socket is either in the blessed baseline or it is news.
-    svcshell|sshkey|sshd|listener|module) return 1 ;;
+    svcshell|sshkey|sshd|listener|module|sudorule|sudogrp) return 1 ;;
     procexe)
       # These three can never be explained by anything, and the blessed
       # baseline must not be able to whitewash them either. A deleted
@@ -675,6 +704,10 @@ why_for() {
     return
   fi
   case "$kind" in
+    sudorule)
+      printf 'a sudo rule that was not in the blessed baseline (from %s)' "$detail" ;;
+    sudogrp)
+      printf 'a new member of a group that grants root - no sudoers file had to change for this' ;;
     procexe)
       case "$detail" in
         *deleted*)
@@ -835,9 +868,51 @@ action_for() {
 # automatically, the one command that resolves the ambiguity, and what to do if
 # the answer is surprising.
 needs_you_for() {
-  local kind=$1 subject=$2 detail=$3 user fp
+  local kind=$1 subject=$2 detail=$3 user fp who
 
   case "$kind" in
+    sudorule)
+      printf '       A sudo rule that was not here when you froze this box. It\n'
+      printf '       came from %s:\n\n' "$detail"
+      printf '         %s\n\n' "$subject"
+      printf '       I am not going to edit sudoers for you. A malformed sudoers\n'
+      printf '       file locks EVERYONE out of root on this box, including you,\n'
+      printf '       and the only way back is the console.\n\n'
+      printf '       Read it, and make the change, with the editor that refuses to\n'
+      printf '       save a file that would do that:\n\n'
+      if [ "$detail" = /etc/sudoers ]; then
+        printf '         sudo visudo\n\n'
+      else
+        printf '         sudo visudo -f %s\n\n' "$detail"
+        printf '       If the whole file is theirs rather than one line of it, the\n'
+        printf '       file itself is also a finding in this list - approve that\n'
+        printf '       instead and it is removed with an evidence copy.\n\n'
+      fi
+      printf '       If the rule is yours, record it so it stops being reported:\n\n'
+      printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
+      printf '              --reason "why this rule exists" --apply\n'
+      return 0 ;;
+    sudogrp)
+      who=${subject#*:}
+      printf '       %s is a member of a group that grants root, and was not a\n' "$who"
+      printf '       member when you froze this box.\n\n'
+      printf '         %s\n\n' "$subject"
+      printf '       This one is worth understanding: nothing in /etc/sudoers.d\n'
+      printf '       had to change for it. `usermod -aG sudo %s` is one command,\n' "$who"
+      printf '       it leaves every sudoers file byte-identical, and it survives\n'
+      printf '       every check that only reads those files.\n\n'
+      printf '       Confirm it is not you or a teammate, then remove the\n'
+      printf '       membership - this removes ONLY the group membership and\n'
+      printf '       leaves the account alone:\n\n'
+      printf '         sudo gpasswd --delete %s %s\n\n' "$who" "${subject%%:*}"
+      printf '       That takes effect on their NEXT login. If they have a shell\n'
+      printf '       open right now, it keeps the privilege until they log out:\n\n'
+      printf '         who | grep %s\n' "$who"
+      printf '         sudo pkill -KILL -u %s      # if they should not be here\n\n' "$who"
+      printf '       If the membership is yours, record it:\n\n'
+      printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
+      printf '              --reason "why this account has root" --apply\n'
+      return 0 ;;
     sshkey)
       user=${subject%%:*}; fp=${subject#*:}
       case "$fp" in
@@ -1152,6 +1227,8 @@ do_action() {
 card_for() {
   case "$1" in
     uid0)      printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
+    sudorule|sudogrp)
+               printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
     unit|generator|initscript)
@@ -1249,6 +1326,9 @@ remove_authorized_key() {
 
 severity_for() {
   local kind=$1 subject=$2 detail=${3:-} dangerous=0
+  # Both routes to root are RED on sight. Neither happens by accident, and
+  # neither is reversible by the person who did not do it.
+  case "$kind" in sudorule|sudogrp) printf 'RED'; return ;; esac
   if [ "$kind" = procexe ]; then
     case "$detail" in
       *deleted*|*volatile-dir*|*ld-preload*) printf 'RED'; return ;;
@@ -1457,7 +1537,8 @@ report() {
       printf '      run:  sudo %s --config %s --approve %s --apply\n' "$qself" "$qconfig" "$i"
       [ "$kind" = procexe ] && live_guidance "$subject" "$detail" auto
       printf '      look: %s\n' "$(look_cmd "$kind" "$subject")"
-      printf '      more: %s\n\n' "$(card_for "$kind")"
+      printf '      more: %s\n' "$(card_for "$kind")"
+      printf '      dig:  sudo %s --config %s --explain %s\n\n' "$qself" "$qconfig" "$i"
     done
   fi
 
@@ -1473,7 +1554,8 @@ report() {
       needs_you_for "$kind" "$subject" "$detail" \
         || printf '       %s\n       look: %s\n' \
              "$(why_for "$kind" "$subject" "$detail")" "$(look_cmd "$kind" "$subject")"
-      printf '\n       more: %s\n\n' "$(card_for "$kind")"
+      printf '\n       more: %s\n' "$(card_for "$kind")"
+      printf '       dig:  sudo %s --config %s --explain %s\n\n' "$qself" "$qconfig" "$i"
     done
   fi
 
@@ -1498,10 +1580,201 @@ report() {
 
 }
 
+# --- --explain N --------------------------------------------------------------
+#
+# The listing answers "what is wrong and what will you do about it" in six
+# lines, because a screen of findings that each take a paragraph is a screen
+# nobody finishes. This is where the paragraph lives for the one finding the
+# operator actually stopped on.
+#
+# The thing worth showing is not a longer description - it is WHICH of the three
+# tests failed. "Nothing explains it" is a conclusion; "no package ships this
+# path, and it appeared eleven minutes after you froze the box" is a reason, and
+# a reason is what tells you whether the tool is right.
+
+explain_clauses() {
+  local kind=$1 subject=$2 owner blessed_at n_allow n_except target
+
+  printf '  Why nothing explains it. All three tests, and what each one said:\n\n'
+
+  # 1 - the blessed baseline
+  if [ -r "$blessed" ]; then
+    blessed_at=$(date -u -d "@$(stat -c '%Y' "$blessed")" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null)
+    if [ -n "${BLESSED_SET["$kind|$subject"]:-}" ]; then
+      printf '    in the blessed baseline?  YES - and it is still being reported,\n'
+      printf '                              which is a bug. Please say so.\n'
+    else
+      printf '    in the blessed baseline?  no. The baseline was frozen\n'
+      printf '                              %s and this is not in it.\n' "$blessed_at"
+    fi
+  else
+    printf '    in the blessed baseline?  there is no baseline yet, so this test\n'
+    printf '                              could not run at all. Until you bless\n'
+    printf '                              this box, only the package test below\n'
+    printf '                              is doing any work.\n'
+  fi
+
+  # 2 - package ownership, with the checksum, because ownership alone is not it
+  case "$kind" in
+    uid0|svcshell|sshkey|sshd|listener|module)
+      printf '    owned by a package?       not a packaging question. An account, a\n'
+      printf '                              key, a listening socket or a loaded\n'
+      printf '                              module is either in the baseline or it\n'
+      printf '                              is news - no package can vouch for it.\n' ;;
+    *)
+      if [ -n "${PKG_MODIFIED["$subject"]:-}" ]; then
+        printf '    owned by a package?       a package ships this path, but its\n'
+        printf '                              CHECKSUM NO LONGER MATCHES. Something\n'
+        printf '                              edited a packaged file. That is worse\n'
+        printf '                              than an unowned file, not better.\n'
+      elif pkg_owns_fast "$subject"; then
+        # Ask the same question explained() asks, not a similar one. Calling
+        # dpkg-query here directly disagreed with the verdict in the very first
+        # run: `if owner=$(dpkg-query -S ... | head -1)` reads HEAD's exit
+        # status, which is zero whether or not dpkg found anything, so an
+        # unowned file printed "owned by a package? yes - " with an empty name
+        # directly under a headline saying no package owned it.
+        owner=$(dpkg-query -S "$subject" 2>/dev/null) || owner=''
+        owner=$(printf '%s' "$owner" | head -1)
+        printf '    owned by a package?       yes - %s\n' "${owner%%:*}"
+      else
+        printf '    owned by a package?       no. No installed package ships this\n'
+        printf '                              path.\n'
+        if [ -L "$subject" ]; then
+          target=$(readlink -f -- "$subject" 2>/dev/null)
+          [ -n "$target" ] && printf '                              (it is a symlink to %s,\n                              which no package ships either)\n' "$target"
+        fi
+      fi ;;
+  esac
+
+  # 3 - your own standing exceptions
+  n_allow=0
+  for _p in ${CCDC_BASELINE_ALLOW:-}; do n_allow=$((n_allow + 1)); done
+  n_except=${#EXCEPT_SET[@]}
+  printf '    allowlisted by you?       no. CCDC_BASELINE_ALLOW has %s pattern(s)\n' "$n_allow"
+  printf '                              and you have recorded %s exception(s).\n' "$n_except"
+  printf '                              None of them match this.\n\n'
+}
+
+# What it actually looks like right now. The listing gives a `look:` command;
+# this runs it, because the operator who typed --explain has already decided to
+# stop here and a second copy-paste is a second chance to fumble it.
+explain_evidence() {
+  local kind=$1 subject=$2 detail=$3 pid
+  printf '  What it is on the box right now:\n\n'
+  case "$kind" in
+    procexe)
+      pid=$(printf '%s' "$detail" | sed -n 's/.*pids=\([0-9]*\).*/\1/p')
+      if [ -n "$pid" ] && [ -d "/proc/$pid" ]; then
+        ps -o pid,ppid,user,etime,cmd -p "$pid" 2>/dev/null | sed 's/^/      /'
+        printf '      exe -> %s\n' "$(readlink "/proc/$pid/exe" 2>/dev/null)"
+        printf '      started by pid %s: %s\n' \
+          "$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)" \
+          "$(tr '\0' ' ' <"/proc/$(awk '/^PPid:/{print $2}' "/proc/$pid/status" 2>/dev/null)/cmdline" 2>/dev/null)"
+      else
+        printf '      that process is no longer running\n'
+      fi ;;
+    uid0|svcshell)
+      grep -E "^$subject:" /etc/passwd 2>/dev/null | sed 's/^/      /' ;;
+    sshkey)
+      printf '      %s\n' "$detail" ;;
+    listener|module|sshd)
+      printf '      %s  %s\n' "$subject" "$detail" ;;
+    *)
+      if [ -e "$subject" ]; then
+        ls -la -- "$subject" 2>/dev/null | sed 's/^/      /'
+        if [ -f "$subject" ] && [ -s "$subject" ]; then
+          printf '\n      first 20 lines:\n'
+          head -20 -- "$subject" 2>/dev/null | sed 's/^/      | /'
+          [ "$(wc -l <"$subject" 2>/dev/null)" -gt 20 ] \
+            && printf '      | ... (%s lines total)\n' "$(wc -l <"$subject" 2>/dev/null)"
+        fi
+      else
+        printf '      %s is no longer there\n' "$subject"
+      fi ;;
+  esac
+  printf '\n'
+}
+
+print_explain() {
+  local want=$1 entry kind subject detail act
+
+  [ -r "$queue" ] || ccdc_die "nothing has been listed yet, so there is no item $want.
+  Look at the box first, which writes the numbered list this reads:
+      sudo $qself --config $qconfig"
+  entry=$(awk -F'|' -v w="$want" '$1 == w {print; exit}' "$queue")
+  [ -n "$entry" ] || ccdc_die "no item $want in the list; re-run the listing to renumber:
+      sudo $qself --config $qconfig"
+
+  kind=$(printf '%s' "$entry" | cut -d'|' -f2)
+  subject=$(printf '%s' "$entry" | cut -d'|' -f3)
+  detail=$(printf '%s' "$entry" | cut -d'|' -f4-)
+
+  load_sets
+
+  printf '\n  [%s] %s  %s\n\n' "$want" "$kind" "$subject"
+  printf '  %s\n\n' "$(why_for "$kind" "$subject" "$detail")"
+
+  explain_clauses "$kind" "$subject"
+  explain_evidence "$kind" "$subject" "$detail"
+
+  act=$(action_for "$kind" "$subject" "$detail")
+  if [ -n "$act" ]; then
+    printf '  What --approve %s --apply would do:\n\n' "$want"
+    printf '      %s\n\n' "$act"
+    printf '  and in every case, in this order:\n'
+    printf '      1. re-check that this is still true on the box - the listing\n'
+    printf '         and this command are two moments with a human in between\n'
+    case "$kind" in
+      procexe)
+        printf '      2. capture the live process - its open sockets, its parent\n'
+        printf '         and its /proc/PID/exe - into %s/cases/\n' "$state_dir"
+        printf '         It will not kill anything it could not capture first.\n' ;;
+      *)
+        printf '      2. copy what it is about to touch into\n'
+        printf '         %s/removed/ - a new timestamped directory per action\n' "$state_dir" ;;
+    esac
+    printf '      3. act\n'
+    printf '      4. check its own work, and say so only if the check passed\n\n'
+    printf '    do it:     sudo %s --config %s --approve %s --apply\n' \
+      "$qself" "$qconfig" "$want"
+  else
+    printf '  There is no automatic action for this one, on purpose. The listing\n'
+    printf '  prints the reason under NEEDS YOU - read that before doing anything.\n\n'
+  fi
+
+  # Do not offer --allow for the things that can never be allowed. explained()
+  # refuses a deleted executable, a daemon running out of a volatile directory
+  # and an LD_PRELOAD injection outright - no baseline entry and no exception
+  # silences them. Printing "not a threat, it is mine" under a reverse shell in
+  # /dev/shm would be advice the tool will not honour and the operator should
+  # not take.
+  case "$kind:$detail" in
+    procexe:*deleted*|procexe:*volatile-dir*|procexe:*ld-preload*)
+      printf '    there is no "this one is mine" for this finding. A deleted
+'
+      printf '    executable, a daemon running out of a volatile directory and an
+'
+      printf '    LD_PRELOAD injection are never explained by a baseline or an
+'
+      printf '    exception, so --allow will not silence it.
+' ;;
+    *)
+      printf '    not a threat, it is mine:\n'
+      printf '               sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
+      printf '                    --reason "what it is and why it is here" --apply\n' ;;
+  esac
+  printf '    card:      %s\n' "$(card_for "$kind")"
+}
+
 case "$mode" in
   look)
     load_sets
     report 'baseline.sh - what nothing explains'
+    ;;
+
+  explain)
+    print_explain "$explain_item"
     ;;
 
   status)

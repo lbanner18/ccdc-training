@@ -355,5 +355,71 @@ else
   no 'ancestry walk will drop sshd from a baseline blessed over SSH'
 fi
 
+# --- --explain -----------------------------------------------------------------
+#
+# The design doc has promised a `dig:` line on every card since the day it was
+# written, and --explain did not exist.
+if grep -q "^    --explain) mode='explain'" "$BASE"; then
+  ok '--explain is a flag the tool actually accepts'
+else
+  no '--explain is documented but not implemented'
+fi
+if [ "$(grep -c "dig:  sudo %s --config %s --explain" "$BASE")" -eq 2 ]; then
+  ok 'both the actionable and the needs-you card print a dig: line'
+else
+  no 'a card is missing the dig: line the design contract promises'
+fi
+
+# --explain must answer with the SAME predicate the verdict used. Asking dpkg
+# directly disagreed with the headline on the first run, because
+# `if owner=$(dpkg-query -S ... | head -1)` reads head's exit status - which is
+# zero whether or not dpkg found anything - so an unowned file printed
+# "owned by a package? yes - " with an empty name.
+if grep -q 'elif pkg_owns_fast "\$subject"; then' "$BASE"; then
+  ok '--explain asks the same ownership question the verdict asked'
+else
+  no '--explain can contradict its own headline about package ownership'
+fi
+
+# Never offer --allow for something explained() will refuse to explain.
+if grep -q 'there is no "this one is mine" for this finding' "$BASE"; then
+  ok 'a deleted-exe process is not offered an --allow that would not work'
+else
+  no 'the tool offers --allow for findings no exception can ever silence'
+fi
+
+# --- both routes to root -------------------------------------------------------
+#
+# The design doc said --bless freezes the sudoers ruleset and it did not freeze
+# anything. Worse, reading only /etc/sudoers.d/ watches one of the two doors:
+# `usermod -aG sudo mallory` grants root, changes no sudoers file, and leaves
+# every byte of every one of them identical.
+if grep -q "printf 'sudorule|" "$BASE"; then
+  ok 'the sudoers ruleset is part of the inventory'
+else
+  no '--bless does not freeze the sudoers ruleset, which the design doc promises'
+fi
+if grep -q 'sudogrp|' "$BASE"; then
+  ok 'membership of groups that grant root is part of the inventory'
+else
+  no 'a user added to the sudo group is invisible to the baseline'
+fi
+if grep -q 'sudorule|sudogrp) return 1' "$BASE"; then
+  ok 'no package can vouch for a sudo rule or a group membership'
+else
+  no 'a sudo rule in a packaged file would read as explained'
+fi
+# Editing sudoers automatically can lock every account out of root, console only.
+if awk '/^action_for\(\)/,/^}/' "$BASE" | grep -qE 'sudorule|sudogrp'; then
+  no 'the tool will edit sudoers by itself, which can lock you out via a typo'
+else
+  ok 'sudoers is never edited automatically - it hands over visudo'
+fi
+if grep -q 'sudo visudo' "$BASE"; then
+  ok 'the sudoers guidance uses visudo, which refuses to save a broken file'
+else
+  no 'the sudoers guidance edits the file without visudo'
+fi
+
 printf 'baseline self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

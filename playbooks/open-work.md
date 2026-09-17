@@ -32,10 +32,15 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 
 ## P1 — promised in writing, not built
 
-- [~] 3. `--explain N` — built in `harden.sh`. Still to back-port to `baseline.sh`,
-      where `baseline-design.md:143` promises it.
-- [ ] 4. Bless the sudoers ruleset — design doc says `--bless` freezes it;
-      `inventory_semantic()` does not enumerate sudoers content.
+- [x] 3. `--explain N` — built in `harden.sh` and back-ported to `baseline.sh`.
+      Reports which of the three tests failed and why, shows the subject as it is
+      on the box right now, and expands the action into ordered steps. Every card
+      now carries the `dig:` line the design contract promised.
+- [x] 4. Bless the sudoers ruleset — done, **and the group route with it**.
+      `usermod -aG sudo mallory` grants root while leaving every sudoers file
+      byte-identical, so `sudogrp|` rows freeze membership of sudo/admin/wheel/
+      adm/root/staff too. Both proven to drift-detect and clear on the lab box.
+      Never edited automatically: it hands over `visudo`.
 - [ ] 5. The 13 unactioned check types in `triage.sh` / `sentry.sh`.
       `baseline.sh` grew its own actions; those two tools still only report.
 - [ ] 6. Render pass — drive every tool through every mode and read the output as the
