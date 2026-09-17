@@ -64,7 +64,11 @@ printf '%s\n' '--- effective enabled/running systemd services ---'
 done
 
 printf '%s\n' '--- startup/PAM/loader files (full bounded contents) ---'
-for f in /etc/rc.local /etc/profile /etc/bash.bashrc /etc/ld.so.preload /etc/ld.so.conf /etc/ld.so.conf.d/* /etc/pam.conf /etc/pam.d/* /etc/profile.d/*; do
+# /etc/update-motd.d is on this list because every script in it runs AS ROOT on
+# every SSH login, and the directory ships a dozen executable scripts by
+# default, so one more does not look out of place. Nothing in the kit looked at
+# it until a drill planted a foothold there and no tool said a word.
+for f in /etc/rc.local /etc/profile /etc/bash.bashrc /etc/ld.so.preload /etc/ld.so.conf /etc/ld.so.conf.d/* /etc/pam.conf /etc/pam.d/* /etc/profile.d/* /etc/update-motd.d/*; do
   [ -e "$f" ] || [ -L "$f" ] || continue
   echo "=== $f ==="
   ls -ld "$f" 2>/dev/null || true

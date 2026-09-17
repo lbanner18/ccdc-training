@@ -51,7 +51,7 @@ while [ "$#" -gt 0 ]; do
     --no-bell) bell=0; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--interval N] [--watch-interval N] [--triage-timeout N] [--watch-timeout N]\n' "$0"
-      printf '       [--status|--approve [N]|--ack|--revert|--once|--loop|--install|--uninstall] [--apply]\n'
+      printf '       [--status|--approve N|--ack|--revert|--once|--loop|--install|--uninstall] [--apply]\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
@@ -81,8 +81,20 @@ case "$watch_timeout" in ''|*[!0-9]*) ccdc_die "--watch-timeout must be a whole 
   || ccdc_die "--triage-timeout must be between 10 and 300 seconds"
 [ "$watch_timeout" -ge 15 ] && [ "$watch_timeout" -le 600 ] \
   || ccdc_die "--watch-timeout must be between 15 and 600 seconds"
-case "$item" in ''|*[!0-9]*) [ -z "$item" ] || ccdc_die "approval item must be a positive integer" ;; esac
-[ -z "$item" ] || [ "$item" -gt 0 ] || ccdc_die "approval item must be a positive integer"
+# Echo what arrived, not just what was wanted. The common way to get here is
+# pasting the item's label - "[2]" - which bash leaves alone when no file
+# matches the glob, so the tool sees two brackets and a digit.
+item_error() {
+  case "$1" in
+    \[*\]) stripped=${1#\[}; stripped=${stripped%\]}
+       ccdc_die "approval item must be a positive integer, got: $1
+       the [N] in the item list is a label, not part of the command.
+       try: --approve $stripped --apply" ;;
+    *) ccdc_die "approval item must be a positive integer, got: $1" ;;
+  esac
+}
+case "$item" in ''|*[!0-9]*) [ -z "$item" ] || item_error "$item" ;; esac
+[ -z "$item" ] || [ "$item" -gt 0 ] || item_error "$item"
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
@@ -460,15 +472,21 @@ write_alerts() {
     if [ "$n" -eq 0 ]; then
       printf '  Nothing waiting for your sign-off.\n\n'
     else
-      printf '  %s current action(s) WAITING FOR SIGN-OFF. Freeze a reviewed snapshot, then approve it:\n' "$n"
-      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --status\n'
-      printf '      sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve [N] --apply\n\n'
+      printf '  %s current action(s) WAITING FOR SIGN-OFF. Review each one, then run the\n' "$n"
+      printf '  approve command printed under it.\n\n'
       while IFS='|' read -r sev check subject; do
         [ -n "${sev:-}" ] || continue
         i=$((i + 1)); action=$(render_action "$check" "$subject")
         printf -v quoted '%q' "$subject"
         printf '  [%s] %-5s %s  %s\n' "$i" "$sev" "$check" "$quoted"
-        printf '        will: %s\n\n' "$action"
+        printf '        will: %s\n' "$action"
+        # The item's own command, with its real number substituted. The usage
+        # line used to read "--approve [N]" directly above a list labelled
+        # "[1]" and "[2]", so both halves of the screen said to type brackets.
+        # In bash "[2]" is a glob - a character class - and with no file named
+        # "2" to match, it reaches the tool as the literal string "[2]" and is
+        # rejected as not a number. The operator did exactly what was printed.
+        printf '        approve: sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve %s --apply\n\n' "$i"
       done <"$queue"
     fi
 

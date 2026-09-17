@@ -330,13 +330,30 @@ fi
 # functions are not hoisted: defining newer_than_box down in section 7 made
 # section 6 print "newer_than_box: command not found" at runtime, which no
 # syntax check catches.
+#
+# A helper may live in a sourced library rather than in the tool itself, in
+# which case what has to come first is the `.` line, not a definition. Checking
+# only the tool's own text reported "used at line 713, defined at line (blank)"
+# for three helpers that were perfectly well defined one file over.
 for fn in pkg_owns newer_than_box identical_to; do
   def=$(grep -n "^$fn()" "$ROOT/linux/triage.sh" | head -1 | cut -d: -f1)
+  if [ -z "$def" ]; then
+    # Defined elsewhere: find the library that has it, and treat the line that
+    # sources that library as the definition point.
+    lib=$(grep -ln "^$fn()" "$ROOT"/linux/lib/*.sh 2>/dev/null | head -1)
+    if [ -n "$lib" ]; then
+      def=$(grep -n "\. \"\$SCRIPT_DIR/lib/$(basename "$lib")\"" "$ROOT/linux/triage.sh" \
+            | head -1 | cut -d: -f1)
+      where="sourced from lib/$(basename "$lib") at line $def"
+    fi
+  else
+    where="defined at line $def"
+  fi
   use=$(grep -nE "(^|[^a-z_])$fn " "$ROOT/linux/triage.sh" | grep -v "^$def:" | head -1 | cut -d: -f1)
   if [ -n "$def" ] && { [ -z "$use" ] || [ "$def" -lt "$use" ]; }; then
-    ok "$fn is defined before it is used"
+    ok "$fn is available before it is used ($where)"
   else
-    no "$fn is used at line $use but defined at line $def"
+    no "$fn is used at line ${use:-?} but ${where:-not defined anywhere}"
   fi
 done
 
@@ -392,7 +409,11 @@ fi
 
 # The build-time window has to clear a provisioning run, or it fires on the
 # operator's own key and teaches them to ignore the signal.
-slack=$(grep -oE 'BOX_BUILT\)\)" -gt [0-9]+' "$tri" | grep -oE '[0-9]+$')
+# Look in the tool and in the libraries it sources - newer_than_box moved to
+# lib/provenance.sh, and a check that only reads triage.sh reported the window
+# as "unset" while it was sitting correctly one file over.
+slack=$(grep -hoE 'BOX_BUILT\)\)" -gt [0-9]+' "$tri" "$ROOT"/linux/lib/*.sh 2>/dev/null \
+        | grep -oE '[0-9]+$' | head -1)
 if [ -n "$slack" ] && [ "$slack" -ge 3600 ]; then
   ok "the box-built window is ${slack}s - wide enough for a provisioning run"
 else
@@ -937,6 +958,45 @@ if [ -z "$pathonly" ]; then
 else
   no 'a tool names a root-only path without a command that reads it'
   printf '%s\n' "$pathonly" | sed 's/^/    /'
+fi
+
+# A placeholder inside a command that is otherwise ready to paste. The docs
+# check above catches <angle> brackets; this one catches [SQUARE] ones, which
+# are worse in a shell because they do not fail loudly. "[2]" is a valid glob -
+# a character class - so bash does not error on it; when nothing matches, it
+# passes the literal string through and the tool rejects it as not a number.
+#
+# sentry.sh printed "--approve [N] --apply" directly above a list labelled
+# "[1]" and "[2]". Both halves of the screen told the operator to type
+# brackets, and they did.
+sqbrack=$(python3 - "$ROOT" <<'SCAN'
+import glob, os, re, sys
+bad = []
+# A line that prints a command someone is meant to run...
+cmdish = re.compile(r"(sudo |\.sh )")
+# ...must not carry a bare [WORD] placeholder. Bracketed lowercase tags like
+# [dry-run] are labels, and a usage line's [--flag|--flag] means "optional",
+# so only an all-caps token with no dashes or pipes inside counts.
+ph = re.compile(r"\[[A-Z][A-Z0-9_]*\]")
+for f in sorted(glob.glob(os.path.join(sys.argv[1], 'linux', '*.sh'))):
+    for i, line in enumerate(open(f, encoding='utf-8', errors='replace').read().splitlines()):
+        if line.lstrip().startswith('#'):
+            continue
+        if 'printf' not in line:
+            continue
+        if not cmdish.search(line):
+            continue
+        m = ph.search(line)
+        if m:
+            bad.append('%s:%d: %s -> %s' % (os.path.basename(f), i + 1, m.group(0), line.strip()[:70]))
+print('\n'.join(bad))
+SCAN
+)
+if [ -z "$sqbrack" ]; then
+  ok 'no printed command carries a [PLACEHOLDER] that bash will pass through as a glob'
+else
+  no 'a printed command tells the operator to type a bracketed placeholder'
+  printf '%s\n' "$sqbrack" | sed 's/^/    /'
 fi
 
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
