@@ -497,5 +497,61 @@ else
   no '.bash_logout is not covered, and T1546.004 targets it specifically'
 fi
 
+
+# Every kind baseline can emit resolves to a card that exists.
+#
+# Luke's instruction, verbatim: "don't just check cards for what's showing up
+# rn, look at all the possibilities we've looked at and make sure each possible
+# output is tied to a card, write it fresh if you need to". So this walks
+# kind_for's whole classification table and why_for's whole vocabulary rather
+# than whatever one run happened to produce - the lab box's inventory has 30
+# kinds in it and the source can emit more.
+#
+# It found two with no card at all: `module`, and `initramfs` - a hook that runs
+# as root before the real root filesystem is mounted. And three filed under
+# CARD 11, "shell start-up file that launches something", that are nothing of
+# the sort: sysctl, apparmor and kernelhook were there because that card was
+# the nearest thing to a default.
+gap=$(python3 - "$ROOT" <<'CARDS'
+import re, sys, os
+root = sys.argv[1]
+src = open(os.path.join(root, 'linux', 'baseline.sh'), encoding='utf-8').read()
+cards = set(re.findall(r'^## CARD (\d+)',
+            open(os.path.join(root, 'playbooks', 'remediation-cards.md'),
+                 encoding='utf-8').read(), re.M))
+
+def arms(fn):
+    m = re.search(r'\n%s\(\) \{\n(.*?)\n\}\n' % fn, src, re.S)
+    out = set()
+    for label in re.findall(r'^\s{4}([a-z0-9_|]+)\)', m.group(1) if m else '', re.M):
+        out.update(label.split('|'))
+    return out
+
+# every kind kind_for can classify a path as, plus every kind why_for explains
+emitted = set(re.findall(r"printf '([a-z0-9]+)' ;;", src)) | arms('why_for')
+covered = arms('card_for')
+problems = ['%s has no card_for arm' % k for k in sorted(emitted - covered)]
+
+# and every card card_for names must exist in the playbook
+body = re.search(r'\ncard_for\(\) \{\n(.*?)\n\}\n', src, re.S).group(1)
+for n in sorted(set(re.findall(r'CARD (\d+)', body))):
+    if n not in cards:
+        problems.append('card_for points at CARD %s, which does not exist' % n)
+print('; '.join(problems))
+CARDS
+)
+if [ -z "$gap" ]; then
+  ok 'every kind baseline can emit is tied to a card that exists'
+else
+  no "$gap"
+fi
+
+# The fallback must stay, and must say it is a gap rather than print nothing.
+if grep -q 'NO CARD FOR %s YET - this is a gap in the tool' "$ROOT/linux/baseline.sh"; then
+  ok 'an unmapped kind says so out loud instead of printing a bare path'
+else
+  no 'an unmapped kind prints something that reads like a real reference'
+fi
+
 printf 'baseline self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

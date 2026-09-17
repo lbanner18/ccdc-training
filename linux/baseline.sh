@@ -1469,10 +1469,18 @@ card_for() {
                printf 'playbooks/remediation-cards.md  CARD 1 - UID-0 account that is not root' ;;
     sshkey)    printf 'playbooks/remediation-cards.md  CARD 2 - SSH key you do not recognise' ;;
     cron)      printf 'playbooks/remediation-cards.md  CARD 3 - scheduled job that calls home' ;;
-    sysctl|usershell)
-               printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
-    kernelhook|apparmor|file)
-               printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
+    usershell) printf 'playbooks/remediation-cards.md  CARD 11 - shell start-up file that launches something' ;;
+    # Not CARD 11. A sysctl setting, an AppArmor profile and a kernel
+    # post-install hook are not shell start-up files; they are files under /etc
+    # that changed, which is what CARD 9 is for. They were filed under 11
+    # because that card was the nearest thing to a default.
+    sysctl|apparmor|kernelhook|file)
+               printf 'playbooks/remediation-cards.md  CARD 9 - /etc changed and it was not you' ;;
+    # A module runs in ring 0; an initramfs hook runs before the real root
+    # filesystem exists. Both are code scheduled to run underneath every other
+    # tool on the box, which is one card, not two.
+    module|initramfs)
+               printf 'playbooks/remediation-cards.md  CARD 14 - code running below the point your tools can see' ;;
     unit|generator|initscript)
                printf 'playbooks/remediation-cards.md  CARD 4 - systemd unit that calls home' ;;
     suid)      printf 'playbooks/remediation-cards.md  CARD 5 - SUID interpreter' ;;
@@ -1485,7 +1493,10 @@ card_for() {
     profile|motd|loader)
                printf 'playbooks/remediation-cards.md  CARD 11 - start-up file that launches something' ;;
     sshd)      printf 'playbooks/packet-to-config.md  and linux/sshd.sh --help' ;;
-    *)         printf 'playbooks/baseline-design.md  (no card for %s yet)' "$1" ;;
+    # Nothing should reach this arm: a self-test walks kind_for's whole table
+    # and why_for's whole vocabulary and fails if any kind lands here. It stays
+    # so that a kind added in a hurry says so instead of printing nothing.
+    *)         printf 'playbooks/baseline-design.md  (NO CARD FOR %s YET - this is a gap in the tool)' "$1" ;;
   esac
 }
 

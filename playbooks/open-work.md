@@ -65,8 +65,15 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       8 AMBER by number -> each AMBER approved individually -> "Nothing waiting
       for your sign-off", with scored-web answering 200 at every step.
 - [x] Installed under guardian in the right order; no drift warning, no revert.
-- [ ] Wire `card_for` completeness into baseline.sh too, and assert every one of
-      the 60 kinds resolves to a card that exists. **Still open.**
+- [x] `card_for` completeness wired into baseline.sh, asserted against
+      `kind_for`'s whole classification table and `why_for`'s whole vocabulary
+      rather than against one run's output. Found two kinds with no card at all
+      (`module`, `initramfs`) and three filed under CARD 11, "shell start-up
+      file that launches something", that are nothing of the sort (`sysctl`,
+      `apparmor`, `kernelhook` - they are /etc files that changed, CARD 9).
+      CARD 14 now covers the initramfs, because a hook there runs as root
+      before the real root filesystem is mounted and removing the file is not
+      enough on its own: the image already built from it is what boots.
 - [ ] **Remember:** every sentry change needs guardian uninstall -> sentry
       install -> guardian install, or guardian reverts it within a tick.
 

@@ -842,9 +842,9 @@ sudo grep -rn 'sshd_config' /etc/cron* /var/spool/cron/crontabs/ 2>/dev/null
 
 ---
 
-## CARD 14 — a kernel module that was not loaded when you froze the box
+## CARD 14 — code running below the point your tools can see
 
-`RED  module  <name>`
+`RED  module  MODULENAME` · `AMBER  initramfs  /etc/initramfs-tools/hooks/FILE`
 
 A loaded kernel module runs in ring 0. It can hide processes from `ps`, hide
 files from `ls`, hide its own entry from `lsmod`, and lie to every tool on this
@@ -873,6 +873,34 @@ no package owns — is not a distribution module.
 sudo cp -a "$(modinfo -n MODULENAME)" /var/tmp/ccdc-evidence/   # evidence FIRST
 sudo rmmod MODULENAME
 ```
+
+### The other half: the initramfs
+
+A module has to get loaded somehow, and the earliest place to arrange that is
+the initramfs — the filesystem the kernel mounts before your real root exists.
+Scripts under `/etc/initramfs-tools/` are copied into it and run as root, before
+auditd, before systemd, before anything on this box that could notice. That is
+why an `initramfs` finding belongs on this card and not with the ordinary `/etc`
+diffs: it is not a config file, it is code scheduled to run underneath you.
+
+```bash
+# what changed, and what is in the image that is actually booting
+sudo ls -la /etc/initramfs-tools/hooks/ /etc/initramfs-tools/scripts/
+lsinitramfs /boot/initrd.img-$(uname -r) | grep -vE '^(usr|lib|etc/(ld|fonts))' | head -40
+dpkg -S /etc/initramfs-tools/hooks/FILE 2>/dev/null || echo "NO PACKAGE OWNS IT"
+```
+
+Removing the file is not enough on its own — the image already built from it is
+what boots:
+
+```bash
+sudo cp -a /etc/initramfs-tools/hooks/FILE /var/tmp/ccdc-evidence/
+sudo rm -f /etc/initramfs-tools/hooks/FILE
+sudo update-initramfs -u          # rebuild, or the old image still runs it
+```
+
+Do the rebuild during a quiet moment, not mid-inject: a bad initramfs is a box
+that does not come back from a reboot.
 
 If `rmmod` says the module is in use and nothing legitimate is using it, that
 resistance is itself the finding. Stop it from coming back across a reboot:
