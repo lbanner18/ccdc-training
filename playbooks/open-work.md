@@ -116,5 +116,16 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       emits the location / ports / removal-steps table the inject asks for,
       already filled in. Section 3 is the part that matters: what was found and
       deliberately NOT removed, with the question each one turns on.
-- [ ] 18. Windows coverage. Login banner, SSH and endpoint protection injects say
-      *every server* / *Linux and Windows*. `windows/` is first-pass PowerShell.
+- [~] 18. Windows coverage. The three cross-platform injects (login banner, SSH
+      access, endpoint protection) now carry their Windows commands, each with
+      the trap that actually catches people: the banner appears at the NEXT
+      logon; OpenSSH on Windows reads
+      `C:\ProgramData\ssh\administrators_authorized_keys` for anything in the
+      Administrators group and ignores the user profile entirely; Defender's
+      `RealTimeProtectionEnabled` being false IS the finding, not something to
+      quietly fix.
+      **Marked untested** — the lab win11 VM has SSH open but will not take my
+      key, so none of it has been run. Verify on the box before claiming it in a
+      memo. `windows/` is still only recon.ps1 + watchdog.ps1 (63 lines); there
+      is no Windows equivalent of baseline.sh or harden.sh and there will not be
+      one before 2026-09-26.

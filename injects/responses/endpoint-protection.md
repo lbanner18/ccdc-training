@@ -20,6 +20,28 @@ than a screenshot of a green tick. `scan.sh` never quarantines or deletes:
 `clamscan --remove` on a web root deletes the file it disliked, and the scored
 service that served it starts returning 500.
 
+**On Windows the OS-provided answer is Defender**, which satisfies "open-source
+or OS-provided" without installing anything:
+
+```powershell
+Get-MpComputerStatus | Select-Object AMServiceEnabled, RealTimeProtectionEnabled,
+    AntivirusSignatureLastUpdated, AntivirusSignatureVersion
+Update-MpSignature
+Start-MpScan -ScanType FullScan                   # this is the graded part
+Get-MpThreatDetection | Select-Object ThreatID, InitialDetectionTime, Resources
+```
+
+`Get-MpComputerStatus` is your status screenshot and `Get-MpThreatDetection` is
+your findings report. Check `RealTimeProtectionEnabled` first — if red team
+turned it off, re-enabling it IS the finding, and it is worth saying in the memo
+that you found it disabled rather than quietly turning it back on.
+
+A full scan takes a long time. Start it early and write the memo while it runs;
+do not start it at minute 50.
+
+*Untested against this kit's lab Windows VM — verify on the box before you claim
+it in the memo.*
+
 ---
 
 ```text

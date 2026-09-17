@@ -18,6 +18,27 @@ box that sets only the first passes a look at the console and fails the inject,
 because the grader connects over SSH. `banner.sh --config "$CFG"` (no --apply)
 prints which of the two this box currently serves.
 
+**On a Windows box, it is two registry values under Policies\System:**
+
+```powershell
+$k = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+Set-ItemProperty $k -Name legalnoticecaption -Value 'NOTICE TO USERS'
+Set-ItemProperty $k -Name legalnoticetext    -Value "Authorized use only. ..."
+# read it back - this is also your screenshot if the lock screen is awkward:
+Get-ItemProperty $k | Select-Object legalnoticecaption, legalnoticetext
+```
+
+It appears at the NEXT interactive logon, not immediately, so log out and back
+in before you screenshot. `legalnoticetext` is a single REG_SZ; put line breaks
+in with a here-string rather than trying to embed `\n`.
+
+*Untested against this kit's lab Windows VM — the values and the path are
+standard, but verify on the box before you claim it in the memo.*
+
+**On a network device**, it is the pre-login banner, and the keyword differs by
+vendor: `banner login` on Cisco IOS, `set system login message` on JunOS. The
+inject asks for every device, so find out which you have before minute 40.
+
 ---
 
 ```text

@@ -22,6 +22,31 @@ Changes go through `--apply`, which validates with `sshd -t` and arms a timed
 rollback before reloading. **Test the new login in a second terminal before
 running `--confirm`.**
 
+**On a Windows box running OpenSSH Server**, the config is NOT where it is on
+Linux and there is one trap that catches everyone:
+
+```powershell
+Get-Service sshd                                  # is it even running
+notepad C:\ProgramData\ssh\sshd_config           # not %ProgramFiles%
+Restart-Service sshd
+```
+
+The trap: for any account in the local Administrators group, OpenSSH on Windows
+does **not** read `C:\Users\<name>\.ssh\authorized_keys`. It reads
+`C:\ProgramData\ssh\administrators_authorized_keys`, and that file must be
+owned by Administrators or SYSTEM with inheritance disabled or sshd silently
+ignores it. A key that works for a standard user and fails for an admin is this,
+every time — and so is a key an attacker planted there that you will not find by
+looking in the user profile.
+
+```powershell
+icacls C:\ProgramData\ssh\administrators_authorized_keys
+Get-Content C:\ProgramData\ssh\administrators_authorized_keys
+```
+
+*Untested against this kit's lab Windows VM — verify on the box before you claim
+it in the memo.*
+
 ---
 
 ```text
