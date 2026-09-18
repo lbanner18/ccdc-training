@@ -224,8 +224,11 @@ function Get-CcdcList {
     param([Parameter(Mandatory)][hashtable]$Config,
           [Parameter(Mandatory)][string]$Name)
     $v = Get-CcdcValue -Config $Config -Name $Name
-    if ([string]::IsNullOrWhiteSpace($v)) { return @() }
-    return @($v -split '[\s,]+' | Where-Object { $_ -ne '' })
+    # ',' keeps a 0- or 1-element result an ARRAY. Without it PowerShell
+    # unrolls the return value, an empty list comes back as $null, and the
+    # caller's .Count throws under StrictMode.
+    if ([string]::IsNullOrWhiteSpace($v)) { return ,@() }
+    return ,@($v -split '[\s,]+' | Where-Object { $_ -ne '' })
 }
 
 function Test-CcdcListContains {
@@ -243,12 +246,12 @@ function Assert-CcdcPacketEntered {
     param([Parameter(Mandatory)][hashtable]$Config)
     $u = Get-CcdcList -Config $Config -Name 'CCDC_ALLOWED_USERS'
     $s = Get-CcdcList -Config $Config -Name 'CCDC_WINDOWS_SERVICES'
-    if ($u.Count -eq 0 -or $s.Count -eq 0) {
+    if (@($u).Count -eq 0 -or @($s).Count -eq 0) {
         Write-CcdcDie @"
 refusing to act: the packet lists are empty.
 
-  CCDC_ALLOWED_USERS     accounts that are supposed to exist (found: $($u.Count))
-  CCDC_WINDOWS_SERVICES  services you are scored on        (found: $($s.Count))
+  CCDC_ALLOWED_USERS     accounts that are supposed to exist (found: $(@($u).Count))
+  CCDC_WINDOWS_SERVICES  services you are scored on        (found: $(@($s).Count))
 
   in $($Config['_ConfigPath'])
 
@@ -415,7 +418,7 @@ function Get-CcdcTcpChecks {
     foreach ($tok in (Get-CcdcList -Config $Config -Name 'CCDC_TCP_CHECKS')) {
         if ($tok -match '\|') {
             $f = $tok -split '\|'
-            if ($f.Count -lt 3) { Write-CcdcWarn "CCDC_TCP_CHECKS: '$tok' wants name|host|port|service"; continue }
+            if (@($f).Count -lt 3) { Write-CcdcWarn "CCDC_TCP_CHECKS: '$tok' wants name|host|port|service"; continue }
             $h = $f[1]; $p = $f[2]
         } elseif ($tok -match '^(?<h>.+):(?<p>[^:]+)$') {
             $h = $Matches['h']; $p = $Matches['p']
@@ -425,7 +428,7 @@ function Get-CcdcTcpChecks {
         if ($p -notmatch '^\d+$') { Write-CcdcWarn "CCDC_TCP_CHECKS: '$p' is not a port number in '$tok'"; continue }
         $out += [pscustomobject]@{ Host = $h; Port = [int]$p }
     }
-    return $out
+    return ,@($out)
 }
 
 function Get-CcdcHttpChecks {
@@ -437,7 +440,7 @@ function Get-CcdcHttpChecks {
         if ($u -notmatch '^https?://') { Write-CcdcWarn "CCDC_HTTP_CHECKS: '$tok' is not an http:// or https:// URL"; continue }
         $out += $u
     }
-    return $out
+    return ,@($out)
 }
 
 # --- the apply boundary ------------------------------------------------------
@@ -571,7 +574,7 @@ function Get-CcdcCapabilityGaps {
     if ((Test-CcdcIsDomainController)) {
         $gaps += 'this is a DOMAIN CONTROLLER - it has NO local accounts. Every account here is a domain account, and disabling one affects every machine in the domain.'
     }
-    return $gaps
+    return ,@($gaps)
 }
 
 function Write-CcdcBoxBanner {
@@ -587,7 +590,7 @@ function Write-CcdcBoxBanner {
     Write-Host ('  built {0}, last booted {1}' -f $Facts['Installed'], $Facts['LastBoot'])
 
     $gaps = Get-CcdcCapabilityGaps -Facts $Facts
-    if ($gaps.Count -gt 0) {
+    if (@($gaps).Count -gt 0) {
         Write-Host ''
         Write-Host '  WHAT THIS BOX WILL NOT LET ME CHECK:' -ForegroundColor Yellow
         foreach ($g in $gaps) { Write-Host ("    - {0}" -f $g) -ForegroundColor Yellow }

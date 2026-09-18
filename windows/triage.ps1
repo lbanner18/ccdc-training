@@ -81,7 +81,7 @@ function Report {
     [void]$b.Add(('  {0,-6} {1,-16} {2}' -f $Severity, $Check, $Subject))
     [void]$b.Add(('         {0}' -f $Description))
     foreach ($d in $Detail) { [void]$b.Add(('         {0}' -f $d)) }
-    if ($Fix.Count -gt 0) {
+    if (@($Fix).Count -gt 0) {
         [void]$b.Add('         ---- run this ----------------------------------------')
         foreach ($f in $Fix) { [void]$b.Add(('           {0}' -f $f)) }
     }
@@ -101,6 +101,19 @@ function Clean { param([string]$Message) if (-not $Quiet) { Write-Host ('  ok   
 # account and file names on this box; a name with a space or a quote in it must
 # not turn a printed command into a different command.
 function Q { param([string]$s) return ("'" + ($s -replace "'", "''") + "'") }
+
+# PSPath comes back as 'Microsoft.PowerShell.Core\Registry::HKEY_LOCAL_MACHINE\...',
+# which works but is unreadable in a command you are about to paste under time
+# pressure. Print the drive form people actually recognise.
+function ConvertTo-CcdcRegPath {
+    param([string]$Path)
+    $p = $Path -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
+    $p = $p -replace '^HKEY_LOCAL_MACHINE', 'HKLM:'
+    $p = $p -replace '^HKEY_CURRENT_USER', 'HKCU:'
+    $p = $p -replace '^HKEY_USERS', 'HKU:'
+    $p = $p -replace '^HKEY_CLASSES_ROOT', 'HKCR:'
+    return $p
+}
 
 if (-not $Quiet) {
     Write-Host ''
@@ -137,7 +150,7 @@ try {
     } catch { }
 }
 
-if ($adminMembers.Count -eq 0) {
+if (@($adminMembers).Count -eq 0) {
     Report -Severity 'AMBER' -Check 'admincheck' -Subject 'Administrators' `
         -Description 'could not read the Administrators group' `
         -Detail @('This is the single most important group on the box and nothing here could list it.',
@@ -153,7 +166,7 @@ if ($adminMembers.Count -eq 0) {
         if ($short -match '^(Domain Admins|Enterprise Admins|Administrator)$') { continue }
         $unexpected += $m.Name
     }
-    if ($unexpected.Count -gt 0) {
+    if (@($unexpected).Count -gt 0) {
         foreach ($u in $unexpected) {
             $short = ($u -split '\\')[-1]
             Report -Severity 'RED' -Check 'rogueadmin' -Subject $u `
@@ -166,7 +179,7 @@ if ($adminMembers.Count -eq 0) {
                 -Card 'CARD W1'
         }
     } else {
-        Clean ("Administrators group holds only accounts the packet names ({0})" -f $adminMembers.Count)
+        Clean ("Administrators group holds only accounts the packet names ({0})" -f @($adminMembers).Count)
     }
 }
 
@@ -175,7 +188,7 @@ $localUsers = @()
 if (-not $isDC) {
     try { $localUsers = @(Get-LocalUser -ErrorAction Stop) } catch { }
 }
-if ($localUsers.Count -gt 0) {
+if (@($localUsers).Count -gt 0) {
     foreach ($u in $localUsers) {
         if (-not $u.Enabled) { continue }
         $short = $u.Name
@@ -205,7 +218,7 @@ if ($localUsers.Count -gt 0) {
                 -Card 'CARD W1'
         }
     }
-    Clean ("{0} local account(s) reviewed" -f $localUsers.Count)
+    Clean ("{0} local account(s) reviewed" -f @($localUsers).Count)
 }
 
 Begin-Check 'guest'
@@ -246,7 +259,7 @@ foreach ($name in $allowedUsers) {
             -Fix @(("net user {0} /active:yes" -f $name)) -Card 'CARD W1'
     }
 }
-Clean ("{0} scored account(s) checked for availability" -f $allowedUsers.Count)
+Clean ("{0} scored account(s) checked for availability" -f @($allowedUsers).Count)
 
 # =============================================================================
 # 2. SERVICES - the thing you are scored on, and a favourite place to hide
@@ -261,7 +274,7 @@ Begin-Check 'services'
 $services = @()
 try { $services = @(Get-CimInstance Win32_Service -ErrorAction Stop) } catch { }
 
-if ($services.Count -eq 0) {
+if (@($services).Count -eq 0) {
     Report -Severity 'AMBER' -Check 'svccheck' -Subject 'Win32_Service' `
         -Description 'could not enumerate services' `
         -Fix @('Get-Service | Where-Object Status -eq Running') -Card 'CARD W2'
@@ -325,7 +338,7 @@ if ($services.Count -eq 0) {
             }
         }
     }
-    Clean ("{0} service(s) reviewed for path, quoting and logon account" -f $services.Count)
+    Clean ("{0} service(s) reviewed for path, quoting and logon account" -f @($services).Count)
 }
 
 # The scored services themselves. Same reasoning as the scored accounts: this
@@ -352,7 +365,7 @@ foreach ($name in $scoredServices) {
             -Card 'CARD W2'
     }
 }
-if ($scoredServices.Count -gt 0) { Clean ("{0} scored service(s) checked" -f $scoredServices.Count) }
+if (@($scoredServices).Count -gt 0) { Clean ("{0} scored service(s) checked" -f @($scoredServices).Count) }
 
 # =============================================================================
 # 3. SCHEDULED TASKS - persistence that does not need a service
@@ -363,7 +376,7 @@ $tasks = @()
 if ($facts['HasScheduledTasks']) {
     try { $tasks = @(Get-ScheduledTask -ErrorAction Stop) } catch { }
 }
-if ($tasks.Count -gt 0) {
+if (@($tasks).Count -gt 0) {
     # What a payload looks like in a task action, regardless of what the task
     # is called. Names are chosen to blend in; these strings are chosen to work.
     $badAction = '(?i)(-enc\b|-encodedcommand|downloadstring|downloadfile|iex\b|invoke-expression|frombase64string|-w\s+hidden|-windowstyle\s+hidden|-nop\b|bitsadmin|certutil.*-urlcache|mshta|rundll32.*javascript|\\Temp\\|\\AppData\\|/c\s+powershell|cmd\.exe\s+/c.*http)'
@@ -404,7 +417,7 @@ if ($tasks.Count -gt 0) {
                 -Card 'CARD W3'
         }
     }
-    Clean ("{0} scheduled task(s) reviewed" -f $tasks.Count)
+    Clean ("{0} scheduled task(s) reviewed" -f @($tasks).Count)
 } elseif (-not $facts['HasScheduledTasks']) {
     Report -Severity 'AMBER' -Check 'taskcheck' -Subject 'ScheduledTasks' `
         -Description 'no ScheduledTasks module here, so tasks were not checked' `
@@ -459,6 +472,24 @@ if (Test-Path -LiteralPath $ifeo) {
     foreach ($sub in (Get-ChildItem -LiteralPath $ifeo -ErrorAction SilentlyContinue)) {
         $dbg = $null
         try { $dbg = (Get-ItemProperty -LiteralPath $sub.PSPath -Name Debugger -ErrorAction Stop).Debugger } catch { }
+
+        # An accessibility binary with an IFEO subkey but NO Debugger value is
+        # not nothing. Windows does not create these, and Defender strips the
+        # Debugger value while leaving the empty key behind - so this is the
+        # footprint of an attempt that was blocked. It belongs in the incident
+        # report, and it says somebody had administrator on this box.
+        if (-not $dbg -and $sub.PSChildName -match '(?i)^(sethc|utilman|osk|magnify|narrator|displayswitch|atbroker)\.exe$') {
+            Report -Severity 'AMBER' -Check 'ifeoempty' -Subject $sub.PSChildName `
+                -Description 'an IFEO key exists for an accessibility binary, with no debugger set' `
+                -Detail @('Windows does not ship this key. Either the debugger was removed -',
+                          'by you, or by Defender blocking the attempt - or it is being set up.',
+                          'Check Defender first: a block here is evidence for the incident',
+                          'report, and it means somebody already had administrator.') `
+                -Fix @('Get-MpThreatDetection | Where-Object { $_.Resources -match ''Image File Execution'' } | Format-List',
+                       ("Remove-Item -LiteralPath {0} -Recurse" -f (Q (ConvertTo-CcdcRegPath $sub.PSPath)))) `
+                -Card 'CARD W4'
+        }
+
         if ($dbg) {
             Report -Severity 'RED' -Check 'ifeo' -Subject $sub.PSChildName `
                 -Description ('a debugger is attached to {0}: {1}' -f $sub.PSChildName, $dbg) `
@@ -512,7 +543,7 @@ $listeners = @()
 if ($facts['HasNetTCPIP']) {
     try { $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop) } catch { }
 }
-if ($listeners.Count -gt 0) {
+if (@($listeners).Count -gt 0) {
     $byPort = $listeners | Sort-Object LocalPort -Unique
     foreach ($l in $byPort) {
         $port = [string]$l.LocalPort
@@ -556,7 +587,7 @@ if ($listeners.Count -gt 0) {
                 -Card 'CARD W5'
         }
     }
-    Clean ("{0} listening TCP port(s) reviewed" -f $byPort.Count)
+    Clean ("{0} listening TCP port(s) reviewed" -f @($byPort).Count)
 } elseif (-not $facts['HasNetTCPIP']) {
     Report -Severity 'AMBER' -Check 'netcheck' -Subject 'NetTCPIP' `
         -Description 'no NetTCPIP module, so listening ports were not checked from PowerShell' `
@@ -678,6 +709,15 @@ if ($facts['HasNetSecurity']) {
 
         # An inbound allow rule that appeared after the box was built, for a
         # port nobody put in the packet, is a door somebody propped open.
+        #
+        # A stock Windows install ships ~50 enabled inbound allow rules. Naming
+        # them all made a clean box report 25 AMBER findings, which teaches you
+        # to skim past the section that matters. The discriminator is Group:
+        # Windows' own rules carry a resource-string group ('@FirewallAPI.dll,-28502'),
+        # an installer's rule carries a plain-text group ('Microsoft Edge'), and a
+        # rule somebody typed has NO group at all. The last kind is the one worth
+        # your attention, and it is what both you and an attacker produce.
+        $fwBuiltin = 0; $fwApp = 0
         foreach ($r in (Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True -ErrorAction Stop)) {
             $ports = @()
             try { $ports = @((Get-NetFirewallPortFilter -AssociatedNetFirewallRule $r -ErrorAction Stop).LocalPort) } catch { }
@@ -686,15 +726,31 @@ if ($facts['HasNetSecurity']) {
                 if ($pt -notmatch '^\d+$') { continue }
                 if (Test-CcdcListContains -Needle $pt -List $allowedTcpPorts) { continue }
                 if (Test-CcdcListContains -Needle $pt -List $allowedUdpPorts) { continue }
-                if ($r.DisplayName -match '(?i)^(Core Networking|File and Printer|Windows Defender|Remote Assistance|mDNS|Network Discovery|Windows Remote Management)') { continue }
+
+                $grp = ''
+                try { if ($null -ne $r.Group) { $grp = [string]$r.Group } } catch { }
+                if ($grp.StartsWith('@')) { $fwBuiltin++; continue }
+                if (-not [string]::IsNullOrWhiteSpace($grp)) { $fwApp++; continue }
+
                 Report -Severity 'AMBER' -Check 'fwallow' -Subject ('{0} -> {1}' -f $r.DisplayName, $pt) `
-                    -Description 'an inbound ALLOW rule for a port the packet does not name' `
-                    -Detail @('Either you opened it for a scored service and have not written it',
-                              'into the config, or somebody else opened it.') `
+                    -Description 'a hand-made inbound ALLOW rule for a port the packet does not name' `
+                    -Detail @('This rule has no group, so it was typed rather than shipped with',
+                              'Windows or an installer. Either you opened it for a scored service',
+                              'and have not written it into the config, or somebody else opened it.') `
                     -Fix @(("Get-NetFirewallRule -DisplayName {0} | Format-List DisplayName,Description,Enabled,Profile" -f (Q $r.DisplayName)),
                            ("Disable-NetFirewallRule -DisplayName {0}" -f (Q $r.DisplayName))) `
                     -Card 'CARD W7'
             }
+        }
+        if (($fwBuiltin + $fwApp) -gt 0) {
+            Report -Severity 'NOTE' -Check 'fwstock' -Subject 'built-in allow rules' `
+                -Description ('{0} Windows and {1} installer inbound allow rule(s) not listed individually' -f $fwBuiltin, $fwApp) `
+                -Detail @('These ship with Windows or with installed software. They are not',
+                          'clean by definition - just not evidence of anything on their own.',
+                          'harden.ps1 -Only Firewall sets default-deny inbound, which makes',
+                          'the whole set moot. To read them yourself:') `
+                -Fix @('Get-NetFirewallRule -Direction Inbound -Action Allow -Enabled True | Sort-Object Group | Format-Table DisplayName,Group -AutoSize') `
+                -Card 'CARD W7'
         }
         Clean 'firewall profiles and inbound allow rules reviewed'
     } catch {
@@ -744,8 +800,337 @@ try {
         -Fix @('New-Item -Path ''HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'' -Force',
                'Set-ItemProperty -Path ''HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'' -Name EnableScriptBlockLogging -Value 1',
                '# or let the kit do it, with the rest of the logging setup:',
-               '.\windows\audit.ps1 -Config CONFIG -Apply') `
+               '.\windows\harden.ps1 -Config ' + $Config + ' -Only Logging -Apply') `
         -Card 'CARD W8'
+}
+
+# =============================================================================
+# 8. CREDENTIAL EXPOSURE - the Windows-only problem Linux does not have
+#
+# On Linux a password is a hash in /etc/shadow. On Windows it is also material
+# sitting in LSASS memory that a local administrator can read and replay on
+# another machine WITHOUT ever cracking it. These three settings decide how
+# much is sitting there. They are registry writes and they cost nothing.
+# =============================================================================
+Begin-Check 'credentials'
+
+function Get-RegValue {
+    # StrictMode 2.0 throws on a property that is not there, so never touch one
+    # without checking. Returns $null when the key or value does not exist.
+    param([string]$Path, [string]$Name)
+    try {
+        $k = Get-ItemProperty -LiteralPath $Path -ErrorAction Stop
+        if ($null -eq $k) { return $null }
+        if (-not ($k.PSObject.Properties.Name -contains $Name)) { return $null }
+        return $k.$Name
+    } catch { return $null }
+}
+
+$wdigest = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' -Name 'UseLogonCredential'
+if ($null -ne $wdigest -and [int]$wdigest -eq 1) {
+    Report -Severity 'RED' -Check 'wdigest' -Subject 'UseLogonCredential=1' `
+        -Description 'WDigest is storing cleartext passwords in memory' `
+        -Detail @('Nothing needs this. It is off by default on anything since 2012 R2,',
+                  'so somebody turned it ON, and the reason to turn it on is to read',
+                  'plaintext passwords out of LSASS. Treat every password used on this',
+                  'box since as known to them.') `
+        -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'' -Name UseLogonCredential -Value 0',
+               '# then rotate: .\windows\users.ps1 -Config CONFIG -RotateAll -Apply') `
+        -Card 'CARD W13'
+} else {
+    Clean 'WDigest is not caching cleartext credentials'
+}
+
+$ppl = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'RunAsPPL'
+if ($null -eq $ppl -or [int]$ppl -eq 0) {
+    Report -Severity 'AMBER' -Check 'lsappl' -Subject 'RunAsPPL' `
+        -Description 'LSA is not running as a protected process' `
+        -Detail @('With RunAsPPL on, the ordinary ways of reading LSASS memory stop',
+                  'working and the attempt is logged. It needs a reboot to take effect,',
+                  'so decide early or not at all - do NOT reboot a scored box at minute',
+                  '50 for this.') `
+        -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'' -Name RunAsPPL -Value 1 -Type DWord',
+               '# takes effect on next reboot') `
+        -Card 'CARD W13'
+} else {
+    Clean 'LSA is running protected (RunAsPPL)'
+}
+
+$restrict = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'RestrictAnonymous'
+$restrictSam = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'RestrictAnonymousSAM'
+if (($null -eq $restrictSam -or [int]$restrictSam -eq 0)) {
+    Report -Severity 'AMBER' -Check 'nullsession' -Subject 'RestrictAnonymousSAM' `
+        -Description 'anonymous users are not blocked from enumerating SAM accounts' `
+        -Detail @('This is how an unauthenticated host on the same segment gets your',
+                  'user list to spray against.') `
+        -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'' -Name RestrictAnonymousSAM -Value 1 -Type DWord',
+               'Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'' -Name RestrictAnonymous -Value 1 -Type DWord') `
+        -Card 'CARD W13'
+} else {
+    Clean 'anonymous SAM enumeration is restricted'
+}
+
+# =============================================================================
+# 9. SERVICE PERMISSIONS - a service can pass every other check and still be
+#    yours to take over
+#
+# Sections 2 checked WHERE a service runs from and WHO it runs as. Neither says
+# anything about who is allowed to CHANGE it. A service running as SYSTEM from
+# C:\Windows\System32 that Authenticated Users may reconfigure is a one-command
+# privilege escalation, and it looks perfectly clean in every other view.
+# =============================================================================
+Begin-Check 'serviceacl'
+
+# In SDDL, 'WD' means Everyone when it appears as the PRINCIPAL and WRITE_DAC
+# when it appears in the RIGHTS. They are different fields - parse by position,
+# never by searching the whole ACE string.
+$riskyPrincipals = @{
+    'WD' = 'Everyone';            'AU' = 'Authenticated Users'
+    'IU' = 'Interactive Users';   'BU' = 'Users'
+    'BG' = 'Guests';              'AN' = 'Anonymous'
+    'S-1-1-0' = 'Everyone';       'S-1-5-11' = 'Authenticated Users'
+    'S-1-5-32-545' = 'Users'
+}
+$dangerousRights = @{
+    'DC' = 'change its configuration (binary path, logon account)'
+    'WD' = 'rewrite its permissions'
+    'WO' = 'take ownership of it'
+    'SD' = 'delete it'
+}
+
+$svcAclFindings = 0
+$svcAclChecked  = 0
+$svcDirsChecked = @{}
+$allSvc = @()
+try { $allSvc = @(Get-CimInstance -ClassName Win32_Service -ErrorAction Stop) } catch { }
+
+foreach ($svc in $allSvc) {
+    $svcName = ''
+    try { $svcName = [string]$svc.Name } catch { continue }
+    if ([string]::IsNullOrWhiteSpace($svcName)) { continue }
+
+    $sddl = ''
+    try { $sddl = (& sc.exe sdshow $svcName 2>$null | Where-Object { $_ -match '^D:' }) -join '' } catch { }
+    if ([string]::IsNullOrWhiteSpace($sddl)) { continue }
+    $svcAclChecked++
+
+    # Only the DACL. Everything from S: on is the audit list and grants nothing.
+    $dacl = $sddl
+    $sIdx = $sddl.IndexOf('S:')
+    if ($sIdx -gt 0) { $dacl = $sddl.Substring(0, $sIdx) }
+
+    foreach ($m in [regex]::Matches($dacl, '\(([^)]*)\)')) {
+        $f = $m.Groups[1].Value -split ';'
+        if (@($f).Count -lt 6) { continue }
+        if ($f[0] -notmatch '^A') { continue }          # allow ACEs only
+        $rights = $f[2]
+        $who    = $f[5]
+        if (-not $riskyPrincipals.ContainsKey($who)) { continue }
+
+        $granted = @()
+        foreach ($r in $dangerousRights.Keys) {
+            if ($rights -match $r) { $granted += $dangerousRights[$r] }
+        }
+        if (@($granted).Count -eq 0) { continue }
+
+        $svcAclFindings++
+        Report -Severity 'RED' -Check 'svcacl' -Subject $svcName `
+            -Description ('{0} may {1}' -f $riskyPrincipals[$who], ($granted -join ', ')) `
+            -Detail @(('This service runs as {0}. Anyone in that group can point it at' -f $svc.StartName),
+                      'their own binary and restart it, and the binary runs with the',
+                      'service''s privileges. The service itself looks completely normal.',
+                      ('  current binary: {0}' -f $svc.PathName)) `
+            -Fix @(("sc.exe sdshow {0}" -f $svcName),
+                   "# restore the stock DACL for a service (SY=SYSTEM, BA=Administrators):",
+                   ("sc.exe sdset {0} ""D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)""" -f $svcName)) `
+            -Card 'CARD W11'
+    }
+
+    # The other half of the same question: the binary's DIRECTORY. Write access
+    # there is the same takeover without touching the service config at all.
+    $exe = ''
+    try {
+        $pn = [string]$svc.PathName
+        if ($pn -match '^\s*"([^"]+)"') { $exe = $Matches[1] }
+        elseif ($pn -match '^\s*(\S+\.exe)') { $exe = $Matches[1] }
+    } catch { }
+    if ([string]::IsNullOrWhiteSpace($exe)) { continue }
+    $dir = ''
+    try { $dir = Split-Path -Parent $exe } catch { }
+    if ([string]::IsNullOrWhiteSpace($dir) -or $svcDirsChecked.ContainsKey($dir.ToLower())) { continue }
+    $svcDirsChecked[$dir.ToLower()] = $true
+    if (-not (Test-Path -LiteralPath $dir)) { continue }
+
+    try {
+        $acl = Get-Acl -LiteralPath $dir -ErrorAction Stop
+        foreach ($ace in $acl.Access) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            $id = [string]$ace.IdentityReference
+            if ($id -notmatch '(?i)\\(Users|Authenticated Users|Everyone|INTERACTIVE|Guests)$' -and
+                $id -notmatch '(?i)^(Everyone|NT AUTHORITY\\Authenticated Users|BUILTIN\\Users)$') { continue }
+            $rights = [string]$ace.FileSystemRights
+            if ($rights -notmatch '(?i)FullControl|Modify|Write(Data)?|CreateFiles|TakeOwnership|ChangePermissions') { continue }
+            Report -Severity 'RED' -Check 'svcdiracl' -Subject $dir `
+                -Description ('{0} can write into a directory that service binaries run from' -f $id) `
+                -Detail @(('rights: {0}' -f $rights),
+                          'Replace the .exe, restart the service, and their code runs as the',
+                          'service account. No service configuration is changed, so nothing',
+                          'that watches service config will notice.',
+                          ('  first service found here: {0}' -f $svcName)) `
+                -Fix @(("icacls ""{0}"" /remove:g ""{1}""" -f $dir, $id),
+                       ("icacls ""{0}""" -f $dir)) `
+                -Card 'CARD W11'
+            break
+        }
+    } catch { }
+}
+if ($svcAclFindings -eq 0) {
+    Clean ("{0} service ACL(s) reviewed, none writable by non-administrators" -f $svcAclChecked)
+}
+
+# =============================================================================
+# 10. WMI PERSISTENCE - the one that survives everything else on this list
+#
+# A WMI permanent event subscription is three objects in a namespace nothing
+# else on this box looks at. It is not a service, not a task, not a registry
+# run key and not a file on disk, so every other section here misses it. It
+# fires on a condition you never see and it survives reboots.
+# =============================================================================
+Begin-Check 'wmi'
+
+# Windows and a few Microsoft products ship subscriptions of their own.
+$stockWmi = @('SCM Event Log Filter', 'SCM Event Log Consumer', 'BVTFilter', 'BVTConsumer',
+              'TSLogonFilter', 'TSLogonConsumer', 'RmAssistEventFilter', 'RmAssistEventConsumer',
+              'NTEventLogConsumer', 'DellCommandMonitor')
+$wmiFound = 0
+$wmiTotal = 0
+try {
+    $consumers = @()
+    foreach ($cls in @('CommandLineEventConsumer', 'ActiveScriptEventConsumer', 'ScriptingStandardConsumerSetting')) {
+        try { $consumers += @(Get-CimInstance -Namespace 'root/subscription' -ClassName $cls -ErrorAction Stop) } catch { }
+    }
+    $wmiTotal = @($consumers).Count
+    foreach ($c in $consumers) {
+        $cname = ''
+        try { $cname = [string]$c.Name } catch { }
+        if ($stockWmi -contains $cname) { continue }
+
+        $what = ''
+        try {
+            if ($c.PSObject.Properties.Name -contains 'CommandLineTemplate' -and $c.CommandLineTemplate) {
+                $what = 'runs: ' + [string]$c.CommandLineTemplate
+            } elseif ($c.PSObject.Properties.Name -contains 'ScriptText' -and $c.ScriptText) {
+                $what = 'script: ' + (([string]$c.ScriptText) -replace '\s+', ' ')
+                if ($what.Length -gt 160) { $what = $what.Substring(0, 160) + ' ...' }
+            }
+        } catch { }
+
+        $wmiFound++
+        Report -Severity 'RED' -Check 'wmisub' -Subject $cname `
+            -Description 'a WMI event consumer that did not ship with Windows' `
+            -Detail @(('class: {0}' -f $c.CimClass.CimClassName),
+                      $what,
+                      'Nothing else in this report would have found this. Look at what',
+                      'triggers it before you delete it - the filter tells you what they',
+                      'were waiting for, and that belongs in the incident report.') `
+            -Fix @(("Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding | Where-Object {{ `$_.Consumer -match {0} }}" -f (Q $cname)),
+                   ("Get-CimInstance -Namespace root/subscription -ClassName {0} -Filter ""Name='{1}'"" | Remove-CimInstance" -f $c.CimClass.CimClassName, $cname),
+                   '# remove the binding and the filter too, or it comes back:',
+                   'Get-CimInstance -Namespace root/subscription -ClassName __EventFilter | Format-List Name,Query') `
+            -Card 'CARD W11'
+    }
+    if ($wmiFound -eq 0) { Clean ("{0} WMI event consumer(s) reviewed, all stock" -f $wmiTotal) }
+} catch {
+    Report -Severity 'AMBER' -Check 'wmicheck' -Subject 'root/subscription' `
+        -Description 'WMI subscriptions could not be read, so this persistence class was not checked' `
+        -Fix @('Get-CimInstance -Namespace root/subscription -ClassName __EventConsumer') `
+        -Card 'CARD W11'
+}
+
+# =============================================================================
+# 11. SMB AND RDP - on Linux these are optional services. Here they are the OS.
+# =============================================================================
+Begin-Check 'smb'
+
+$smbCfg = $null
+try { $smbCfg = Get-SmbServerConfiguration -ErrorAction Stop } catch { }
+if ($null -ne $smbCfg) {
+    try {
+        if ($smbCfg.EnableSMB1Protocol) {
+            Report -Severity 'RED' -Check 'smbv1' -Subject 'SMB1' `
+                -Description 'SMBv1 is enabled' `
+                -Detail @('Unauthenticated, unsigned, and the transport for every wormable SMB',
+                          'bug there has ever been. Nothing made this decade needs it.') `
+                -Fix @('Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force') `
+                -Card 'CARD W12'
+        } else { Clean 'SMBv1 is disabled' }
+    } catch { }
+    try {
+        if (-not $smbCfg.RequireSecuritySignature) {
+            Report -Severity 'AMBER' -Check 'smbsign' -Subject 'RequireSecuritySignature' `
+                -Description 'SMB signing is not required' `
+                -Detail @('Without it, an attacker who can get a machine to authenticate to',
+                          'them relays that authentication to this box and acts as that',
+                          'account. No password or hash is ever cracked.') `
+                -Fix @('Set-SmbServerConfiguration -RequireSecuritySignature $true -Force') `
+                -Card 'CARD W12'
+        } else { Clean 'SMB signing is required' }
+    } catch { }
+}
+
+$shares = @()
+try { $shares = @(Get-SmbShare -ErrorAction Stop | Where-Object { $_.Name -notmatch '\$$' }) } catch { }
+foreach ($sh in $shares) {
+    try {
+        foreach ($a in (Get-SmbShareAccess -Name $sh.Name -ErrorAction Stop)) {
+            if ($a.AccessControlType -ne 'Allow') { continue }
+            $acct = [string]$a.AccountName
+            if ($acct -notmatch '(?i)^(Everyone|BUILTIN\\Users|NT AUTHORITY\\Authenticated Users|ANONYMOUS LOGON)$') { continue }
+            if ($a.AccessRight -notmatch '(?i)Full|Change') { continue }
+            Report -Severity 'RED' -Check 'share' -Subject ('{0} ({1})' -f $sh.Name, $sh.Path) `
+                -Description ('shared to {0} with {1} access' -f $acct, $a.AccessRight) `
+                -Detail @('Anyone who can reach port 445 can write here. If anything on this',
+                          'path is ever executed, that is remote code execution with no',
+                          'credential at all.') `
+                -Fix @(("Get-SmbShareAccess -Name {0}" -f (Q $sh.Name)),
+                       ("Revoke-SmbShareAccess -Name {0} -AccountName {1} -Force" -f (Q $sh.Name), (Q $acct)),
+                       ("# or remove the share: Remove-SmbShare -Name {0} -Force" -f (Q $sh.Name))) `
+                -Card 'CARD W12'
+        }
+    } catch { }
+}
+if (@($shares).Count -gt 0) { Clean ("{0} non-administrative share(s) reviewed" -f @($shares).Count) }
+
+$tsPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+$rdpDeny = Get-RegValue -Path $tsPath -Name 'fDenyTSConnections'
+$rdpOn   = ($null -ne $rdpDeny -and [int]$rdpDeny -eq 0)
+if ($rdpOn) {
+    $nla = Get-RegValue -Path ($tsPath + '\WinStations\RDP-Tcp') -Name 'UserAuthentication'
+    if ($null -eq $nla -or [int]$nla -ne 1) {
+        Report -Severity 'RED' -Check 'rdpnla' -Subject 'UserAuthentication' `
+            -Description 'RDP is enabled without Network Level Authentication' `
+            -Detail @('Without NLA the box builds a full desktop session BEFORE anyone',
+                      'proves who they are. That is both a way in and a way to exhaust',
+                      'the box with connections.') `
+            -Fix @(("Set-ItemProperty -Path '{0}\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1" -f $tsPath)) `
+            -Card 'CARD W10'
+    } else { Clean 'RDP requires Network Level Authentication' }
+
+    $rdu = @()
+    try { $rdu = @(Get-LocalGroupMember -Group 'Remote Desktop Users' -ErrorAction Stop) } catch { }
+    foreach ($m in $rdu) {
+        $mn = ''
+        try { $mn = ([string]$m.Name -split '\\')[-1] } catch { }
+        if ([string]::IsNullOrWhiteSpace($mn)) { continue }
+        if (Test-CcdcListContains -Needle $mn -List $allowedUsers) { continue }
+        Report -Severity 'AMBER' -Check 'rdpusers' -Subject $mn `
+            -Description 'can log in over RDP but is not named in the packet' `
+            -Detail @('Remote Desktop Users is a quieter place to hide access than',
+                      'Administrators, and it is rarely looked at.') `
+            -Fix @(("Remove-LocalGroupMember -Group 'Remote Desktop Users' -Member {0}" -f (Q $mn))) `
+            -Card 'CARD W10'
+    }
+    if (@($rdu).Count -gt 0) { Clean ("{0} member(s) of Remote Desktop Users reviewed" -f @($rdu).Count) }
 }
 
 # =============================================================================
@@ -764,13 +1149,13 @@ Save-CcdcFindings
 if (-not $Quiet) {
     Write-Host ''
     Write-Host '=================================================================='
-    if ($script:redBuf.Count -gt 0) {
+    if (@($script:redBuf).Count -gt 0) {
         Write-Host ''
         Write-Host ('  RED - act on these now ({0})' -f $script:redCount) -ForegroundColor Red
         Write-Host ''
         foreach ($l in $script:redBuf) { Write-Host $l }
     }
-    if ($script:amberBuf.Count -gt 0) {
+    if (@($script:amberBuf).Count -gt 0) {
         Write-Host ''
         Write-Host ('  AMBER - this may well be yours; you decide ({0})' -f $script:amberCount) -ForegroundColor Yellow
         Write-Host ''

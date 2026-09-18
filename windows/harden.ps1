@@ -348,7 +348,7 @@ if ($steps -contains 'Services') {
     $protect += Get-CcdcList -Config $cfg -Name 'CCDC_WINDOWS_SERVICES'
     $protect += Get-CcdcList -Config $cfg -Name 'CCDC_PROTECT_SERVICES'
 
-    if ($disable.Count -eq 0) {
+    if (@($disable).Count -eq 0) {
         Note 'CCDC_WINDOWS_DISABLE_SERVICES is empty, so nothing is disabled here.'
         Note 'That is the safe default. Candidates worth considering, if the packet does not need them:'
         Note '   RemoteRegistry  Spooler(PrintNightmare)  SSDPSRV  upnphost  WinRM  Fax  TapiSrv'

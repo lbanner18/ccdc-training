@@ -216,7 +216,7 @@ lab/                      building the practice targets:
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (428 assertions, non-root;
+  self-test.sh            runs every suite below (429 assertions, non-root;
                           391 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no

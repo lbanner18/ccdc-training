@@ -114,11 +114,11 @@ function New-CcdcPassword {
         $rng.GetBytes($bytes); [void]$chars.Add($s[$bytes[0] % $s.Length])
     }
     $all = -join $sets
-    while ($chars.Count -lt $Length) {
+    while (@($chars).Count -lt $Length) {
         $rng.GetBytes($bytes); [void]$chars.Add($all[$bytes[0] % $all.Length])
     }
     # Shuffle, so the first four are not always one-per-class.
-    for ($i = $chars.Count - 1; $i -gt 0; $i--) {
+    for ($i = @($chars).Count - 1; $i -gt 0; $i--) {
         $rng.GetBytes($bytes); $j = $bytes[0] % ($i + 1)
         $t = $chars[$i]; $chars[$i] = $chars[$j]; $chars[$j] = $t
     }
@@ -229,7 +229,7 @@ if ($RotateAll) {
     }
 }
 
-if ($targets.Count -gt 0) {
+if (@($targets).Count -gt 0) {
     Write-Host '  PASSWORD ROTATION'
     if ($IncludeScoredUsers) {
         Write-Host ''
@@ -288,7 +288,7 @@ if ($Disable) {
     Write-Host ''
 }
 
-if (-not $Apply -and ($CreateAdmin -or $targets.Count -gt 0 -or $Disable)) {
+if (-not $Apply -and ($CreateAdmin -or @($targets).Count -gt 0 -or $Disable)) {
     Write-Host '  DRY RUN. Nothing above happened. Add -Apply.'
     Write-Host ''
 }

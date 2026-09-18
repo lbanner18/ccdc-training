@@ -532,7 +532,7 @@ PowerShell command run on the box lands in
 including decoded `-enc` payloads.
 
 ```powershell
-.\windows\audit.ps1 -Config CONFIG -Apply      # this and the rest of the logging setup
+.\windows\harden.ps1 -Config CONFIG -Only Logging -Apply   # this and the rest of the logging setup
 ```
 
 By hand:
@@ -633,6 +633,222 @@ Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 
 
 ---
 
+## CARD W11 — service permissions, and WMI persistence
+
+These are the two that pass every other card. A service here can have the right
+path, be properly quoted, run as a stock account, and still be a one-command
+takeover. A WMI subscription is not a file, a service, a task or a run key, so
+W2, W3, W4 and W5 all miss it.
+
+### `svcacl` — a service ordinary users may reconfigure
+
+A service's permissions say who may **change** it, which is a different question
+from who it runs as.
+
+```powershell
+# what the kit found, in full
+sc.exe sdshow SERVICE
+
+# every service, so you can see the shape of a normal one
+Get-Service | ForEach-Object { "$($_.Name): $(sc.exe sdshow $_.Name)" }
+```
+
+Read the SDDL by field, not by eye. Each `(...)` is one ACE:
+
+```
+(A ; ; CCDCLCSWRPWPDTLOCRSDRCWDWO ; ; ; AU)
+ ^     ^                                ^
+ allow rights                           who
+```
+
+The rights that matter, and the reason:
+
+| Code | Means | Why it is a takeover |
+|---|---|---|
+| `DC` | change config | point it at your binary, restart it |
+| `WD` | write DAC | grant yourself `DC`, then do the above |
+| `WO` | write owner | take ownership, then rewrite the DAC |
+| `SD` | delete | remove a scored service outright |
+
+**`WD` is two different things depending on which field it is in.** In the
+rights field it is WRITE_DAC. In the *who* field it is Everyone. Reading the
+ACE as one string gets this wrong.
+
+Principals to worry about: `AU` Authenticated Users, `BU` Users, `IU`
+Interactive, `WD` Everyone, `AN` Anonymous.
+
+**Fix — put back the stock DACL:**
+```powershell
+sc.exe sdset SERVICE "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)"
+```
+That is: SYSTEM may run it, Administrators may do anything, Interactive and
+Service may look. Verify with `sc.exe sdshow SERVICE`.
+
+### `svcdiracl` — the same takeover, without touching the service
+
+If you can write into the directory a service binary lives in, you replace the
+`.exe` and wait for a restart. **No service configuration changes**, so
+anything watching service config sees nothing.
+
+```powershell
+icacls "C:\path\to\dir"
+icacls "C:\path\to\dir" /remove:g "BUILTIN\Users"
+icacls "C:\path\to\dir" /remove:g "Everyone"
+```
+
+`(OI)(CI)M` means Modify, inherited by files and folders. On a directory that
+service binaries run from, for a group like Users, that is the finding.
+
+### `wmisub` — persistence nothing else on this page finds
+
+Three objects in `root\subscription`: a **filter** (the trigger), a **consumer**
+(the payload) and a **binding** joining them.
+
+```powershell
+# the payload
+Get-CimInstance -Namespace root/subscription -ClassName CommandLineEventConsumer |
+    Format-List Name, CommandLineTemplate
+Get-CimInstance -Namespace root/subscription -ClassName ActiveScriptEventConsumer |
+    Format-List Name, ScriptText
+
+# the trigger - READ THIS BEFORE DELETING, it is incident-report material
+Get-CimInstance -Namespace root/subscription -ClassName __EventFilter |
+    Format-List Name, Query
+
+# what is wired to what
+Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding |
+    Format-List Filter, Consumer
+```
+
+**Remove all three, or it comes back.** A binding whose consumer is gone is
+harmless, but a filter and consumer left behind can be re-bound in one command.
+
+```powershell
+Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding |
+    Where-Object { $_.Consumer -match 'NAME' } | Remove-CimInstance
+Get-CimInstance -Namespace root/subscription -ClassName CommandLineEventConsumer |
+    Where-Object { $_.Name -eq 'NAME' } | Remove-CimInstance
+Get-CimInstance -Namespace root/subscription -ClassName __EventFilter |
+    Where-Object { $_.Name -eq 'NAME' } | Remove-CimInstance
+```
+
+The query in the filter tells you **what they were waiting for** — a logon, a
+process starting, a time of day. Write that down before you delete it.
+
+---
+
+## CARD W12 — SMB: shares, signing, and SMBv1
+
+On Linux, file sharing is a daemon you can uninstall. Here it is the operating
+system, and it is listening whether you think about it or not.
+
+```powershell
+Get-SmbServerConfiguration | Format-List EnableSMB1Protocol, RequireSecuritySignature, EnableSecuritySignature
+Get-SmbShare
+Get-SmbSession          # who is connected right now
+Get-SmbOpenFile         # what they have open
+```
+
+### `smbv1`
+
+```powershell
+Set-SmbServerConfiguration -EnableSMB1Protocol $false -Force
+```
+Nothing made this decade needs it. If a finding says it is on, somebody either
+turned it on or left it on.
+
+### `smbsign`
+
+```powershell
+Set-SmbServerConfiguration -RequireSecuritySignature $true -Force
+```
+Without signing, an attacker who can make any machine authenticate to them
+**relays** that authentication here and acts as that account. Nothing is
+cracked, and no password is ever learned. This is the single highest-value SMB
+setting on the box.
+
+### `share` — a share anyone can write to
+
+```powershell
+Get-SmbShareAccess -Name NAME
+Revoke-SmbShareAccess -Name NAME -AccountName 'Everyone' -Force
+Remove-SmbShare -Name NAME -Force           # if nothing needs it
+```
+
+Shares ending in `$` (`C$`, `ADMIN$`, `IPC$`) are administrative and normal —
+the kit skips them. A **named** share granting `Everyone` or `Authenticated
+Users` Full or Change is the finding. If anything on that path is ever
+executed, that is remote code execution with no credential at all.
+
+**Kicking somebody off a share:**
+```powershell
+Get-SmbSession | Format-Table SessionId, ClientComputerName, ClientUserName
+Close-SmbSession -SessionId ID -Force
+```
+
+---
+
+## CARD W13 — credentials sitting in memory
+
+**This card has no Linux equivalent.** On Linux a password is a hash in
+`/etc/shadow` and an attacker has to crack it. Here it is also material in LSASS
+that a local administrator can read and **replay on another machine** without
+ever learning the password.
+
+That is why one compromised Windows box becomes all of them, and why these
+three settings are worth more than their size suggests.
+
+### `wdigest` — cleartext passwords in memory
+
+```powershell
+Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' -Name UseLogonCredential
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest' -Name UseLogonCredential -Value 0
+```
+
+**Nothing legitimate needs this.** It has been off by default since 2012 R2, so
+finding it on means somebody turned it on, and the only reason to is to read
+plaintext passwords out of memory.
+
+If you find it on: **every password used on this box since then is theirs.**
+Rotate, and say so in the incident report.
+```powershell
+.\windows\users.ps1 -Config CONFIG -RotateAll -Apply
+```
+
+### `lsappl` — LSA not running protected
+
+```powershell
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name RunAsPPL -Value 1 -Type DWord
+```
+
+Makes the ordinary ways of reading LSASS fail, and logs the attempt.
+
+**Needs a reboot.** Decide in the first fifteen minutes or not at all — do not
+reboot a scored box at minute 50 for a hardening nicety.
+
+### `nullsession` — anonymous account enumeration
+
+```powershell
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name RestrictAnonymousSAM -Value 1 -Type DWord
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name RestrictAnonymous    -Value 1 -Type DWord
+```
+
+This is how an unauthenticated host on your segment gets the user list it is
+about to spray passwords against.
+
+### What you cannot fix from here
+
+Pass-the-hash works even with all three set correctly — the hash is a valid
+credential by design. What actually limits it is not reusing the local
+Administrator password across machines. If you have time and more than one
+Windows box, make them different:
+
+```powershell
+.\windows\users.ps1 -Config CONFIG -Rotate Administrator -Apply
+```
+
+---
+
 ## The order to work these in
 
 1. **W1 `scoreduser`** and **W2 `scoredservice`** — anything scored that is down. Points, right now.
@@ -641,8 +857,17 @@ Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name 
 4. **W6** — Defender back on, exclusions gone.
 5. **W8** — logging on, before you need it.
 6. **W4, W3, W2** — the persistence hunt: autostart, tasks, services.
-7. **W5** — processes and ports.
-8. **W9** — back up what you now have.
+7. **W11** — service permissions and WMI. These pass every check above, so they
+   are the ones still standing after a hunt that looked successful.
+8. **W13** — WDigest off. One registry write, and it decides whether a
+   compromise here becomes a compromise everywhere.
+9. **W12** — SMB signing and any share granting Everyone.
+10. **W5** — processes and ports.
+11. **W9** — back up what you now have.
+
+W13's `RunAsPPL` is the one item with a reboot attached. Do it in the first
+fifteen minutes or leave it — a reboot late in the round costs uptime, and
+uptime is half the score.
 
 Then re-run triage. Anything that came back is a mechanism you have not found
 yet, and that is the most important sentence on this page.

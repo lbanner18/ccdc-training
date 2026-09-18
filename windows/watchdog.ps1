@@ -115,9 +115,9 @@ if ($Status) {
         # A restart is not a success story. Surface the count so a service that
         # keeps dying reads as a finding rather than as the watchdog working.
         $restarts = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'RESTARTED' })
-        if ($restarts.Count -gt 0) {
+        if (@($restarts).Count -gt 0) {
             Write-Host ''
-            Write-Host ('  {0} restart(s) so far. That is not the watchdog working - it is' -f $restarts.Count) -ForegroundColor Yellow
+            Write-Host ('  {0} restart(s) so far. That is not the watchdog working - it is' -f @($restarts).Count) -ForegroundColor Yellow
             Write-Host  '  something stopping your scored service repeatedly. Find out what:' -ForegroundColor Yellow
             Write-Host ('      .\windows\triage.ps1 -Config {0}' -f $Config)
             Write-Host  '      Get-WinEvent -LogName System -MaxEvents 60 | Where-Object Id -in 7034,7031,7036,7045'

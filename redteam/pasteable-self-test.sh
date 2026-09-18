@@ -20,6 +20,9 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 pass=0; fail=0
 ok() { pass=$((pass+1)); printf 'ok %s - %s\n' "$((pass+fail))" "$1"; }
 no() { fail=$((fail+1)); printf 'not ok %s - %s\n' "$((pass+fail))" "$1"; }
+# A check that could not run is not a check that passed. It says so and is not
+# counted either way, so the assertion total stays honest.
+skip() { printf 'skip - %s\n' "$1"; }
 
 test_root=$(mktemp -d "${TMPDIR:-/tmp}/ccdc-paste.XXXXXX") || exit 1
 trap 'rm -rf -- "$test_root"' EXIT INT TERM HUP
@@ -751,6 +754,47 @@ if [ -z "$delim" ]; then
 else
   no 'a sed alternation is being read as an escaped delimiter and matches nothing'
   printf '%s\n' "$delim" | sed 's/^/    /' | head -6
+fi
+
+# --------------------- a $_ inside a DOUBLE-quoted PowerShell string
+# "... $_.Resources ..." does not print $_. PowerShell interpolates it, $_ is
+# empty outside a pipeline, and what gets printed is ".Resources" - a command
+# that fails the moment the operator pastes it. Like the sed case above it is
+# silent: the script parses, runs, and prints something subtly broken.
+#
+# Measured: the ifeoempty finding printed
+#   Get-MpThreatDetection | Where-Object { .Resources -match '...' }
+# on the lab box, which is a syntax error in the one command the operator was
+# being told to run.
+#
+# This cannot be done with a regex, and the first attempt at one proved it: a
+# closing quote looks exactly like an opening quote, so `"...text..." -f
+# $_.Message` read as a hit when the $_ was outside the string entirely. It
+# flagged 17 correct catch blocks and would have trained everyone to ignore it.
+# Ask the parser instead - it is the only thing that knows which quote was
+# which - and distinguish the two forms by how the string read them:
+#   "$($_.Exception.Message)"  a SubExpressionAst. Deliberate. Fine.
+#   "$_.Resources"             a bare variable, with ".Resources" left as text.
+ps_lint="$ROOT/redteam/lib/ps-interpolation-lint.ps1"
+ps_targets=()
+for t in "$ROOT"/windows/*.ps1 "$ROOT"/windows/lib/*.ps1 "$ROOT"/redteam/windows-*.ps1; do
+  [ -f "$t" ] && ps_targets+=("$t")
+done
+pwsh_bin=""
+command -v pwsh >/dev/null 2>&1 && pwsh_bin=$(command -v pwsh)
+[ -n "${CCDC_PWSH:-}" ] && [ -x "${CCDC_PWSH}" ] && pwsh_bin=$CCDC_PWSH
+if [ -z "$pwsh_bin" ] || [ ! -f "$ps_lint" ]; then
+  skip 'no $_ is interpolated away inside a double-quoted PowerShell string (needs pwsh)'
+else
+  quoted=$(printf "'%s'," "${ps_targets[@]}")
+  psvar=$("$pwsh_bin" -NoProfile -Command \
+    "& '$ps_lint' -Path @(${quoted%,})" 2>/dev/null)
+  if [ -z "$psvar" ]; then
+    ok 'no $_ is interpolated away inside a double-quoted PowerShell string'
+  else
+    no 'a printed PowerShell command has had its $_ eaten by string interpolation'
+    printf '%s\n' "$psvar" | sed 's/^/    /' | head -6
+  fi
 fi
 
 # =========================================================================
