@@ -326,6 +326,88 @@ foreach ($f in (Microsoft.PowerShell.Management\Get-ChildItem -Path (Join-Path $
 if ($ps7.Count -eq 0) { ok 'every Windows script parses and stays within PowerShell 5.1' }
 else { nope ("PowerShell 5.1 problems: {0}" -f ($ps7 -join '; ')) }
 
+# =============================================================================
+# sentry.ps1 - the only Windows tool that applies a batch of changes from a list
+#
+# Its safety rests on four properties. None of them is visible in a normal run,
+# because a run where they hold looks exactly like a run where they do not
+# until the day a sweep disables the account the scoring engine logs in with.
+# =============================================================================
+$sentryPath = Join-Path $root 'windows\sentry.ps1'
+if (-not (Test-Path -LiteralPath $sentryPath)) {
+    nope 'windows\sentry.ps1 is missing'
+} else {
+    $sentryTxt = Get-Content -LiteralPath $sentryPath -Raw
+
+    if ($sentryTxt -match '\[switch\]\$Apply') { ok 'sentry.ps1 cannot change anything without -Apply' }
+    else { nope 'sentry.ps1 has no -Apply gate' }
+
+    if ($sentryTxt -match 'Assert-CcdcPacketEntered') { ok 'sentry.ps1 refuses to act on an empty packet list' }
+    else { nope 'sentry.ps1 applies changes without checking the packet lists are filled in' }
+
+    # THE property. A sweep must never take an AMBER-tier action: those stop a
+    # port, disable an account or remove a group membership, and on a box you
+    # do not fully understand yet that is the self-inflicted outage the whole
+    # kit exists to avoid. Named by number they apply like anything else.
+    if ($sentryTxt -match '\$null -eq \$wanted -and \$tier -ne ''RED''') {
+        ok 'a bulk approve cannot apply an AMBER-tier action'
+    } else {
+        nope 'the guard that stops a sweep taking AMBER actions is gone or changed shape'
+    }
+
+    # The approved item is re-verified by IDENTITY against a fresh scan, so a
+    # finding that appeared after -Status cannot inherit a number.
+    if ($sentryTxt -match '\$_\.Check -eq \$check -and \$_\.Subject -eq \$subject') {
+        ok 'an approved item is re-verified by check and subject, not by position'
+    } else {
+        nope 'sentry.ps1 no longer re-verifies the approved identity against a fresh scan'
+    }
+
+    # Every action must be complete, correctly tiered, and name a check that
+    # triage.ps1 can actually emit - a Do with no matching detector is an action
+    # that can never run, and a typo'd key is silently never offered.
+    $triageSrc = Get-Content -LiteralPath (Join-Path $root 'windows\triage.ps1') -Raw
+    # [a-z0-9], not [a-z]: check names carry digits (smbv1), and a charset that
+    # cannot match one makes a real action look like a typo.
+    $triageChecks = @([regex]::Matches($triageSrc, "Check\s+'([a-z0-9]+)'") |
+                      ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $tokens = $null; $errs = $null
+    $sentryAst = [System.Management.Automation.Language.Parser]::ParseFile($sentryPath, [ref]$tokens, [ref]$errs)
+    $tableAst = $sentryAst.Find({
+        param($n) $n -is [System.Management.Automation.Language.HashtableAst] -and
+                  $n.KeyValuePairs.Count -gt 6 }, $true)
+    $bad = @()
+    $actionNames = @()
+    if ($null -eq $tableAst) {
+        $bad += 'could not find the action table'
+    } else {
+        foreach ($kv in $tableAst.KeyValuePairs) {
+            $name = $kv.Item1.Extent.Text.Trim("'", '"')
+            $actionNames += $name
+            $body = $kv.Item2.Extent.Text
+            if ($body -notmatch "Tier\s*=\s*'(RED|AMBER)'") { $bad += "$name has no RED/AMBER tier" }
+            if ($body -notmatch 'What\s*=') { $bad += "$name has no What (the sentence shown before applying)" }
+            if ($body -notmatch 'Do\s*=')   { $bad += "$name has no Do" }
+            if ($triageChecks -notcontains $name) { $bad += "$name is not a check triage.ps1 emits" }
+        }
+    }
+    if ($bad.Count -eq 0) {
+        ok ("all {0} sentry actions are complete, tiered, and match a real triage check" -f $actionNames.Count)
+    } else {
+        nope ("sentry action table problems: {0}" -f ($bad -join '; '))
+    }
+
+    # The four findings deliberately left un-automatable. If one of these grows
+    # an action, it should be a decision somebody argued for, not a drive-by.
+    $neverAuto = @('fwinbound','lsappl','svcpath','svcdiracl')
+    $grew = @($neverAuto | Where-Object { $actionNames -contains $_ })
+    if ($grew.Count -eq 0) {
+        ok 'the findings with no safe automatic fix are still not offered'
+    } else {
+        nope ("these became automatable without a decision: {0}" -f ($grew -join ', '))
+    }
+}
+
 # Nothing may change the box without -Apply. The whole kit's bargain.
 foreach ($t in @('harden.ps1','users.ps1')) {
     $txt = Get-Content -LiteralPath (Join-Path $root "windows\$t") -Raw

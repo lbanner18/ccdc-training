@@ -107,12 +107,14 @@ function Note { param([string]$m) Write-Host ('    note:   {0}' -f $m); [void]$s
 function Assert-StillUp {
     param([string]$AfterStep)
     if (-not $Apply) { return $true }
-    Write-Host '    ...re-checking scored services' -NoNewline
+    # Whole lines only: -NoNewline is dropped when the run is redirected to a
+    # file, which splits the message across two lines in the transcript people
+    # actually keep.
+    Write-Host '    ...re-checking scored services'
     if (Test-CcdcScoredServices -Config $cfg) {
-        Write-Host '  still answering.' -ForegroundColor Green
+        Write-Host '    still answering.' -ForegroundColor Green
         return $true
     }
-    Write-Host ''
     Write-Host ''
     Write-Host ('  A SCORED SERVICE STOPPED ANSWERING AFTER: {0}' -f $AfterStep) -ForegroundColor Red
     Write-Host '  Stopping here rather than continuing down the list and making it' -ForegroundColor Red
