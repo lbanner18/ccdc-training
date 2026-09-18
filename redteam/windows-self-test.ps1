@@ -219,7 +219,7 @@ function Get-ChildItem {
 Write-Host ''
 Write-Host '== windows triage, against planted fixtures =='
 $out = & (Join-Path $root 'windows\triage.ps1') -Config $cfgPath -Quiet -NoEvidence 2>&1
-$findingsFile = Join-Path $work 'state\findings.txt'
+$findingsFile = Join-Path (Join-Path $work 'state') 'findings.txt'
 
 if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $findingsFile)) {
     nope 'triage wrote a findings file'
@@ -280,6 +280,13 @@ if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $findingsFile))
 # =============================================================================
 # THE CONTRACTS THAT HOLD WHATEVER THE FIXTURES ARE
 # =============================================================================
+
+# A path helper that returns nothing on failure writes files into whatever the
+# current directory happens to be. This one got as far as committing a findings
+# file called ".tmp" to the repo root.
+$stray = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $root -Filter '*.tmp' -File -ErrorAction SilentlyContinue)
+if ($stray.Count -eq 0) { ok 'no tool wrote a stray temp file into the repo' }
+else { nope ("a tool wrote into the repo root: {0}" -f (($stray | ForEach-Object Name) -join ', ')) }
 
 # Every card a tool names has to exist. A reference pointing at nothing costs a
 # page-turn to discover, mid-event, which is worse than no reference at all.

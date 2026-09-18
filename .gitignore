@@ -10,3 +10,8 @@ backups/
 *.env
 !config/example.env
 evidence/
+
+# Windows tools write state under CCDC_WIN_ROOT; a stray .tmp here means a
+# path bug, not something to keep.
+.tmp
+*.tmp

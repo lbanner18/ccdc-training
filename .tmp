@@ -1,9 +1,0 @@
-AMBER|admincheck|Administrators|could not read the Administrators group
-AMBER|scoreduser|Administrator|named in the packet but not a local account here
-AMBER|scoreduser|banneluk|named in the packet but not a local account here
-AMBER|scoreduser|svc_web|named in the packet but not a local account here
-AMBER|svccheck|Win32_Service|could not enumerate services
-AMBER|taskcheck|ScheduledTasks|no ScheduledTasks module here, so tasks were not checked
-AMBER|netcheck|NetTCPIP|no NetTCPIP module, so listening ports were not checked from PowerShell
-AMBER|fwcheck|NetSecurity|no NetSecurity module here, so the firewall was not checked
-AMBER|psloggingoff|ScriptBlockLogging|PowerShell script block logging is not enabled

@@ -42,7 +42,23 @@ if ($env:CCDC_WIN_ROOT) {
 
 function Get-CcdcPath {
     param([Parameter(Mandatory)][string]$Leaf)
-    Join-Path $script:CcdcRoot $Leaf
+    # Fail loudly rather than returning nothing.
+    #
+    # A first version let Join-Path fail quietly when the root was unusable -
+    # a drive that does not exist, an unset ProgramData - and returned an empty
+    # string. Callers then built "$path.tmp" from it and wrote a findings file
+    # called ".tmp" into whatever the current directory happened to be. It got
+    # as far as being committed to this repo.
+    if ([string]::IsNullOrWhiteSpace($script:CcdcRoot)) {
+        throw "CCDC root directory is not set. Set CCDC_WIN_ROOT, or run where %ProgramData% exists."
+    }
+    # Split on backslash so the same call works when this runs under PowerShell
+    # on Linux, which is where the self-test lives.
+    $p = $script:CcdcRoot
+    foreach ($seg in ($Leaf -split '[\\/]+' | Where-Object { $_ -ne '' })) {
+        $p = Join-Path $p $seg
+    }
+    return $p
 }
 
 function Initialize-CcdcRoot {
@@ -278,6 +294,9 @@ function Clear-CcdcFindings { $script:CcdcFindings = New-Object System.Collectio
 
 function Save-CcdcFindings {
     param([string]$Path = (Get-CcdcPath 'state\findings.txt'))
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        throw "refusing to write findings to an empty path"
+    }
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
     # Written to a temporary file and moved into place, so a reader never sees
