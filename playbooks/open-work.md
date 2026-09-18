@@ -1,7 +1,11 @@
 # Open work
 
 The running checklist. Anything promised and not yet delivered lives here until it is
-done. Audit date: 2026-09-16. Competition: 2026-09-26.
+done. Audit date: 2026-09-18. Competition: 2026-09-26.
+
+**Picking this up cold?** Jump to the HANDOFF section under "Windows" — it has
+how to reach the lab box, the conventions that are not visible in the code, and
+what to do next in priority order.
 
 Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
 
@@ -123,17 +127,25 @@ suite. This is the argument for running it rather than reading it.
    same unit file had two different safety levels depending on which detector
    named it first.
 
-## Windows (started 2026-09-17, after the Windows/firewall training)
+## Windows (started 2026-09-17; proven on real Windows 2026-09-18)
 
 Built to the **Basic Windows Hardening Checklist** from the team's own course
 material (`ccdc-coursework/.../Basic hrdning Chklst.pdf`), which is the closest
 thing to a spec anyone has handed us.
 
+Eight tools, 4,976 lines, 58 triage checks. **Every one has now run on a real
+Windows Server 2022 box**, not only against stubs.
+
 - [x] `lib/Common.ps1` — config (the SAME file the Linux tools read), findings
       in the same `SEV|check|subject|desc` format, evidence, scored-service
       checks, and a capability probe that says out loud which checks cannot run
       on this box rather than skipping them silently.
-- [x] `triage.ps1` — 8 check groups, RED/AMBER/NOTE, every finding printing the
+- [x] `lib/Provenance.ps1` — "is this file explained?" via Authenticode. Never
+      says a file is fine because it is signed; names the PUBLISHER and lets
+      that be disbelieved. Knows that most of Windows is CATALOG signed, so an
+      unsigned file under a system root is reported as a catalog question, not
+      as a bad binary.
+- [x] `triage.ps1` — 58 checks, RED/AMBER/NOTE, every finding printing the
       command that fixes it and a card reference.
 - [x] `harden.ps1` — the checklist in order, `-Apply` gated, scored re-check
       after every step, and the firewall step writes your own access rules
@@ -142,24 +154,160 @@ thing to a spec anyone has handed us.
       touch a scored account without `-IncludeScoredUsers`.
 - [x] `watchdog.ps1` — restarts stopped scored services, re-enables disabled
       scored ACCOUNTS, installs as a SYSTEM scheduled task.
-- [x] `playbooks/windows-cards.md` — 10 cards, asserted to exist.
+- [x] `recon.ps1` — rewritten 2026-09-18. Was the last file predating
+      `lib/Common.ps1`. Now records a GAP as a gap: a collection that failed
+      writes a file saying so rather than an empty one.
+- [x] `sentry.ps1` — the approval queue. 21 of the 58 checks are automatable;
+      `-Status` freezes a numbered snapshot, `-Approve` re-verifies identity
+      against a fresh scan, a sweep takes SWEEP-tier only.
+- [x] `baseline.ps1` — configuration drift. Scoped to config plus the
+      executable surface (~250 files, 9s), NOT the filesystem (~14,000 files,
+      5 min, measured).
+- [x] `canary.ps1` — tripwires via SACL + audit policy + event 4663, which
+      reports WHO read a decoy. Hashing cannot answer that question.
+- [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 36 assertions against planted fixtures,
-      wired into `redteam/self-test.sh` (skips where pwsh is absent).
+- [x] `redteam/windows-self-test.ps1` — 52 assertions against planted fixtures.
+- [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
+      survived rather than assuming (Defender eats some fixtures in real time).
 
 ### NOT YET TRUE OF THE WINDOWS HALF — read before trusting it
 
-- [ ] **It has never run on Windows.** Every assertion is against stubs written
-      from documented cmdlet shapes on a Linux host. A green run means "the
-      logic is right", never "it works". The lab VM (`ccdc-win`) is being built
-      to fix exactly this.
-- [ ] No approval queue. The Linux side has `sentry.sh` with numbered items and
-      per-item approve commands; Windows prints the command and you paste it.
-- [ ] No baseline/drift. Nothing freezes a known-good Windows box.
-- [ ] No domain hardening. `users.ps1` refuses to run on a DC and hands over the
-      AD commands instead. GPO, delegation and AD ACLs are by hand.
-- [ ] `recon.ps1` is still the original stub; it predates `lib/Common.ps1` and
-      does not use it.
+- [ ] **No domain hardening.** `users.ps1` refuses to run on a DC and hands over
+      the AD commands instead. GPO, delegation, AD ACLs, Kerberos, ADCS: all by
+      hand. This is the largest remaining gap by far and it is deliberate — see
+      the handoff below for why it was not attempted before the tryout.
+- [ ] **No tamper-proof watchdog.** Linux has `guardian.sh`. On Windows the
+      watchdog is an ordinary scheduled task and an administrator can delete it.
+- [ ] **Autostart coverage is 4 registry keys + the Startup folders.** Autoruns
+      knows ~200 locations. `baseline.ps1` shells out to `autorunsc.exe` when it
+      is present; when it is not, that tail is unwatched.
+- [ ] **`sentry.ps1` acts on 21 of 58 checks.** The rest print a command because
+      their fix needs judgement. Four are deliberately never automatable and the
+      suite asserts it: `fwinbound`, `lsappl`, `svcpath`, `svcdiracl`.
+- [ ] **The baseline does not cover files nothing wires to run.** By design.
+
+---
+
+# HANDOFF — read this first if you did not write the above
+
+Written 2026-09-18. Competition **2026-09-26**. Luke competes **solo**.
+
+## Getting to the lab box
+
+**`ccdc-win` at 192.168.100.142. Use WinRM (5985), not SSH.** SSH is not
+installed and cannot be: the unattend runs `Add-WindowsCapability -Online -Name
+OpenSSH.Server`, which downloads from Windows Update, and the `ccdc-lab`
+network has no `<forward>` element so there is no route out. The step fails,
+the rest of provisioning continues, and the box comes up with
+`C:\ccdc-lab-ready.txt` present and port 22 closed. That looks like a
+provisioning failure and is not one.
+
+There is no WinRM client on the Linux host either. `pip install pywinrm
+requests_ntlm` into a venv, then `winrm.Session(..., transport="ntlm")`.
+Administrator / `CcdcLab!2026`, lab only, isolated network.
+
+Three things bite over WinRM and each cost real time:
+
+- **`run_ps` sends `powershell -encodedcommand`, and Windows caps a command
+  line at 8191 characters.** A 6000-character script becomes ~16000 encoded and
+  fails with an EMPTY stderr. Keep each call under ~2000 characters, or write to
+  a file on the box and fetch it in chunks.
+- **PowerShell exits 1 whenever the last statement sets `$?` false**, even when
+  the error was suppressed with `-ErrorAction SilentlyContinue`. `Remove-Item`
+  on a missing path is enough. Wrap remote scripts and `exit 0` explicitly.
+- **Responses truncate around 6KB** (`no element found: line 1, column 6088`).
+  Redirect with `*> file` and fetch the file rather than reading stdout.
+
+`win11` at 192.168.122.77 is **Luke's CI runner, not a target.** Do not
+snapshot, revert or plant on it. `ccdc-win` has a `clean-windows` snapshot;
+note that an internal snapshot fails on a running UEFI/pflash guest but works
+once it is shut off, and `virsh shutdown` is ignored when nobody is logged in
+at the console — use `shutdown /s /f` over WinRM.
+
+## Conventions that are not obvious from the code
+
+- **PowerShell 5.1 is the floor.** No `??`, `?.`, `&&`, `||`, `-Parallel`. A
+  token-stream check in `windows-self-test.ps1` fails the suite on any of them.
+- **`Set-StrictMode -Version 2.0` everywhere.** Reaching for a property that
+  does not exist THROWS. Guard with
+  `$o.PSObject.Properties.Name -contains 'X'`.
+- **Never `return ,$array`.** Functions return collections plainly; callers
+  always write `@()`. `return ,$a` is correct only for bare assignment — `@(f)`
+  re-wraps it into one element that is an empty array, and piping does the same.
+  There is a lint for this in `pasteable-self-test.sh`.
+- **One `Write-Host` per LINE, never per segment.** `-NoNewline` is dropped when
+  a run is redirected to a file, which splits a heading across three lines in
+  the transcript people keep.
+- **`ConvertTo-Json` needs an explicit `-Depth`.** 5.1 defaults to 2 and
+  silently writes `System.Collections.Hashtable` for anything deeper.
+- **A `$_` inside a double-quoted string is interpolated away.** There is a
+  parser-based lint at `redteam/lib/ps-interpolation-lint.ps1`; a regex cannot
+  do this job because a closing quote looks exactly like an opening one.
+- **Nothing mutates without `-Apply`**, and no destructive command identifies
+  its target by position in a list.
+- **Every tool says what it could NOT check.** A check that silently did not run
+  reads exactly like a check that found nothing, and that is the failure mode
+  this whole kit is written against.
+
+## How to verify anything you change
+
+```bash
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 445 assertions
+bash redteam/self-test.sh                             # 392, skips the Windows suite
+```
+
+The suite asserts its own assertion count against the README, so adding one
+means updating two numbers in `README.md`.
+
+**Green means the logic is right, never that it works.** The only thing that
+proves the second is the box. To prove something on it: push the kit, plant
+fixtures with `redteam/windows-plant.ps1 -IAcceptThisBoxIsDisposable` (needs
+`$env:CCDC_WIN_LAB = 1` as well — two interlocks, on purpose), run the tool,
+then `-Cleanup` and confirm the box returns to its prior state. A detector that
+is quiet on a clean box looks exactly like a detector that is broken.
+
+## What to do next, in the order I would do it
+
+**1. Domain / Active Directory — only if the packet says there is a domain.**
+The single biggest gap. `users.ps1` refuses on a DC by design. If the tryout
+has a domain controller, the highest-value additions are: `krbtgt` password age,
+DCSync rights (`Get-ACL` on the domain head for
+`DS-Replication-Get-Changes`), GPO startup scripts, SYSVOL `cpassword`,
+AdminSDHolder, and unconstrained delegation. **Do not start this speculatively**
+— it is a week of work, and a four-device tryout probably has no forest. Read
+`playbooks/environment-reality.md` first: the tryout is one Linux box, one
+Windows box, a Splunk indexer and a firewall.
+
+**2. Wire `canary.ps1 -Check` into `watchdog.ps1`.** The watchdog already runs
+as SYSTEM on an interval. `-Check` is read-only, loopable, and exits 2 on a
+trip. This is maybe twenty lines and it turns tripwires from a thing you
+remember to run into a thing that tells you.
+
+**3. `sentry.ps1` could offer more of the 58 checks.** `taskcmd`, `newtask`,
+`winlogon`, `svcaccount` all have reversible fixes. Each needs a `What`, a `Do`
+that captures evidence first, and a tier. The suite asserts every action names
+a real triage check.
+
+**4. A Windows equivalent of `surface.ps1 --table`.** Two Linux tools emit the
+table an inject asks for directly. Windows has no equivalent and injects are
+half the score.
+
+**5. `guardian.ps1`.** Tamper-resistance against someone who already has
+Administrator is genuinely hard on Windows and worth the least of these. I did
+not attempt it. If you do, the honest version is probably a second scheduled
+task that re-registers the first, plus a service ACL on both — and it should
+say plainly in its own help that a determined administrator wins.
+
+## Things I would not change without asking Luke
+
+- `arm.sh` must never automatically mutate SSH/PAM/firewall/services.
+- `policy.sh` has no `--apply` by design; `fw.sh` stays out of `harden.sh`.
+- `harden.sh` keeps `--cut`/`--undo` — Luke overrode an earlier proposal to
+  make it propose-only, and the reasoning is recorded above under item A.
+- The `ccdc-lab` libvirt network has no `<forward>` element. That is
+  deliberate isolation, not an oversight.
+- Passwords are never typed on a command line (`net user NAME *` prompts).
 
 ## Linux changes from the same training (2026-09-17)
 
@@ -240,9 +388,19 @@ thing to a spec anyone has handed us.
 
 ## P3 — not code, deadline-bound
 
-- [ ] 13. **Tryout sign-up — due 2026-09-24.**
-- [ ] 14. Public-repo decision. Rule 5.6.1 wants three months public before the regional;
-      "private now, public on competition day" does not satisfy it.
+- [x] 13. **Tryout sign-up.** Done 2026-09-18.
+- [x] 14. Public-repo decision. **Made the repo public 2026-09-18**, to link it
+      on an application. Luke weighed the cost — the red team can read the
+      detection logic — and took it deliberately.
+      Two consequences worth remembering rather than rediscovering:
+      the gap documentation is the part that helps an opponent most (it is a
+      list of what the kit does NOT catch), and renaming files on the morning
+      of the competition does not help, because git history is permanent and a
+      public repo is forked and indexed within hours.
+      Scanned before publishing: no `.env`, key or `.pem` was ever committed,
+      no private-key blocks in history, no password assignments in tracked
+      files. `lab/provision.ps1` no longer carries an SSH key — it is a
+      template and `make-unattended-iso.sh` substitutes one at build time.
 - [x] 15. Reviewed all six drafts against their numbered asks. They hold up
       better than the audit implied: all six carry the memo, the commands, and
       the evidence step; the two without a "deliverable beyond the memo" line
