@@ -197,8 +197,11 @@ Save-Command 'defender' 'Defender status and exclusions' {
 Save-Command 'installed-software' 'installed software' {
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
+        # Not every uninstall key has a DisplayName, and under StrictMode 2.0
+        # reaching for a property that is not there throws rather than
+        # returning $null - so ask whether it exists first.
         Get-ItemProperty -Path $k -ErrorAction SilentlyContinue |
-            Where-Object { $_.DisplayName } |
+            Where-Object { $_.PSObject.Properties.Name -contains 'DisplayName' -and $_.DisplayName } |
             Select-Object DisplayName, DisplayVersion, Publisher, InstallDate
     }
 }
@@ -217,11 +220,17 @@ Save-Command 'system-events' 'service installs and unexpected stops' {
 
 # The hashes are what make this evidence rather than notes: they are how you
 # show afterwards that the record was not edited between collection and report.
+$sumsFile = Join-Path $dir 'SHA256SUMS.csv'
 try {
-    Get-ChildItem -File -LiteralPath $dir |
-        Get-FileHash -Algorithm SHA256 |
-        Select-Object Hash, @{n='File';e={ Split-Path -Leaf $_.Path }} |
-        Export-Csv -LiteralPath (Join-Path $dir 'SHA256SUMS.csv') -NoTypeInformation
+    # Materialise the file list BEFORE hashing. A streaming
+    # Get-ChildItem | Get-FileHash | Export-Csv writes SHA256SUMS.csv into the
+    # directory it is still enumerating, then tries to hash it while Export-Csv
+    # holds it open - "cannot access the file because it is being used by
+    # another process", on the last line of the run, after all the work.
+    $files  = @(Get-ChildItem -File -LiteralPath $dir | Where-Object { $_.Name -ne 'SHA256SUMS.csv' })
+    $hashes = @($files | Get-FileHash -Algorithm SHA256 |
+                Select-Object Hash, @{n='File';e={ Split-Path -Leaf $_.Path }})
+    $hashes | Export-Csv -LiteralPath $sumsFile -NoTypeInformation
 } catch {
     Write-CcdcWarn "could not hash the evidence files: $($_.Exception.Message)"
 }
