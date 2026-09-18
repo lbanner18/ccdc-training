@@ -775,6 +775,31 @@ fi
 # which - and distinguish the two forms by how the string read them:
 #   "$($_.Exception.Message)"  a SubExpressionAst. Deliberate. Fine.
 #   "$_.Resources"             a bare variable, with ".Resources" left as text.
+# --------------------- `return ,$array`, the idiom that only half works
+# The house rule in windows/ is: a function returns its collection PLAINLY and
+# every caller wraps the call in @(). `return ,$array` looks like it does the
+# same job and does not.
+#
+#   $x = f          ->  the array, count 0 when empty.   Correct.
+#   @(f)            ->  ONE element, which is @().        Wrong.
+#   f | ForEach ...  ->  body runs once with $_ = @().    Wrong.
+#
+# Both wrong cases throw PropertyNotFoundStrict on the first property access,
+# and both look like ordinary PowerShell. Measured on the lab box: baseline.ps1
+# -Explain printed a raw PowerShell error in the middle of the verdict it was
+# in the act of reporting, twice, because fixing the pipe left the @() in place.
+#
+# One rule that is visible at the call site beats one that acts at a distance.
+commaret=$(grep -nE '^[^#]*return[[:space:]]+,' \
+             "$ROOT"/windows/*.ps1 "$ROOT"/windows/lib/*.ps1 2>/dev/null \
+           | grep -vE '^\S+:[0-9]+:[[:space:]]*#')
+if [ -z "$commaret" ]; then
+  ok 'no Windows function returns a collection with a leading comma'
+else
+  no 'a `return ,$array` is back; @() around the call site will silently re-wrap it'
+  printf '%s\n' "$commaret" | sed 's/^/    /' | head -6
+fi
+
 ps_lint="$ROOT/redteam/lib/ps-interpolation-lint.ps1"
 ps_targets=()
 for t in "$ROOT"/windows/*.ps1 "$ROOT"/windows/lib/*.ps1 "$ROOT"/redteam/windows-*.ps1; do

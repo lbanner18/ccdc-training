@@ -224,11 +224,16 @@ function Get-CcdcList {
     param([Parameter(Mandatory)][hashtable]$Config,
           [Parameter(Mandatory)][string]$Name)
     $v = Get-CcdcValue -Config $Config -Name $Name
-    # ',' keeps a 0- or 1-element result an ARRAY. Without it PowerShell
-    # unrolls the return value, an empty list comes back as $null, and the
-    # caller's .Count throws under StrictMode.
-    if ([string]::IsNullOrWhiteSpace($v)) { return ,@() }
-    return ,@($v -split '[\s,]+' | Where-Object { $_ -ne '' })
+    # Returned PLAINLY, and every caller wraps the result in @().
+    #
+    # The obvious alternative, `return ,@()`, keeps the array intact through
+    # the return - but then @(Get-CcdcList ...) re-wraps it and yields ONE
+    # element that is an empty array, and piping it hands ForEach-Object the
+    # same. Both throw under StrictMode on the first property access, and both
+    # look like ordinary code. One rule that is visible at the call site beats
+    # one that acts at a distance: always @().
+    if ([string]::IsNullOrWhiteSpace($v)) { return @() }
+    return @($v -split '[\s,]+' | Where-Object { $_ -ne '' })
 }
 
 function Test-CcdcListContains {
@@ -428,7 +433,7 @@ function Get-CcdcTcpChecks {
         if ($p -notmatch '^\d+$') { Write-CcdcWarn "CCDC_TCP_CHECKS: '$p' is not a port number in '$tok'"; continue }
         $out += [pscustomobject]@{ Host = $h; Port = [int]$p }
     }
-    return ,@($out)
+    return @($out)
 }
 
 function Get-CcdcHttpChecks {
@@ -440,7 +445,7 @@ function Get-CcdcHttpChecks {
         if ($u -notmatch '^https?://') { Write-CcdcWarn "CCDC_HTTP_CHECKS: '$tok' is not an http:// or https:// URL"; continue }
         $out += $u
     }
-    return ,@($out)
+    return @($out)
 }
 
 # --- the apply boundary ------------------------------------------------------
@@ -574,7 +579,7 @@ function Get-CcdcCapabilityGaps {
     if ((Test-CcdcIsDomainController)) {
         $gaps += 'this is a DOMAIN CONTROLLER - it has NO local accounts. Every account here is a domain account, and disabling one affects every machine in the domain.'
     }
-    return ,@($gaps)
+    return @($gaps)
 }
 
 function Write-CcdcBoxBanner {

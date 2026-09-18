@@ -408,6 +408,39 @@ if (-not (Test-Path -LiteralPath $sentryPath)) {
     }
 }
 
+# =============================================================================
+# baseline.ps1 - the drift tool
+# =============================================================================
+$blPath = Join-Path $root 'windows\baseline.ps1'
+if (-not (Test-Path -LiteralPath $blPath)) {
+    nope 'windows\baseline.ps1 is missing'
+} else {
+    $blTxt = Get-Content -LiteralPath $blPath -Raw
+
+    if ($blTxt -match '\[switch\]\$Apply') { ok 'baseline.ps1 cannot freeze or allowlist without -Apply' }
+    else { nope 'baseline.ps1 has no -Apply gate' }
+
+    # An allowlist entry with no reason is indistinguishable an hour later from
+    # a thing nobody looked at.
+    if ($blTxt -match '-Allow needs -Reason') { ok 'baseline.ps1 refuses to allowlist without a reason' }
+    else { nope 'baseline.ps1 will allowlist something without recording why' }
+
+    # ConvertTo-Json defaults to -Depth 2 in PowerShell 5.1 and silently writes
+    # "System.Collections.Hashtable" for anything deeper - which would make
+    # every section of the manifest the same useless string, and the diff that
+    # reads it would report nothing wrong forever.
+    if ($blTxt -match 'ConvertTo-Json\s+-Depth\s+[3-9]') { ok 'the baseline manifest is serialised with an explicit -Depth' }
+    else { nope 'ConvertTo-Json without -Depth: PowerShell 5.1 truncates at 2 and the manifest becomes uniform junk' }
+
+    # Freezing on arrival makes whatever they left behind the definition of
+    # normal. The tool has to say so where it will be read.
+    if ($blTxt -match 'NOT on arrival' -or $blTxt -match 'becomes the new definition of normal') {
+        ok 'baseline.ps1 warns that blessing a dirty box freezes the intrusion as normal'
+    } else {
+        nope 'baseline.ps1 no longer warns about blessing before you have cleaned the box'
+    }
+}
+
 # Nothing may change the box without -Apply. The whole kit's bargain.
 foreach ($t in @('harden.ps1','users.ps1')) {
     $txt = Get-Content -LiteralPath (Join-Path $root "windows\$t") -Raw

@@ -103,8 +103,8 @@ function Unlock-Sentry {
 # --- muting ------------------------------------------------------------------
 
 function Get-MuteKeys {
-    if (-not (Test-Path -LiteralPath $script:muteFile)) { return ,@() }
-    return ,@(Get-Content -LiteralPath $script:muteFile -ErrorAction SilentlyContinue |
+    if (-not (Test-Path -LiteralPath $script:muteFile)) { return @() }
+    return @(Get-Content -LiteralPath $script:muteFile -ErrorAction SilentlyContinue |
               Where-Object { $_ -and $_ -notmatch '^\s*#' })
 }
 function Test-Muted {
@@ -385,7 +385,7 @@ function Get-Queue {
     <# Findings that this tool can actually act on, in report order. #>
     $out = New-Object System.Collections.ArrayList
     $script:notOffered.Clear()
-    if (-not (Test-Path -LiteralPath $script:findingsFile)) { return ,@() }
+    if (-not (Test-Path -LiteralPath $script:findingsFile)) { return @() }
     foreach ($line in (Get-Content -LiteralPath $script:findingsFile -ErrorAction SilentlyContinue)) {
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         $f = $line -split '\|', 4
@@ -412,7 +412,7 @@ function Get-Queue {
             Tier = $script:Actions[$check].Tier
         })
     }
-    return ,@($out)
+    return @($out)
 }
 
 function Format-Item {

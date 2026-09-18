@@ -5,11 +5,12 @@ two questions: **is the scored service up**, and **can I prove what changed**.
 
 - **Linux** — 25 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
   and a supervised approval queue that applies fixes only when you say so.
-- **Windows** — 6 tools, 58 checks: triage, a checklist-driven harden, account
-  and password handling, a scored-service watchdog, and the same approval queue.
+- **Windows** — 7 tools, 58 checks: triage, a checklist-driven harden, account
+  and password handling, a scored-service watchdog, the same approval queue,
+  and configuration drift against a frozen baseline.
 - **Playbooks** — 13 documents. Cards you can follow at 2am with a red team on
   the box.
-- **Tested** — 435 assertions across 17 suites, including fixtures that plant
+- **Tested** — 440 assertions across 17 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.
 
 Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
@@ -232,7 +233,7 @@ lab/                      building the practice targets:
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (435 assertions, non-root;
+  self-test.sh            runs every suite below (440 assertions, non-root;
                           391 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no

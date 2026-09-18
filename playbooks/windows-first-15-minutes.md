@@ -220,6 +220,41 @@ stays free for the thing that is worth half the points.
 
 ---
 
+## Once you believe the box — freeze it
+
+Do this **after** hardening, not on arrival. Blessing a box you have not
+cleaned makes whatever they left behind the definition of normal, and every
+drift report after that will agree the backdoor belongs there.
+
+```powershell
+.\windows\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Bless -Apply
+```
+
+Nine seconds. Then, any time you want to know what has happened since:
+
+```powershell
+.\windows\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+.\windows\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Explain 4
+```
+
+**A CHANGED line is worth more of your attention than an ADDED one.** Adding
+is what installers do. Changing a service's binary path, or a file that was
+already there, is what somebody does to keep access.
+
+When a change is yours, say so once and stop seeing it:
+
+```powershell
+.\windows\baseline.ps1 -Config CONFIG -Allow 'services:MyApp' -Reason 'our web app, minute 40' -Apply
+```
+
+It insists on the reason. An allowlist entry with no reason is
+indistinguishable, an hour later, from something nobody ever looked at.
+
+**Copy `C:\ProgramData\CCDC\state\baseline.json` off the box.** A baseline that
+lives only where the attacker is, is a baseline the attacker can edit.
+
+---
+
 ## Then: check from somewhere that is not this box
 
 Nothing running on the box can tell you whether the scoring engine can reach
@@ -252,6 +287,8 @@ nc -z -v WINDOWS_IP 3389
 |---|---|
 | see what is wrong | `.\windows\triage.ps1 -Config CONFIG` |
 | fix it by number | `.\windows\sentry.ps1 -Config CONFIG -Status` |
+| freeze a box you believe | `.\windows\baseline.ps1 -Config CONFIG -Bless -Apply` |
+| what changed since | `.\windows\baseline.ps1 -Config CONFIG -Status` |
 | record the box, read-only | `.\windows\recon.ps1 -Config CONFIG` |
 | accounts and passwords | `.\windows\users.ps1 -Config CONFIG` |
 | the whole hardening checklist | `.\windows\harden.ps1 -Config CONFIG` |
@@ -269,14 +306,21 @@ that does less.
 
 - **No domain hardening.** On a domain controller `users.ps1` refuses to run and
   tells you the AD commands instead. GPO, delegation and AD ACLs are by hand.
-- **No baseline/drift.** The Linux side can freeze a known-good box and report
-  everything that changed since, and ask of anything left over: is this
-  explained? Windows has no equivalent, and it is the largest single thing
-  missing here.
+- **The baseline is configuration, not the filesystem.** `baseline.ps1` freezes
+  services, tasks, autostarts, accounts, ports, firewall rules, shares, WMI
+  subscriptions and Defender exclusions, plus every executable those wire to
+  run — about 250 files, nine seconds. It does **not** hash the System32 tree:
+  measured, that is ~14,000 files and five minutes a pass, and Authenticode
+  already answers "is this file explained?" without a baseline. A file nothing
+  wires to run is not covered.
 - **No tripwires, and no tamper-proof watchdog.** On Linux, `canary.sh` lays
   files that alarm when touched and `guardian.sh` keeps the watchdog alive
   when somebody tries to kill it. On Windows the watchdog is an ordinary
   scheduled task, and an administrator can simply remove it.
+- **Autostart coverage is four registry keys plus the Startup folders.**
+  Sysinternals Autoruns knows roughly 200 locations. If `autorunsc.exe` is on
+  the box, `baseline.ps1` uses it and covers the long tail; if it is not, that
+  tail is unwatched.
 - **The approval queue applies a subset.** `sentry.ps1` acts on 21 of the 58
   checks. The rest print a command because their fix needs a judgement no
   table can hold — see the list in its `-?` help.
