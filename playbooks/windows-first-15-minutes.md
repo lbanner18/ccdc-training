@@ -102,6 +102,50 @@ Start-Service NAME
 Every other finding prints the command that fixes it, and a card reference.
 The cards are in [`windows-cards.md`](windows-cards.md).
 
+**When there are more than about five findings, stop pasting and use the
+queue.** Thirty findings is a lot of copying at a moment when you also have an
+inject open, and copying is where the wrong hostname gets into the right
+command.
+
+```powershell
+.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+```
+
+It numbers everything it can act on and marks each one:
+
+| | |
+|---|---|
+| **SWEEP** | safe, reversible, cannot cut your own access. A batch approve takes these. |
+| **LOOK** | stops a port, disables an account, or removes a group membership. **Yours by number only.** |
+
+```powershell
+# every SWEEP item; every LOOK item is handed back to you with its number
+.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Approve all -Apply
+
+# then the LOOK items, one at a time, once you have looked
+.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Approve 7 -Apply
+```
+
+Leave `-Apply` off and it tells you what it would do and changes nothing.
+
+Three things worth knowing before you trust it:
+
+- **The numbers come from `-Status` and stay put until the next `-Status`.** A
+  finding that appears in between cannot take a number you already read.
+- **It re-checks before it acts.** If the thing is gone, or you muted it, that
+  item is skipped rather than guessed at.
+- **Every change writes the previous state to an evidence directory first.**
+  There is no automatic undo — `-Undo` shows you what was applied and where the
+  "before" is, which is what the incident report gets written from.
+
+If something is yours and you are tired of seeing it:
+
+```powershell
+.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Mute 'listener|tcp/8080'
+```
+
+It stays in `triage.ps1`. It just stops asking you to decide.
+
 ---
 
 ## Minutes 6–10 — credentials
@@ -207,7 +251,8 @@ nc -z -v WINDOWS_IP 3389
 | you want to | run |
 |---|---|
 | see what is wrong | `.\windows\triage.ps1 -Config CONFIG` |
-| record the box, read-only | `.\windows\recon.ps1` |
+| fix it by number | `.\windows\sentry.ps1 -Config CONFIG -Status` |
+| record the box, read-only | `.\windows\recon.ps1 -Config CONFIG` |
 | accounts and passwords | `.\windows\users.ps1 -Config CONFIG` |
 | the whole hardening checklist | `.\windows\harden.ps1 -Config CONFIG` |
 | just the firewall | `.\windows\harden.ps1 -Config CONFIG -Only Firewall -Apply` |
@@ -224,9 +269,16 @@ that does less.
 
 - **No domain hardening.** On a domain controller `users.ps1` refuses to run and
   tells you the AD commands instead. GPO, delegation and AD ACLs are by hand.
-- **No approval queue yet.** The Linux side has `sentry.sh` — numbered findings,
-  each with its own approve command. Windows prints the command; you paste it.
 - **No baseline/drift.** The Linux side can freeze a known-good box and report
-  everything that changed since. Windows has no equivalent yet.
+  everything that changed since, and ask of anything left over: is this
+  explained? Windows has no equivalent, and it is the largest single thing
+  missing here.
+- **No tripwires, and no tamper-proof watchdog.** On Linux, `canary.sh` lays
+  files that alarm when touched and `guardian.sh` keeps the watchdog alive
+  when somebody tries to kill it. On Windows the watchdog is an ordinary
+  scheduled task, and an administrator can simply remove it.
+- **The approval queue applies a subset.** `sentry.ps1` acts on 21 of the 58
+  checks. The rest print a command because their fix needs a judgement no
+  table can hold — see the list in its `-?` help.
 - **Detection is a list, not a proof.** "Nothing found" means "none of the
   things this tool looks for", never "clean".

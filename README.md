@@ -1,9 +1,25 @@
 # CCDC training kit
 
-This is a defensive, lab-first toolkit for a CCDC-style competition box. It is
-organized around uptime and evidence: collect a baseline, check the scored
-services the way a scorer would, make only configured changes, and collect a
-post-change snapshot.
+A defensive, lab-first toolkit for a CCDC-style competition box, built around
+two questions: **is the scored service up**, and **can I prove what changed**.
+
+- **Linux** — 25 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
+  and a supervised approval queue that applies fixes only when you say so.
+- **Windows** — 6 tools, 58 checks: triage, a checklist-driven harden, account
+  and password handling, a scored-service watchdog, and the same approval queue.
+- **Playbooks** — 13 documents. Cards you can follow at 2am with a red team on
+  the box.
+- **Tested** — 435 assertions across 17 suites, including fixtures that plant
+  real persistence on a lab VM and assert the tools find it.
+
+Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
+destructive command identifies its target by position in a list. Every tool
+says what it could *not* check, because a check that silently did not run reads
+exactly like a check that found nothing.
+
+It is organized around uptime and evidence: collect a baseline, check the
+scored services the way a scorer would, make only configured changes, and
+collect a post-change snapshot.
 
 ## Quick start on a Linux target
 
