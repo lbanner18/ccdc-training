@@ -441,6 +441,53 @@ if (-not (Test-Path -LiteralPath $blPath)) {
     }
 }
 
+# =============================================================================
+# canary.ps1 - the tripwires
+# =============================================================================
+$cnPath = Join-Path $root 'windows\canary.ps1'
+if (-not (Test-Path -LiteralPath $cnPath)) {
+    nope 'windows\canary.ps1 is missing'
+} else {
+    $cnTxt = Get-Content -LiteralPath $cnPath -Raw
+
+    if ($cnTxt -match '\[switch\]\$Apply') { ok 'canary.ps1 cannot lay or remove tripwires without -Apply' }
+    else { nope 'canary.ps1 has no -Apply gate' }
+
+    # A SACL with the audit policy off produces no records at all, silently.
+    if ($cnTxt -match 'auditpol' -and $cnTxt -match 'FileSystemAuditRule') {
+        ok 'canary.ps1 sets both the SACL and the audit policy a SACL needs'
+    } else {
+        nope 'canary.ps1 sets one of the SACL / audit policy pair but not the other'
+    }
+
+    # -Check must never read a canary while auditing is on: reading it produces
+    # the same 4663 an attacker's read does, and the tool reports its own
+    # footprints for ever. Two filtering approaches failed on the lab box before
+    # this became "do not make the read".
+    if ($cnTxt -match 'if \(\$auditOn\) \{ continue \}') {
+        ok 'canary.ps1 -Check does not read the files it is watching while auditing is on'
+    } else {
+        nope 'canary.ps1 hashes its canaries during -Check again; it will report its own reads as trips'
+    }
+
+    # Every decoy has to be obviously a decoy to the operator, on line one.
+    $bodies = [regex]::Matches($cnTxt, "Body = @'\r?\n(.*?)'@", 'Singleline')
+    $unmarked = @()
+    foreach ($m in $bodies) {
+        $first = ($m.Groups[1].Value -split "`r?`n")[0]
+        if ($first -notmatch '(?i)canary|decoy') { $unmarked += $first }
+    }
+    if ($bodies.Count -gt 0 -and $unmarked.Count -eq 0) {
+        ok ("all {0} decoys say they are decoys on their first line" -f $bodies.Count)
+    } else {
+        nope ("a decoy does not identify itself, so it reads as a real credential file you forgot: {0}" -f ($unmarked -join '; '))
+    }
+
+    # -Check is the loopable one. It must have no way to change the box.
+    if ($cnTxt -match '-Check never changes anything') { ok 'canary.ps1 documents -Check as read-only and loopable' }
+    else { nope 'canary.ps1 no longer promises -Check is safe to run in a loop' }
+}
+
 # Nothing may change the box without -Apply. The whole kit's bargain.
 foreach ($t in @('harden.ps1','users.ps1')) {
     $txt = Get-Content -LiteralPath (Join-Path $root "windows\$t") -Raw

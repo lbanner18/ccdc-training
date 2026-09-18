@@ -255,6 +255,47 @@ lives only where the attacker is, is a baseline the attacker can edit.
 
 ---
 
+## Lay the tripwires
+
+```powershell
+.\windows\canary.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Deploy -Apply
+```
+
+This puts four decoy files where somebody rummaging would find them — a
+`backup-credentials.txt`, a `domain admin.txt`, a `web.config.bak`, a network
+diagram — and asks Windows to log every read of them.
+
+**It detects reads, not just changes.** That is the whole point: an attacker
+who opens a file called "domain admin" has already got what they came for and
+has changed nothing, so a hash check would call the box clean. Windows records
+the read as Security event 4663, and that event carries the **account name and
+the process**.
+
+Then, whenever you come up for air:
+
+```powershell
+.\windows\canary.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Check
+```
+
+Read-only, safe in a loop, exits 2 when something tripped so you can wire it
+into anything. A trip looks like this:
+
+```
+  TRIPPED  C:\Users\Public\Documents\domain admin.txt
+           at 2026-09-18 08:42:56Z by Administrator
+           process: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe
+```
+
+**Nothing legitimate reads these files.** They are not referenced by any
+service and not on any path. A trip is not a maybe — take the account name and
+go find out what else it did, then write the incident report while it is fresh.
+
+Each decoy says it is a decoy on its first line, so when you find one at hour
+four you will not waste a minute wondering whether it is a real credential file
+you forgot about.
+
+---
+
 ## Then: check from somewhere that is not this box
 
 Nothing running on the box can tell you whether the scoring engine can reach
@@ -289,6 +330,8 @@ nc -z -v WINDOWS_IP 3389
 | fix it by number | `.\windows\sentry.ps1 -Config CONFIG -Status` |
 | freeze a box you believe | `.\windows\baseline.ps1 -Config CONFIG -Bless -Apply` |
 | what changed since | `.\windows\baseline.ps1 -Config CONFIG -Status` |
+| lay tripwires | `.\windows\canary.ps1 -Config CONFIG -Deploy -Apply` |
+| has anything been touched | `.\windows\canary.ps1 -Config CONFIG -Check` |
 | record the box, read-only | `.\windows\recon.ps1 -Config CONFIG` |
 | accounts and passwords | `.\windows\users.ps1 -Config CONFIG` |
 | the whole hardening checklist | `.\windows\harden.ps1 -Config CONFIG` |
@@ -313,10 +356,10 @@ that does less.
   measured, that is ~14,000 files and five minutes a pass, and Authenticode
   already answers "is this file explained?" without a baseline. A file nothing
   wires to run is not covered.
-- **No tripwires, and no tamper-proof watchdog.** On Linux, `canary.sh` lays
-  files that alarm when touched and `guardian.sh` keeps the watchdog alive
-  when somebody tries to kill it. On Windows the watchdog is an ordinary
-  scheduled task, and an administrator can simply remove it.
+- **No tamper-proof watchdog.** On Linux, `guardian.sh` keeps the watchdog
+  alive when somebody tries to kill it. On Windows the watchdog is an ordinary
+  scheduled task, and an administrator can simply remove it. Tripwires exist
+  now (`canary.ps1`); guardian does not.
 - **Autostart coverage is four registry keys plus the Startup folders.**
   Sysinternals Autoruns knows roughly 200 locations. If `autorunsc.exe` is on
   the box, `baseline.ps1` uses it and covers the long tail; if it is not, that
