@@ -633,6 +633,21 @@ can_automate() {
     suid)
       safe_root_owned_path "$subject" && [ -u "$subject" ] || return 1
       ;;
+    # A scored account that cannot log in. The only action in this tool that
+    # RESTORES rather than removes: the packet says this account has to work,
+    # it does not, and that is lost points for every minute it stays that way.
+    #
+    # Safe to automate precisely because it is restorative. The failure mode of
+    # unlocking an account that should have stayed locked is that it is in
+    # CCDC_ALLOWED_USERS, which is a config error the operator can see; the
+    # failure mode of NOT unlocking it is silent point loss.
+    scoreduser)
+      valid_name "$subject" || return 1
+      getent passwd "$subject" >/dev/null 2>&1 || return 1
+      ccdc_list_contains "$subject" "${CCDC_ALLOWED_USERS:-}" || return 1
+      [ "$subject" = root ] && return 1
+      ;;
+
     # A sudoers drop-in written after the box was built. Only ever a file in
     # /etc/sudoers.d: a mistake in /etc/sudoers itself locks every account out
     # of root and the only way back is the console.
@@ -743,6 +758,7 @@ can_automate() {
 card_for() {
   case "$1" in
     uid0|emptypw|rootadj)   printf 'CARD 1 - UID-0 account that is not root' ;;
+    scoreduser)             printf 'CARD 1 - UID-0 account that is not root (see: a scored account that cannot log in)' ;;
     sshkey)                 printf 'CARD 2 - SSH key you do not recognise' ;;
     cron|crondeep)          printf 'CARD 3 - scheduled job that calls home' ;;
     unit|unittmp|unitdeep|unitdropin|unitdropindeep|rogueunit)
@@ -1078,6 +1094,8 @@ render_action() {
       owner=${subject%%::*}; rest=${subject#*::}; dropin=${rest%%::*}; target=${rest#*::}
       printf 'preserve all; remove drop-in %q from %q, then delete the payload %q; reload and restart the unit' "$dropin" "$owner" "$target" ;;
     suid) printf 'strip the SUID bit from %q (do not delete it)' "$subject" ;;
+    scoreduser)
+      printf 'unlock %q and clear any account expiry, so the scored account can log in again - this RESTORES access rather than removing it' "$subject" ;;
     nopasswd)
       printf 'preserve and remove the sudoers drop-in %q, then run visudo -c and put it straight back if the ruleset no longer parses' "$subject" ;;
     suidunpackaged)
@@ -1532,6 +1550,24 @@ action_uid0() {
   userdel -f "$user"
 }
 
+# Put a scored account back into service. Evidence first, like everything
+# else - what was done to it is part of the incident report.
+action_scoreduser() {
+  local user=$1 auth_file
+  ccdc_list_contains "$user" "${CCDC_ALLOWED_USERS:-}" || return 1
+  new_evidence_case scoreduser || return 1
+  for auth_file in /etc/passwd /etc/shadow; do preserve_into_case "$auth_file" || return 1; done
+  passwd -S "$user" >"$evidence_case/before.status" 2>&1 || true
+  chage -l "$user" >"$evidence_case/before.aging" 2>&1 || true
+  passwd -u "$user" >/dev/null 2>&1 || slog "warning: passwd -u failed for $user"
+  chage -E -1 "$user" >/dev/null 2>&1 || slog "warning: could not clear expiry for $user"
+  # Did it work? An account can be unlocked and still have no usable password.
+  case "$(passwd -S "$user" 2>/dev/null | awk '{print $2}')" in
+    L|LK) slog "WARNING: $user is STILL locked after passwd -u - it may have no password set at all"; return 1 ;;
+  esac
+  return 0
+}
+
 action_emptypw() {
   local user=$1 auth_file
   new_evidence_case emptypw || return 1
@@ -1955,6 +1991,7 @@ execute_action() {
   case "$check" in
     uid0) action_uid0 "$subject" ;;
     emptypw) action_emptypw "$subject" ;;
+    scoreduser) action_scoreduser "$subject" ;;
     svcshell) action_svcshell "$subject" ;;
     admingroup) action_admingroup "$subject" ;;
     cron) action_cron "$subject" ;;

@@ -35,16 +35,18 @@ win on uptime alone. Budget time for injects from minute one — see §6.
 
 ---
 
-## 1. First 15 minutes — see the box before you change it
+## 1. First 15 minutes — record the box before you change it
 
 Everything here is read-only. Do not harden anything until you know what normal
 looks like, or you will not be able to tell your own change from an intrusion.
 
 ```bash
-# Run this first. Without sudo, triage can see only your own processes.
-sudo ./linux/triage.sh --config /tmp/ccdc-linux.env
+# These are the before-picture. Triage is an urgency read here; run it again
+# after hardening before you bless the box.
 ./linux/recon.sh --config /tmp/ccdc-linux.env
 ./linux/hunt.sh --config /tmp/ccdc-linux.env
+# Without sudo, triage can see only your own processes.
+sudo ./linux/triage.sh --config /tmp/ccdc-linux.env
 sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env
 ./linux/splunk.sh --config /tmp/ccdc-linux.env
 ```
@@ -254,6 +256,13 @@ Everything that appears after this point is reported until you remove it or
 record it as an exception, and nothing decays back into normal on its own.
 
 ```
+[ ] sudo ./linux/triage.sh --config /tmp/ccdc-linux.env
+    This is the post-hardening review. Resolve or explicitly understand what
+    remains before freezing it as normal.
+[ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env
+    Before the first blessing, this asks whether each remaining item is
+    package-intact or explicitly allowed. Use its `--explain N` command for
+    the full evidence before you approve or allow anything.
 [ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
 [ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --status
     Should say "Nothing unexplained." If it does not, you blessed something
@@ -261,13 +270,16 @@ record it as an exception, and nothing decays back into normal on its own.
 ```
 
 Bless a box you have not cleaned and you bless the implants with it. That is
-why triage, harden and this come in that order, and why `--bless` says so
-before it does anything.
+why the post-hardening triage and baseline review happen before this step, and
+why `--bless` says so before it does anything.
 
 From here on the question is `--status`, every time you wonder whether anything
 changed. Each finding carries what it will do, the command that does it, and
-`--explain N` for which of the three tests it failed and why. `watch.sh` runs it
-every pass on its own and will tell you without being asked.
+`--explain N` for which of the three tests it failed and why. `watch.sh` runs
+the baseline check every pass. A new RED finding is broadcast once with `wall`
+when that utility is available and `CCDC_WATCH_NOTIFY="1"` (the default). That
+reaches logged-in terminals only; it is not email or a pager, so still check
+`sentry.sh --status` between injects.
 
 ### 2f. Then, only the exploitable
 
@@ -382,7 +394,11 @@ Then, between injects — this is your whole monitoring loop:
 
 ```
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
+[ ] Read the finding. Use the exact `--approve N --apply` command it prints
+    for the one item you chose.
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply
+    This is optional bulk approval: it applies only RED items. It deliberately
+    leaves every AMBER item for individual review because it may be yours.
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --ack   # after reviewing change events
 ```
 
@@ -408,11 +424,13 @@ touches, never what it tells you.
 
 ## 4b. The change-detection sweep — already part of sentry
 
-The kit collects well and alerts not at all: canary trips go to a log nobody
-reads and `hunt.sh` writes a 124K report you cannot re-read every few minutes.
-`watch.sh` closes that gap. It runs canary + hunt + recon and reports **only
-what changed since the last pass**. Sentry invokes it automatically and keeps
-events in `ALERTS` until you acknowledge them.
+The kit collects evidence and the watch pass turns it into an operator signal.
+It runs canary + hunt + recon, reports changes, and also compares the current
+box to the blessed baseline so a foothold does not become normal after one
+cycle. Sentry invokes it automatically and keeps events in `ALERTS` until you
+acknowledge them. New RED baseline findings are sent once with `wall` to logged
+in terminals when available; AMBER findings and existing RED findings stay in
+the queue without repeatedly interrupting you.
 
 ```
 [ ] sudo ./linux/watch.sh --config /tmp/ccdc-linux.env --once   # diagnostic on demand only
@@ -577,8 +595,9 @@ it.
 
 ```
 BEFORE : packet -> config -> snapshot -> access confirmed
-SEE    : triage.sh (ranked!) ; recon.sh ; hunt.sh ; sshd.sh ; splunk.sh
-HARDEN : creds -> fw.sh(+confirm) -> sshd.sh(+confirm) -> services.sh  [verify each]
+RECORD : recon.sh ; hunt.sh ; initial triage.sh ; sshd.sh ; splunk.sh
+HARDEN : creds -> fw.sh(+confirm) -> sshd.sh(+confirm) -> harden.sh/services.sh
+REVIEW : triage.sh -> baseline.sh -> bless only the state you deliberately kept
 ARM    : sudo arm.sh --apply      (backup + canary + sentry + guardian/watchdog)
 PROVE  : audit.sh --apply ; audit.sh --capture ; splunk.sh --test-event --apply
 STATUS : sudo sentry.sh --status  (current triage + retained change events)

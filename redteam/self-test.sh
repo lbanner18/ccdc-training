@@ -30,6 +30,25 @@ run_suite() {
   return "$rc"
 }
 
+# The Windows suite is PowerShell, so it needs its own runner - `bash` cannot
+# run it. It SKIPS rather than fails where pwsh is unavailable, because the
+# Linux half of this kit has to stay testable on a box with no PowerShell.
+run_ps_suite() {
+  local script=$1 out rc=0 pwsh=''
+  for cand in pwsh powershell "$HOME/.local/bin/pwsh" /opt/microsoft/powershell/7/pwsh; do
+    if command -v "$cand" >/dev/null 2>&1; then pwsh=$cand; break; fi
+  done
+  [ -n "${CCDC_PWSH:-}" ] && [ -x "${CCDC_PWSH}" ] && pwsh=$CCDC_PWSH
+  if [ -z "$pwsh" ]; then
+    printf 'SKIP - %s (no pwsh on this host; set CCDC_PWSH=/path/to/pwsh to run it)\n' "${script#"$ROOT/"}"
+    return 77
+  fi
+  out=$("$pwsh" -NoProfile -File "$script" 2>&1) || rc=$?
+  printf '%s\n' "$out"
+  printf '%s\n' "$out" | grep -E '[0-9]+ passed' >>"$tally" || true
+  return "$rc"
+}
+
 printf '== bash syntax ==\n'
 while IFS= read -r script; do
   if bash -n "$script"; then
@@ -134,6 +153,15 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== windows tools ==\n'
+rc=0
+run_ps_suite "$ROOT/redteam/windows-self-test.ps1" || rc=$?
+if [ "$rc" -eq 77 ]; then
+  : # skipped and said so
+elif [ "$rc" -ne 0 ]; then
+  failed=$((failed + 1))
+fi
+
 # --- the README's assertion count ---------------------------------------------
 total=$(awk '
   match($0, /[0-9]+ passed/)   { n = substr($0, RSTART, RLENGTH); sub(/ passed/, "", n); t += n }
@@ -141,6 +169,13 @@ total=$(awk '
   END { print t + 0 }
 ' "$tally")
 claimed=$(grep -oE '\([0-9]+ assertions' "$ROOT/README.md" | grep -oE '[0-9]+' | head -1)
+# The Windows suite is PowerShell and skips where pwsh is absent, so the true
+# total depends on the host. Both numbers are in the README; accept whichever
+# matches what actually ran, and say which one when neither does.
+claimed_nowin=$(grep -oE '[0-9]+ without the Windows suite' "$ROOT/README.md" | grep -oE '[0-9]+' | head -1)
+if [ -n "$claimed_nowin" ] && [ "$total" -eq "$claimed_nowin" ]; then
+  claimed=$total
+fi
 printf '\n== assertion count ==\n'
 if [ -z "$claimed" ]; then
   printf 'not ok - README does not state an assertion count\n'

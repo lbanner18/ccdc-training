@@ -35,6 +35,16 @@ while [ "$#" -gt 0 ]; do
     --keep) keep=${2:?missing count}; shift 2 ;;
     -h|--help)
       printf 'usage: %s --config FILE [--interval SECONDS] [--once] [--keep N]\n' "$0"
+      printf '\n'
+      printf '  (no mode)    keep watching; use this only for a temporary diagnostic\n'
+      printf '  --once       run one diagnostic pass and exit\n'
+      printf '  --interval   seconds between passes (30 or more; default 300)\n'
+      printf '  --keep N     retain N evidence snapshots (default 12)\n'
+      printf '\n'
+      printf '  arm.sh installs sentry, which runs this watcher for normal operation.\n'
+      printf '  Do not start a second long-running loop by hand. New RED findings from\n'
+      printf '  the blessed baseline are sent once to logged-in terminals with wall when\n'
+      printf '  CCDC_WATCH_NOTIFY=1 (the default) and wall is available.\n'
       exit 0 ;;
     *) ccdc_die "unknown argument: $1" ;;
   esac
@@ -43,6 +53,11 @@ done
 case "$interval" in ''|*[!0-9]*) ccdc_die "--interval must be a whole number of seconds" ;; esac
 [ "$interval" -ge 30 ] || ccdc_die "--interval below 30s is churn, not vigilance: $interval"
 ccdc_load_config "$config"
+
+case "${CCDC_WATCH_NOTIFY:-1}" in
+  0|1) ;;
+  *) ccdc_die "CCDC_WATCH_NOTIFY must be 0 (off) or 1 (wall on new RED findings)" ;;
+esac
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"

@@ -290,6 +290,77 @@ else
   clean "no UID-0 accounts besides root"
 fi
 
+# --- 1b. Scored accounts that have stopped working ---------------------------
+#
+# From the team training, in as many words: "We have scored users in addition
+# to scored services. We have to make sure scoring users are available."
+#
+# A scored account that has been locked, expired, or had its shell taken away
+# costs exactly what a stopped service costs, and until now nothing in this kit
+# looked. Every other account check here asks whether an account should NOT be
+# able to log in. This one asks whether one that MUST be able to, still can.
+#
+# It is first for the same reason a stopped scored service is first: it is
+# points, not hygiene.
+begin
+if [ -n "${CCDC_ALLOWED_USERS:-}" ]; then
+  scored_broken=''
+  for u in ${CCDC_ALLOWED_USERS:-}; do
+    [ "$u" = root ] && continue
+    if ! getent passwd "$u" >/dev/null 2>&1; then
+      emit RED scoreduser "$u" "account named in the packet no longer exists"
+      scored_broken="$scored_broken $u(gone)"
+      continue
+    fi
+    # Locked: passwd -S prints L. The ! or * prefix in the shadow hash means
+    # the same thing and is readable without the passwd tool.
+    st=$(passwd -S "$u" 2>/dev/null | awk '{print $2}')
+    if [ "$st" = "L" ] || [ "$st" = "LK" ]; then
+      emit RED scoreduser "$u" "a SCORED account is LOCKED - this is lost uptime right now"
+      scored_broken="$scored_broken $u(locked)"
+      continue
+    fi
+    # Expired account, which locks a login just as effectively and is quieter.
+    exp=$(chage -l "$u" 2>/dev/null | awk -F: '/Account expires/ {print $2}' | sed 's/^ *//')
+    if [ -n "$exp" ] && [ "$exp" != "never" ]; then
+      exp_s=$(date -d "$exp" +%s 2>/dev/null || printf '')
+      now_s=$(date +%s)
+      if [ -n "$exp_s" ] && [ "$exp_s" -lt "$now_s" ]; then
+        emit RED scoreduser "$u" "a SCORED account EXPIRED on $exp - it cannot log in"
+        scored_broken="$scored_broken $u(expired)"
+        continue
+      fi
+    fi
+    # Shell taken away. Legitimate for a service account that is scored only
+    # for its service, which is why this one is amber rather than red.
+    sh=$(getent passwd "$u" | cut -d: -f7)
+    case "$sh" in
+      */nologin|*/false)
+        emit AMBER scoreduser "$u" "a scored account has login shell $sh - deliberate, or somebody took it away?"
+        ;;
+    esac
+  done
+  if [ -n "$scored_broken" ]; then
+    red "SCORED account(s) that cannot log in:$scored_broken   [CARD 1]"
+    detail "the packet says these have to work. They do not. This is points, not hygiene -"
+    detail "fix it before you read another line of this report."
+    fixhdr
+    # Named per account, never with a USER placeholder: the operator should be
+    # able to paste the line without translating it, and a placeholder is a
+    # translation step performed under time pressure.
+    for u in $scored_broken; do
+      name=${u%%(*}
+      printf -v qu '%q' "$name"
+      fix "sudo passwd -u $qu && sudo chage -E -1 $qu && getent passwd $qu"
+    done
+    fix "# unlock, clear any expiry, then read back the line to confirm the shell"
+  else
+    clean "every account named in CCDC_ALLOWED_USERS can still log in"
+  fi
+else
+  clean "scored-account check skipped (CCDC_ALLOWED_USERS is empty - fill it from the packet)"
+fi
+
 # --- 2. Accounts with no password --------------------------------------------
 begin
 if [ -r /etc/shadow ]; then

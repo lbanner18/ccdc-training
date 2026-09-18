@@ -13,24 +13,34 @@ cp config/example.env /tmp/ccdc-linux.env
 # Edit /tmp/ccdc-linux.env for this box. Do not commit it.
 CFG=/tmp/ccdc-linux.env
 
-# 1. See the box before you change it (both read-only)
-sudo ./linux/triage.sh --config "$CFG"
+# 1. Record the box before you change it (read-only). This is your evidence of
+#    what was already there.
 ./linux/recon.sh --config "$CFG"
 ./linux/hunt.sh --config "$CFG"
 
-# 2. Resolve the findings you understand, then freeze the box you intend to keep.
-#    Do NOT bless a box with an unresolved foothold.
+# 2. Remove what the scored services do not need. Read the plan first; the
+#    all-safe cut verifies every configured scored check after each removal.
+sudo ./linux/harden.sh --config "$CFG"
+sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
+
+# 3. Review what remains unexplained. Triage is the immediate ranked view;
+#    baseline also asks whether each item is blessed, package-intact, or allowed.
+sudo ./linux/triage.sh --config "$CFG"
 sudo ./linux/baseline.sh --config "$CFG"
+
+# 4. Freeze only the box you intend to keep. Do NOT bless an unresolved foothold.
 sudo ./linux/baseline.sh --config "$CFG" --bless --apply
 
-# 3. Arm everything persistent: backup + canaries + sentry + guardian/watchdog.
+# 5. Arm everything persistent: backup + canaries + sentry + guardian/watchdog.
 #    Both monitoring loops become supervised services; your terminal stays free.
 ./linux/arm.sh --config "$CFG"
 sudo ./linux/arm.sh --config "$CFG" --apply
 
-# 4. Check in between injects (both commands return immediately).
+# 6. Check in between injects. Status freezes the numbered review snapshot.
 sudo ./linux/sentry.sh --config "$CFG" --status
-sudo ./linux/sentry.sh --config "$CFG" --approve --apply
+#    Use the exact --approve N command printed for the item you chose.
+#    With no N, bulk approval acts on RED items only and leaves AMBER items alone.
+sudo ./linux/sentry.sh --config "$CFG" --approve N --apply
 ```
 
 The supervised sentry keeps a current ranked queue, folds in canary and broader
@@ -40,8 +50,9 @@ own — findings queue for your sign-off:
 The quick start above sets `CFG` to the filled-in config for this box.
 
 ```bash
-sudo ./linux/sentry.sh --config "$CFG" --status             # what is waiting
-sudo ./linux/sentry.sh --config "$CFG" --approve --apply    # do it
+sudo ./linux/sentry.sh --config "$CFG" --status             # freeze and review the queue
+sudo ./linux/sentry.sh --config "$CFG" --approve N --apply  # apply one chosen item
+sudo ./linux/sentry.sh --config "$CFG" --approve --apply    # bulk: RED only, never AMBER
 sudo ./linux/sentry.sh --config "$CFG" --ack                # reviewed change events
 ```
 
@@ -54,6 +65,13 @@ changes. It **refuses to act at all** until
 `CCDC_ALLOWED_USERS` and `CCDC_SYSTEMD_SERVICES` are filled in from the packet —
 an empty protect list does not mean nothing is protected, it means nobody has
 told the tool what is scored.
+
+**Alerting:** after `arm.sh --apply`, the supervised watch pass sends one
+deduplicated `wall` message for each new RED baseline finding when `wall` is
+available. It is on by default (`CCDC_WATCH_NOTIFY="1"`). This reaches logged-in
+terminals; it is not email, desktop, or phone notification, and AMBER findings
+do not interrupt you. Keep using `sentry.sh --status` between injects to see
+the full queue and retained change events.
 
 Every destructive tool is dry-run by default and needs `--apply`. Detection
 tools write evidence but do not change system configuration.
@@ -176,9 +194,31 @@ linux/                    Bash tools for Linux boxes:
   diff-evidence.sh        compare two evidence snapshots
 workstation/              tools for the assigned external workstation:
   perimeter.sh            scope-confirmed nmap evidence + inject table
-windows/                  PowerShell first-pass tools
+windows/                  PowerShell tools for Windows boxes. Target is Windows
+                          PowerShell 5.1 - what ships on Windows 10 and Server
+                          2016/2019 - so they run on a box you did not build:
+  lib/Common.ps1          config, findings, evidence, scored-service checks.
+                          Reads THE SAME config file as the Linux tools
+  triage.ps1              read-only. What should alarm you right now, ranked,
+                          with the command that fixes each thing under it
+  harden.ps1              the hardening checklist from the team training, in
+                          order, one command. Re-checks the scored services
+                          after every step and STOPS if one stopped answering
+  users.ps1               accounts and passwords. Separate from harden.ps1
+                          because it will not rotate a SCORED account's password
+                          without being told twice - on many setups that is how
+                          the scoring engine logs in
+  watchdog.ps1            restarts a stopped scored service, re-enables a
+                          disabled scored ACCOUNT, installs as a SYSTEM task
+  recon.ps1               read-only evidence capture, before you change anything
+lab/                      building the practice targets:
+  make-vm.sh              create the Windows target on the isolated lab network
+  make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
+  autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (391 assertions, non-root)
+  self-test.sh            runs every suite below (427 assertions, non-root;
+                          391 without the Windows suite, which needs pwsh -
+                          set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag
                           without documentation, and no flag a tool advertises

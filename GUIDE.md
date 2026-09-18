@@ -75,7 +75,7 @@ These are consistent across the Linux tools; a reviewer can assume them.
 |---|---|---|
 | `arm.sh` | `--apply` only | The tier-1 sequence in one command: preflight, backup, canaries, supervised sentry, then guardian/watchdog (so guardian enrolls a fresh sentry authority). It exits non-zero if any layer fails. Deliberately does NOT touch the firewall or services — both need a human confirming against the packet. |
 | `sentry.sh` | install/uninstall and approved actions only | Installs as a root systemd service, refreshes triage every minute, invokes the broader change sweep every two minutes, and maintains `ALERTS`. Its queue is structured data, rebuilt from current findings; approval re-runs detection and protection checks rather than replaying stored shell. Evidence is captured before each action. |
-| `watch.sh` | evidence only | The broader sweep behind sentry. Runs `canary --check` + `hunt.sh` + `recon.sh` and reports only changes, including firewall-policy drift (with traffic counters normalized away). It writes/rotates evidence, returns 3 for an alert and 4 for detector failure, and can still run once for diagnosis. |
+| `watch.sh` | evidence only | The broader sweep behind sentry. Runs `canary --check` + `hunt.sh` + `recon.sh`, reports changes (including firewall-policy drift), and checks the blessed baseline every pass so a foothold never becomes normal merely because it survived a cycle. With `CCDC_WATCH_NOTIFY=1` (the default), each new RED baseline finding is broadcast once with `wall` when available; this is terminal-only notification, not email or a pager. It writes/rotates evidence, returns 3 for an alert and 4 for detector failure, and can still run once for diagnosis. |
 | `harden.sh` | `--cut`/`--undo` with `--apply` only | The other half of the model: not what is UNEXPLAINED, but what is UNNECESSARY. Everything it reports is legitimate and package-owned and passes `baseline.sh` forever — snapd is not an implant, it is a large amount of root-privileged machinery no scored service needs. Groups findings into families (one decision for snapd, not eight), classifies each SAFE / NEEDS YOU / WILL NOT TOUCH, and shows the keep-set so you can see what was *considered and kept*. Purges rather than disables, because a disabled unit is one `systemctl enable` away from whoever already has root — and caches each `.deb` to the evidence directory first so `--undo` works on a network with no mirror. **After every single cut it re-checks the scored services and reverses that cut by itself if one stops answering**, so a wrong call costs one item and a few seconds. Refuses cuts on a blessed box by default, because every cut would then read as drift. Checks the actual block devices before claiming you do not use LVM. |
 | `services.sh` | `--disable`/`--revert` only | Attack-surface reduction. `--review` (default, read-only) sorts everything enabled or running into PROTECTED / LIKELY SCORED / CANDIDATES / UNCLASSIFIED with listening ports attached; `--disable` acts **only** on `CCDC_DISABLE_SERVICES`, which you write yourself. PROTECTED is computed from your config, so it covers this kit's own units, cron, auditd and logging. Handles socket activation (disabling `cups.service` while `cups.socket` lives is not disabling cups). Every change recorded and reversible. |
 | `recon.sh` | no | Baseline evidence snapshot: system, accounts, UID-0, sudoers, SSH config + authorized_keys, cron/timers, listeners, SUID/caps, recent /etc changes, firewall. Writes a hashed evidence dir. |
@@ -103,11 +103,13 @@ These are consistent across the Linux tools; a reviewer can assume them.
 they write evidence. Everything destructive is dry-run first, `--apply`
 second, off-box verification third.
 
-**Start here, in this order:** `recon.sh` and `hunt.sh` to see the box, then
-`arm.sh --apply` to arm the standing defence. Sentry and watch now run under
-systemd, so the only recurring operator command is `sentry.sh --status`, plus
-approval when warranted. `services.sh --review` and `fw.sh` remain deliberate
-packet-driven judgement calls.
+**Start here, in this order:** `recon.sh` and `hunt.sh` record the box as found;
+`harden.sh` removes the clearly unnecessary parts; `triage.sh` and
+`baseline.sh` explain what remains; then bless the state you deliberately kept
+and run `arm.sh --apply`. Sentry and watch run under systemd after that, so the
+recurring operator command is `sentry.sh --status`, plus approval when
+warranted. `services.sh --review` and `fw.sh` remain deliberate packet-driven
+judgement calls.
 
 **Do not run `watchdog.sh` by hand.** `guardian.sh` installs it as a supervised
 unit; started from a shell it dies with your SSH session. The one knob worth

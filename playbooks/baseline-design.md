@@ -48,12 +48,11 @@ catches mechanisms nobody enumerated in advance.
 
 Three consequences:
 
-**Drift is measured against the blessed baseline, forever — never against the
-previous pass.** `watch.sh` currently compares each pass to the one before it
-(`prior_dir=$prev_dir`), which means anything the red team plants becomes normal
-after one cycle. This was visible in the drill: a `/dev/shm` process appeared as
-a finding at 00:51 and had decayed to "its CPU time changed" by 00:53. Nothing
-may decay into normal on its own.
+**Drift is measured against the blessed baseline, forever — never only against
+the previous pass.** `watch.sh` still keeps a pass-to-pass diff for incident
+context, but it also runs `baseline.sh --fast` on every pass. That second check
+is the authority: a foothold stays in the queue until it is removed or recorded
+as an exception. It cannot become normal merely by surviving another cycle.
 
 **Bless freezes semantic readings, not just a file inventory.** The blind spot
 in pure provenance is a backdoor that is legitimate *content* inside an expected
@@ -70,24 +69,28 @@ explained. Fewer packages, fewer conffiles, fewer daemons, fewer PAM stacks.
 
 ---
 
-## The pipeline
+## The implemented operator pipeline
 
     recon  →  harden  →  triage  →  bless  →  arm
 
-Four commands on competition morning:
+Run these stages on competition morning:
 
 ```bash
-# 1. Look at everything. Read-only. Records the box as found, then prints one
-#    numbered list: unexplained things AND unnecessary things together.
+# 1. Record what was already on the box. Both are read-only.
+./linux/recon.sh --config ~/ccdc-real.env
+./linux/hunt.sh --config ~/ccdc-real.env
+
+# 2. Remove the clearly unnecessary parts, with scored-service verification.
+sudo ./linux/harden.sh --config ~/ccdc-real.env
+sudo ./linux/harden.sh --config ~/ccdc-real.env --cut all-safe --apply
+
+# 3. Review what remains unexplained, then inspect full detail when needed.
+sudo ./linux/triage.sh --config ~/ccdc-real.env
 sudo ./linux/baseline.sh --config ~/ccdc-real.env
+sudo ./linux/baseline.sh --config ~/ccdc-real.env --explain N
 
-# 2. Work the list.
-sudo ./linux/baseline.sh --config ~/ccdc-real.env --approve 3,7,9 --apply
-
-# 3. Freeze what is left as known-good.
-sudo ./linux/baseline.sh --config ~/ccdc-real.env --bless
-
-# 4. Start the machinery that watches for drift from it.
+# 4. Freeze what is left as known-good, then watch it.
+sudo ./linux/baseline.sh --config ~/ccdc-real.env --bless --apply
 sudo ./linux/arm.sh --config ~/ccdc-real.env --apply
 ```
 
@@ -98,22 +101,22 @@ what was there and that record is inject evidence.
 freeze a baseline on a box you have not cleaned — you would bless the implants.
 That human checkpoint is the one place the pipeline will not collapse further.
 
-### What folds into `baseline.sh`
+### What stays separate today
 
 `recon.sh`, `hunt.sh`, `surface.sh`, `triage.sh`, `services.sh`, `sshd.sh`,
-`users.sh`, `policy.sh`.
+`users.sh`, and `policy.sh` remain separate tools. The intended long-term
+single inventory is recorded in [decisions.md](decisions.md#d3--one-enumeration-several-views-2026-09-17--not-yet-built); it is not an
+implemented instruction.
 
 They stay independently runnable, exactly as `backup.sh` and `canary.sh` did
 under `arm.sh` — mid-event you want to re-run triage alone without re-walking
 everything.
 
-`sshd.sh` folding in matters specifically: SSH policy was a separate command and
-nothing in triage's output told the operator they had to go run it. `fw.sh` does
-NOT fold in — it arms a dead man's switch and needs a human inside the window —
-but firewall state is *recorded* in the baseline. `audit.sh`, `backup.sh`,
-`canary.sh`, `guardian.sh`, `sentry.sh`, `watch.sh`, `watchdog.sh` belong to
-`arm.sh`. `banner.sh`, `splunk.sh`, `card.sh`, `preserve.sh`, `diff-evidence.sh`
-are inject or incident tools and stay out.
+`fw.sh` arms a dead man's switch and needs a human inside the window; firewall
+state is recorded in the baseline but not changed by the pipeline. `audit.sh`,
+`backup.sh`, `canary.sh`, `guardian.sh`, `sentry.sh`, `watch.sh`, and
+`watchdog.sh` belong to `arm.sh`. `banner.sh`, `splunk.sh`, `card.sh`,
+`preserve.sh`, and `diff-evidence.sh` are inject or incident tools and stay out.
 
 ### One walk, three views
 
@@ -123,9 +126,9 @@ listeners, SUID, rc files. `surface.sh`'s own header admits the overlap. That is
 slow on a clock, and worse, the two can disagree with no way to tell which is
 right.
 
-So the box gets enumerated ONCE into a structured inventory, and three consumers
-read it: recon records it, harden proposes what is unnecessary, triage flags
-what is unexplained.
+That is the desired architecture, not the current implementation. Today each
+tool has its own walk; use the pipeline above rather than assuming one command
+has already consolidated the others.
 
 ---
 
@@ -251,20 +254,16 @@ packet, so they are in place before the clock starts.
 
 ## Alerting
 
-Nothing in the kit notifies the operator of anything. There is no `wall`, no
-`notify-send`, no tty write, no mail. The only mechanism that exists is a
-terminal bell in `sentry.sh`, and `sentry.sh` hardcodes `--no-bell` into the
-systemd unit it installs. You find out when you type the command.
+`watch.sh` sends a deduplicated `wall` message for each new RED baseline finding
+when `wall` is available and `CCDC_WATCH_NOTIFY=1` (the default). It reaches
+logged-in terminals in seconds and does not repeat for the same finding on every
+pass. This is deliberately limited: it is not email, desktop notification,
+phone notification, or a prompt indicator; it cannot reach an operator with no
+logged-in terminal. Use `sentry.sh --status` between injects for the full queue,
+including AMBER findings and retained change events.
 
-To add, in order of value:
-
-- **`wall` on RED findings only**, deduped. It reaches every logged-in terminal
-  in seconds, needs nothing installed, and interrupts what you are typing, which
-  is the point. Deduplication is not optional — walled every 60 seconds about
-  the same finding, you learn to ignore it within ten minutes.
-- **A prompt indicator** for everything below RED: `[!3]` in `PS1` when unacked
-  items exist.
-- **A dedicated pane** running `watch.sh --config ... ` (it loops until you stop it; `--once` is the single pass).
+Set `CCDC_WATCH_NOTIFY="0"` only when another documented team procedure owns
+operator notification. The watcher still records the finding in `ALERTS`.
 
 ---
 
@@ -291,25 +290,19 @@ service behaving, and whether anything reappears after removal.
 
 ---
 
-## Build order
+## Implementation status
 
-Status as of 2026-09-17: 1 and 3 are done, 2 is done for `baseline.sh` and
-outstanding for `triage.sh`/`sentry.sh`, 4 has not started.
+Baseline drift, the sentry finish line, and deduplicated terminal alerts are
+implemented. The remaining architecture work below is not an operator
+instruction and must not be assumed to exist during an event.
 
-1. **Baseline and drift** — the blessed baseline, the three-clause explained
-   test, semantic readings frozen alongside the file inventory, drift measured
-   against the baseline rather than the previous pass.
-2. **The finish line** — every finding carries why/will/run/more. Thirteen of
-   twenty-seven check types currently have no action at all: `etcchange`,
-   `netproc`, `netprocsvc`, `netunpackaged`, `nopasswd`, `port`, `rogueunit`,
-   `sshemptypw`, `sshkey`, `sshrootlogin`, `suidunpackaged`, `tmpproc`,
-   `udpport`. Roughly nine of those are simply unwritten. Four are deliberate
-   holds — `sshrootlogin` and `sshemptypw` stay manual because careless SSH
-   automation locks you out of a scored box, and `etcchange` is informational.
-3. **Alerting** — deduped `wall` on RED, prompt indicator otherwise.
-4. **Render pass** — drive every tool through every mode and read the output as
+1. **One enumeration, several views** — replace the separate tool walks with a
+   shared structured inventory without changing the explicit operator stages.
+2. **Prompt indicator** — an optional, non-interrupting count of queued items.
+   It is not built; do not add an ad-hoc shell hook during competition.
+3. **Render pass** — drive every tool through every mode and read the output as
    an operator rather than as its author.
-5. **Atomic Red Team as the adversary.** Not as a denominator — that was a wrong
+4. **Atomic Red Team as the adversary.** Not as a denominator — that was a wrong
    turn, since a curated list of 435 techniques is a better anecdote list, not a
    measure of coverage. The denominator is "every execution trigger on this box
    resolves to a package, the packet, or your own work", which `baseline.sh`
@@ -335,29 +328,11 @@ The method that produced the gaps was security by anecdote. Replacing it:
 
 ---
 
-## The prompt indicator
+## Proposed prompt indicator (not implemented)
 
 `wall` interrupts you when something new goes RED. It deliberately does not
-repeat itself, which leaves a second question unanswered: *is there anything
-outstanding right now?* That belongs somewhere always visible and never
-intrusive, which is the shell prompt.
-
-Add to `~/.bashrc` on the box:
-
-```bash
-ccdc_prompt() {
-  local q=/var/tmp/ccdc-evidence/baseline/queue n
-  n=$(sudo -n grep -c . "$q" 2>/dev/null) || return 0
-  [ "${n:-0}" -gt 0 ] && printf '[!%s] ' "$n"
-}
-PS1='$(ccdc_prompt)'"$PS1"
-```
-
-It prints `[!6]` while six things are unexplained and nothing at all when the
-box is clean, so a clean box is silent and a dirty one is impossible to forget
-about. It reads the queue that `baseline.sh` already writes, so it costs one
-`grep` per prompt and needs no daemon.
-
-If `sudo -n` prompts rather than failing silently on your box, give the account
-a NOPASSWD rule for exactly that one read - and record it as a standing
-exception so the tool does not later report the rule you added.
+repeat itself, which leaves a separate question unanswered: *is there anything
+outstanding right now?* A shell prompt indicator is a possible future answer;
+it is intentionally not shown as a shell snippet: installing a prompt hook or
+new sudo rule during an event would be another unreviewed change to explain.
+Until it is built and tested, use the supported `sentry.sh --status` command.

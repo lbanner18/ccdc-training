@@ -89,10 +89,12 @@ method changes were agreed. Only the second was done.
 
 ## D3c — Alerting, in three tiers (2026-09-17) — **PARTIALLY BUILT**
 
-1. Deduped `wall` on RED findings. *(Done.)*
+1. Deduped `wall` on RED findings. *(Done in `watch.sh`; enabled by default
+   through `CCDC_WATCH_NOTIFY=1` when `wall` is available.)*
 2. A prompt indicator, `[!3]` in `PS1`, for everything below RED. *(NOT DONE —
    described in baseline-design.md, never built.)*
-3. A dedicated pane running the watch loop. *(Done.)*
+3. A dedicated pane running the watch loop. *(Not a packaged workflow. The
+   installed sentry already runs watch; use `sentry.sh --status` for the queue.)*
 
 ## D4 — Blessing is a commitment device, not a cleanliness proof (2026-09-17)
 
@@ -101,7 +103,7 @@ everything afterwards is measured against it **forever**, never against the
 previous pass, so nothing decays into normal. It follows that:
 
 - Bless a box you have not cleaned and you bless the implants with it. Order is
-  triage -> harden -> bless.
+  recon/hunt -> harden -> triage/baseline review -> bless -> arm.
 - Drift is measured against the blessing, not the last run.
 - An exception is recorded with a reason and a timestamp, which is also a line
   you can paste into the inject that asked for the change.

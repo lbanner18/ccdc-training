@@ -123,6 +123,52 @@ suite. This is the argument for running it rather than reading it.
    same unit file had two different safety levels depending on which detector
    named it first.
 
+## Windows (started 2026-09-17, after the Windows/firewall training)
+
+Built to the **Basic Windows Hardening Checklist** from the team's own course
+material (`ccdc-coursework/.../Basic hrdning Chklst.pdf`), which is the closest
+thing to a spec anyone has handed us.
+
+- [x] `lib/Common.ps1` — config (the SAME file the Linux tools read), findings
+      in the same `SEV|check|subject|desc` format, evidence, scored-service
+      checks, and a capability probe that says out loud which checks cannot run
+      on this box rather than skipping them silently.
+- [x] `triage.ps1` — 8 check groups, RED/AMBER/NOTE, every finding printing the
+      command that fixes it and a card reference.
+- [x] `harden.ps1` — the checklist in order, `-Apply` gated, scored re-check
+      after every step, and the firewall step writes your own access rules
+      BEFORE it sets default-inbound to Block.
+- [x] `users.ps1` — audit, backup admin, password rotation that refuses to
+      touch a scored account without `-IncludeScoredUsers`.
+- [x] `watchdog.ps1` — restarts stopped scored services, re-enables disabled
+      scored ACCOUNTS, installs as a SYSTEM scheduled task.
+- [x] `playbooks/windows-cards.md` — 10 cards, asserted to exist.
+- [x] `playbooks/windows-first-15-minutes.md`
+- [x] `redteam/windows-self-test.ps1` — 36 assertions against planted fixtures,
+      wired into `redteam/self-test.sh` (skips where pwsh is absent).
+
+### NOT YET TRUE OF THE WINDOWS HALF — read before trusting it
+
+- [ ] **It has never run on Windows.** Every assertion is against stubs written
+      from documented cmdlet shapes on a Linux host. A green run means "the
+      logic is right", never "it works". The lab VM (`ccdc-win`) is being built
+      to fix exactly this.
+- [ ] No approval queue. The Linux side has `sentry.sh` with numbered items and
+      per-item approve commands; Windows prints the command and you paste it.
+- [ ] No baseline/drift. Nothing freezes a known-good Windows box.
+- [ ] No domain hardening. `users.ps1` refuses to run on a DC and hands over the
+      AD commands instead. GPO, delegation and AD ACLs are by hand.
+- [ ] `recon.ps1` is still the original stub; it predates `lib/Common.ps1` and
+      does not use it.
+
+## Linux changes from the same training (2026-09-17)
+
+- [x] **Scored accounts are checked for availability.** The notes say it
+      outright: *"We have scored users in addition to scored services. We have
+      to make sure scoring users are available."* Nothing looked. A locked or
+      expired account in `CCDC_ALLOWED_USERS` now emits RED `scoreduser`, and
+      it has the one action in the kit that RESTORES rather than removes.
+
 ## P1 — promised in writing, not built
 
 - [x] 3. `--explain N` — built in `harden.sh` and back-ported to `baseline.sh`.
