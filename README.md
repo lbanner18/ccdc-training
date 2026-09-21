@@ -5,7 +5,7 @@ two questions: **is the scored service up**, and **can I prove what changed**.
 
 - **Linux** — 26 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
   and a supervised approval queue that applies fixes only when you say so.
-- **Windows** — 12 tools, 58 checks: triage, a checklist-driven harden, account
+- **Windows** — 13 tools, 58 checks: triage, a checklist-driven harden, account
   and password handling, a scored-service/canary watchdog, the same approval queue,
   configuration drift against a frozen baseline, and tripwires that report who
   read them.
@@ -258,6 +258,8 @@ windows/                  PowerShell tools for Windows boxes. Target is Windows
                           or redirected Guardian task; Guardian repairs it
   evidence.ps1            bundles key defense records and verifies a copy to a
                           user-supplied UNC share; never chooses a destination
+  timeline.ps1            read-only, time-bounded incident timeline across
+                          Security, System, PowerShell, Task Scheduler, and Defender
   surface.ps1             read-only listener/service/selected-autostart map;
                           --Table is markdown ready and states its remaining
                           coverage gaps; can include explicitly configured

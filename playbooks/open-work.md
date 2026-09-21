@@ -183,6 +183,10 @@ team-controlled share and verified the remote hash.
 - [x] `recon.ps1` — rewritten 2026-09-18. Was the last file predating
       `lib/Common.ps1`. Now records a GAP as a gap: a collection that failed
       writes a file saying so rather than an empty one.
+- [x] `timeline.ps1` — read-only, time-bounded incident timeline that joins
+      Security, System, PowerShell, Task Scheduler, and Defender records into
+      CSV and Markdown. Proven on `ccdc-win` 2026-09-21: a quiet log is zero
+      events, not a fake collection gap; files are hash-manifested.
 - [x] `sentry.ps1` — the approval queue. 25 of the 58 checks are automatable;
       `-Status` freezes a numbered snapshot, `-Approve` re-verifies identity
       against a fresh scan, a sweep takes SWEEP-tier only.
@@ -522,7 +526,7 @@ not solve the Administrator threat model.
       `RealTimeProtectionEnabled` being false IS the finding, not something to
       quietly fix.
       The old “recon + watchdog, 63 lines, never run” description is obsolete:
-      `windows/` now has ten tools, and all 58 triage checks have run on the
+      `windows/` now has thirteen tools, and all 58 triage checks have run on the
       Server 2022 lab target over WinRM. That target intentionally has no SSH
       listener—OpenSSH installation would attempt Windows Update on the isolated
       lab network—so a closed port 22 is provisioning reality, not a failed test.
