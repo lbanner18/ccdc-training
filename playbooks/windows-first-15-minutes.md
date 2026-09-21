@@ -310,6 +310,21 @@ The removed Guardian should produce `INTEGRITY-GAP` in `integrity.log`. The
 final test should produce `INTEGRITY-GAP`, not a repair. Revert the snapshot or
 reinstall Guardian after recording the results.
 
+### Repeat the recovery proof without typing each failure by hand
+
+On a disposable snapshot, the lab-only drill performs the same four checks,
+waits for the actual task/file/log result, and finishes by reinstalling the
+healthy three-task chain. It deliberately interrupts monitoring, so it needs
+both confirmations below. Do not run it on the competition host.
+
+```powershell
+$env:CCDC_WIN_LAB = 1
+.\redteam\windows-recovery-self-test.ps1 -Config C:\ProgramData\CCDC\ccdc.env -IAcceptThisBoxIsDisposable
+```
+
+It is a repeatable proof of ordinary recovery, not a promise that an
+Administrator cannot remove every task and both copies.
+
 ---
 
 ## Once you believe the box — freeze it
