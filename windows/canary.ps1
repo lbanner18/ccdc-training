@@ -211,10 +211,12 @@ if ($Deploy) {
     }
 
     $laid | Set-Content -LiteralPath $script:manifestFile -Encoding UTF8
-    # Two seconds ahead: laying a decoy writes it and then reads it to hash it,
-    # and both are audited. Without this the very first -Check reports the
-    # deployment as a trip.
-    (Get-Date).AddSeconds(2).ToUniversalTime().ToString('o') | Set-Content -LiteralPath $script:lastCheckFile -Encoding UTF8
+    # Ten seconds ahead: Windows can commit the 4663 records generated while a
+    # SACL is being attached a few seconds after the file operation. Without a
+    # margin the first -Check can report deployment as a trip. This is only the
+    # brief settling window immediately after a deliberate -Deploy; every later
+    # check advances the watermark to the time it actually completed.
+    (Get-Date).AddSeconds(10).ToUniversalTime().ToString('o') | Set-Content -LiteralPath $script:lastCheckFile -Encoding UTF8
     C "deployed $(@($laid).Count) canaries"
 
     Write-Host ''

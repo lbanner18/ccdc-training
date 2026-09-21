@@ -132,7 +132,7 @@ own_payload() {
   local path=$1 g gdir sdir
   g=${CCDC_GUARDIAN_NAME:-node-health}
   gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}
-  sdir=${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}}
+  sdir=${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-node-observer}}
   case "$path" in "$gdir"/*|"$sdir"/*) return 0 ;; esac
   return 1
 }
@@ -303,9 +303,9 @@ fi
 # It is first for the same reason a stopped scored service is first: it is
 # points, not hygiene.
 begin
-if [ -n "${CCDC_ALLOWED_USERS:-}" ]; then
+if [ -n "${CCDC_INTERACTIVE_USERS:-}" ]; then
   scored_broken=''
-  for u in ${CCDC_ALLOWED_USERS:-}; do
+  for u in ${CCDC_INTERACTIVE_USERS:-}; do
     [ "$u" = root ] && continue
     if ! getent passwd "$u" >/dev/null 2>&1; then
       emit RED scoreduser "$u" "account named in the packet no longer exists"
@@ -355,10 +355,10 @@ if [ -n "${CCDC_ALLOWED_USERS:-}" ]; then
     done
     fix "# unlock, clear any expiry, then read back the line to confirm the shell"
   else
-    clean "every account named in CCDC_ALLOWED_USERS can still log in"
+    clean "every account named in CCDC_INTERACTIVE_USERS can still log in"
   fi
 else
-  clean "scored-account check skipped (CCDC_ALLOWED_USERS is empty - fill it from the packet)"
+  clean "interactive scored-account check skipped (set CCDC_INTERACTIVE_USERS only when the packet requires a login)"
 fi
 
 # --- 2. Accounts with no password --------------------------------------------
@@ -491,7 +491,11 @@ fi
 # the real one hid in 4,008 lines. This asks whether a scheduled job contains
 # the shapes that only ever mean a shell.
 begin
-shells='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
+# `nc -z HOST PORT` is a normal, non-interactive liveness probe.  Netcat only
+# belongs in this shell-payload pattern when it is told to execute a command;
+# treating every option as a reverse shell made the kit condemn its own scored
+# service health check on the lab VM.
+shells='/dev/tcp|/dev/udp|(^|[[:space:];|])(nc|ncat|netcat)[[:space:]]+([^[:space:]]+[[:space:]]+)*(-e|-c|--exec|--sh-exec)([[:space:]]|$)|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat'
 
 # Print conservative, delimiter-safe absolute-path tokens from a command line.
 # This intentionally declines paths containing whitespace or shell metacharacters
@@ -788,7 +792,7 @@ for udir in /etc/systemd/system /usr/local/lib/systemd/system /usr/lib/systemd/s
     [ -f "$uf" ] && [ ! -L "$uf" ] || continue
     own_payload "$uf" && continue
     case "$(basename -- "$uf")" in
-      "${CCDC_GUARDIAN_NAME:-node-health}"*|"${CCDC_SENTRY_NAME:-ccdc-sentry}"*) continue ;;
+      "${CCDC_GUARDIAN_NAME:-node-health}"*|"${CCDC_SENTRY_NAME:-node-observer}"*) continue ;;
     esac
     pkg_owns "$uf" && continue
     newer_than_box "$uf" || continue

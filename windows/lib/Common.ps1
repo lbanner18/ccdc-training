@@ -219,6 +219,121 @@ function Get-CcdcValue {
     return $Default
 }
 
+# Names that enter Task Scheduler or become an executable filename must stay a
+# leaf.  This keeps a config typo from changing an unrelated scheduled task or
+# making a private-copy installer write outside CCDC's own directory.
+function Get-CcdcTaskName {
+    param([Parameter(Mandatory)][hashtable]$Config,
+          [Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][string]$Default)
+    $value = Get-CcdcValue -Config $Config -Name $Name -Default $Default
+    if ($value -notmatch '^[A-Za-z0-9_-]+$') {
+        Write-CcdcDie "$Name must contain only letters, digits, underscore, or hyphen: $value"
+    }
+    return $value
+}
+
+function Get-CcdcPrivateLeaf {
+    param([Parameter(Mandatory)][hashtable]$Config,
+          [Parameter(Mandatory)][string]$Name,
+          [Parameter(Mandatory)][string]$Default,
+          [switch]$PowerShellFile)
+    $value = Get-CcdcValue -Config $Config -Name $Name -Default $Default
+    $pattern = if ($PowerShellFile) { '^[A-Za-z0-9][A-Za-z0-9_.-]*\.ps1$' } else { '^[A-Za-z0-9][A-Za-z0-9_.-]*$' }
+    if ($value -notmatch $pattern) {
+        $kind = if ($PowerShellFile) { 'a .ps1 filename' } else { 'a simple directory name' }
+        Write-CcdcDie "$Name must be $kind without path separators: $value"
+    }
+    return $value
+}
+
+# --- optional Sysinternals Autorunsc evidence --------------------------------
+#
+# Autorunsc sees persistence locations that the built-in collectors cannot.
+# It is deliberately NOT a dependency: downloading tools during a round changes
+# the box, and trusting whichever autorunsc.exe happens to be in PATH is an
+# avoidable execution risk. An operator who wants this evidence names one
+# absolute, Microsoft-signed binary in the config. EULA acceptance is separate
+# because it writes per-user Sysinternals state; the default only runs after the
+# operator has accepted it outside this kit.
+
+function Test-CcdcAutorunscEulaAccepted {
+    try {
+        $eula = Get-ItemProperty -LiteralPath 'HKCU:\Software\Sysinternals\Autoruns' -Name 'EulaAccepted' -ErrorAction Stop
+        return ([int]$eula.EulaAccepted -eq 1)
+    } catch {
+        return $false
+    }
+}
+
+function Get-CcdcAutorunscTool {
+    param([Parameter(Mandatory)][hashtable]$Config)
+
+    $configured = Get-CcdcValue -Config $Config -Name 'CCDC_AUTORUNSC_PATH'
+    if ([string]::IsNullOrWhiteSpace($configured)) {
+        return [pscustomobject]@{ Available = $false; Path = ''; Reason = 'CCDC_AUTORUNSC_PATH is empty (optional collector is not configured)' }
+    }
+    if (-not [System.IO.Path]::IsPathRooted($configured)) {
+        return [pscustomobject]@{ Available = $false; Path = ''; Reason = 'CCDC_AUTORUNSC_PATH must be an absolute path; PATH lookup is intentionally disabled' }
+    }
+    if (-not (Test-Path -LiteralPath $configured -PathType Leaf)) {
+        return [pscustomobject]@{ Available = $false; Path = ''; Reason = "configured Autorunsc binary does not exist: $configured" }
+    }
+    if (-not (Test-CcdcHasCommand -Name 'Get-AuthenticodeSignature')) {
+        return [pscustomobject]@{ Available = $false; Path = ''; Reason = 'Get-AuthenticodeSignature is unavailable; refusing to run an unverified optional binary' }
+    }
+    try {
+        $resolved = (Resolve-Path -LiteralPath $configured -ErrorAction Stop).Path
+        $signature = Get-AuthenticodeSignature -FilePath $resolved -ErrorAction Stop
+        $subject = ''
+        if ($signature.SignerCertificate) { $subject = [string]$signature.SignerCertificate.Subject }
+        if ($signature.Status -ne 'Valid' -or $subject -notmatch 'CN=Microsoft Corporation') {
+            return [pscustomobject]@{ Available = $false; Path = $resolved; Reason = "configured Autorunsc binary is not validly signed by Microsoft (status: $($signature.Status))" }
+        }
+        return [pscustomobject]@{ Available = $true; Path = $resolved; Reason = '' }
+    } catch {
+        return [pscustomobject]@{ Available = $false; Path = ''; Reason = "could not verify configured Autorunsc binary: $($_.Exception.Message)" }
+    }
+}
+
+function Invoke-CcdcAutorunsc {
+    param([Parameter(Mandatory)][hashtable]$Config)
+
+    $tool = Get-CcdcAutorunscTool -Config $Config
+    if (-not $tool.Available) {
+        return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = $tool.Reason; Rows = @() }
+    }
+
+    $accept = Get-CcdcValue -Config $Config -Name 'CCDC_AUTORUNSC_ACCEPT_EULA' -Default '0'
+    if ($accept -ne '0' -and $accept -ne '1') {
+        return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = 'CCDC_AUTORUNSC_ACCEPT_EULA must be 0 or 1'; Rows = @() }
+    }
+    if ($accept -eq '0' -and -not (Test-CcdcAutorunscEulaAccepted)) {
+        return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = 'Autorunsc EULA is not accepted for this user; accept it manually or set CCDC_AUTORUNSC_ACCEPT_EULA=1 explicitly'; Rows = @() }
+    }
+
+    $arguments = @('-nobanner', '-a', '*', '-c', '-h')
+    if ($accept -eq '1') { $arguments = @('-accepteula') + $arguments }
+    try {
+        $raw = @(& $tool.Path @arguments 2>$null)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) {
+            return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = "Autorunsc exited $exitCode"; Rows = @() }
+        }
+        $text = ($raw | Out-String -Width 4096).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = 'Autorunsc returned no CSV data'; Rows = @() }
+        }
+        $rows = @($text | ConvertFrom-Csv -ErrorAction Stop)
+        if (@($rows).Count -gt 0 -and -not ($rows[0].PSObject.Properties.Name -contains 'Entry')) {
+            return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = 'Autorunsc returned CSV without an Entry column'; Rows = @() }
+        }
+        return [pscustomobject]@{ Ran = $true; Path = $tool.Path; Reason = ''; Rows = $rows }
+    } catch {
+        return [pscustomobject]@{ Ran = $false; Path = $tool.Path; Reason = "could not collect Autorunsc CSV: $($_.Exception.Message)"; Rows = @() }
+    }
+}
+
 # A whitespace/newline separated list, as an array with the blanks dropped.
 function Get-CcdcList {
     param([Parameter(Mandatory)][hashtable]$Config,

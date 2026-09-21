@@ -38,6 +38,43 @@ CCDC_PROTECT_SERVICES="scored-thing"
 EOF
 mkdir -p "$test_root/state"
 
+# The shared inventory is deliberately machine-readable rather than a second
+# report format. It is the seam consumers can migrate to only after parity is
+# proven, so its flag, schema, and conffile coverage are contracts.
+if grep -q -- "--inventory) mode='inventory'" "$BASE" \
+   && grep -q 'kind|subject|detail' "$BASE"; then
+  ok 'baseline exposes a machine-readable shared inventory mode'
+else
+  no 'baseline exposes a machine-readable shared inventory mode'
+fi
+if awk '/^  inventory\)/,/^    ;;/' "$BASE" | grep -q 'load_conffiles' \
+   && awk '/^  inventory\)/,/^    ;;/' "$BASE" | grep -q '^    inventory$'; then
+  ok 'shared inventory includes conffile drift and uses the canonical walker'
+else
+  no 'shared inventory includes conffile drift and uses the canonical walker'
+fi
+if grep -q 'execution-inventory.txt' "$ROOT/linux/recon.sh" \
+   && grep -q -- '--inventory' "$ROOT/linux/recon.sh"; then
+  ok 'recon records the canonical inventory beside its detailed evidence'
+else
+  no 'recon records the canonical inventory beside its detailed evidence'
+fi
+if "$BASE" --config "$test_root/test.env" --inventory >"$test_root/inventory.out" 2>&1; then
+  if awk -F'|' 'NF == 3 && $1 != "" && $2 ~ /^\// { found=1 } END { exit !found }' \
+       "$test_root/inventory.out"; then
+    ok 'canonical inventory runs and emits structured path records'
+  else
+    no 'canonical inventory runs and emits structured path records'
+  fi
+else
+  no 'canonical inventory runs and emits structured path records'
+fi
+if grep -qE '^(cron|unit|suid|usershell|sshd|pam|sudoers)\|' "$test_root/inventory.out"; then
+  ok 'canonical inventory names a known execution or semantic surface'
+else
+  no 'canonical inventory names a known execution or semantic surface'
+fi
+
 # --- the finish-line guarantee ----------------------------------------------
 #
 # This is the assertion this file exists for. Thirteen of triage's twenty-seven
@@ -105,6 +142,22 @@ if [ -z "$unanswered" ]; then
   ok 'every kind has either an action or a written reason it needs a human'
 else
   no "these kinds have neither an action nor a needs-you block: $unanswered"
+fi
+
+# The denominator must come from the same list the collector walks, and the
+# drill generator must consume that exported list rather than maintaining a
+# second persistence list that can quietly go stale.
+if "$BASE" --config "$test_root/test.env" --mechanisms >"$test_root/mechanisms.out" 2>&1 \
+   && grep -q '^directory' "$test_root/mechanisms.out" \
+   && grep -q '^file' "$test_root/mechanisms.out"; then
+  ok 'baseline exports the known root-execution mechanism denominator'
+else
+  no 'baseline does not export its root-execution mechanism denominator'
+fi
+if bash "$ROOT/redteam/mechanism-drill.sh" --self-test >"$test_root/mechanism-drill.out" 2>&1; then
+  ok 'mechanism drill is generated from baseline inventory rather than a second list'
+else
+  no 'mechanism drill cannot consume the baseline mechanism inventory'
 fi
 
 # action_for DESCRIBES what approving does; do_action PERFORMS it. They are two

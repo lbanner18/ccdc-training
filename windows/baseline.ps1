@@ -115,11 +115,16 @@ function Get-TaskState {
 }
 
 function Get-AutostartState {
+    param([Parameter(Mandatory)][hashtable]$Config)
     $h = @{}
     foreach ($k in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
                      'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
                      'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run',
-                     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run')) {
+                     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\RunOnce',
+                     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run',
+                     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
+                     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
+                     'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run')) {
         try {
             $p = Get-ItemProperty -LiteralPath $k -ErrorAction Stop
             foreach ($n in $p.PSObject.Properties.Name) {
@@ -135,21 +140,59 @@ function Get-AutostartState {
             $h[$f.FullName] = 'startup folder item'
         }
     }
-    # The long tail belongs to somebody else. Autoruns knows ~200 autostart
-    # locations; the four above are the ones worth hard-coding. If the operator
-    # brought autorunsc.exe, use it and say so - rebuilding it badly would be
-    # the worst of both.
-    $ar = Get-Command 'autorunsc.exe' -ErrorAction SilentlyContinue
-    if ($ar) {
+    try {
+        $wl = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -ErrorAction Stop
+        foreach ($n in @('Shell', 'Userinit')) {
+            if ($wl.PSObject.Properties.Name -contains $n) { $h["winlogon:$n"] = [string]$wl.$n }
+        }
+    } catch { }
+    try {
+        $ai = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Windows' -ErrorAction Stop
+        $dlls = if ($ai.PSObject.Properties.Name -contains 'AppInit_DLLs') { [string]$ai.AppInit_DLLs } else { '' }
+        $load = if ($ai.PSObject.Properties.Name -contains 'LoadAppInit_DLLs') { [string]$ai.LoadAppInit_DLLs } else { '?' }
+        if (-not [string]::IsNullOrWhiteSpace($dlls) -or $load -eq '1') { $h['appinit'] = "load=$load; dlls=$dlls" }
+    } catch { }
+    foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options',
+                         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows NT\CurrentVersion\Image File Execution Options')) {
         try {
-            $csv = & $ar.Source -accepteula -nobanner -a * -c -h 2>$null | ConvertFrom-Csv
-            foreach ($row in $csv) {
-                $entry = ''; $loc = ''; $img = ''
-                try { $entry = [string]$row.'Entry'; $loc = [string]$row.'Entry Location'; $img = [string]$row.'Image Path' } catch { }
-                if ([string]::IsNullOrWhiteSpace($entry)) { continue }
-                $h["autoruns:$loc\$entry"] = $img
+            foreach ($child in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+                $debug = Get-ItemProperty -LiteralPath $child.PSPath -Name 'Debugger' -ErrorAction SilentlyContinue
+                if ($debug -and ($debug.PSObject.Properties.Name -contains 'Debugger') -and -not [string]::IsNullOrWhiteSpace([string]$debug.Debugger)) {
+                    $h["ifeo:$($child.PSPath)"] = [string]$debug.Debugger
+                }
             }
         } catch { }
+    }
+    foreach ($root in @('HKLM:\SOFTWARE\Microsoft\Active Setup\Installed Components',
+                         'HKCU:\SOFTWARE\Microsoft\Active Setup\Installed Components')) {
+        try {
+            foreach ($child in @(Get-ChildItem -LiteralPath $root -ErrorAction Stop)) {
+                $stub = Get-ItemProperty -LiteralPath $child.PSPath -Name 'StubPath' -ErrorAction SilentlyContinue
+                if ($stub -and ($stub.PSObject.Properties.Name -contains 'StubPath') -and -not [string]::IsNullOrWhiteSpace([string]$stub.StubPath)) {
+                    $h["activesetup:$($child.PSPath)"] = [string]$stub.StubPath
+                }
+            }
+        } catch { }
+    }
+    try {
+        foreach ($consumer in @(Get-CimInstance -Namespace root\subscription -ClassName __EventConsumer -OperationTimeoutSec 8 -ErrorAction Stop)) {
+            $className = if ($consumer.PSObject.Properties.Name -contains '__CLASS') { [string]$consumer.__CLASS } else { 'consumer' }
+            $name = if ($consumer.PSObject.Properties.Name -contains 'Name') { [string]$consumer.Name } else { '(unnamed)' }
+            $command = if ($consumer.PSObject.Properties.Name -contains 'CommandLineTemplate') { [string]$consumer.CommandLineTemplate } elseif ($consumer.PSObject.Properties.Name -contains 'ExecutablePath') { [string]$consumer.ExecutablePath } else { '' }
+            $h["wmiconsumer:$className/$name"] = $command
+        }
+    } catch { }
+    # Wider persistence evidence is opt-in. Do not discover a binary from PATH
+    # or accept its EULA invisibly: both decisions belong to the operator.
+    $autorunsc = Invoke-CcdcAutorunsc -Config $Config
+    $script:AutorunscStatus = $autorunsc.Reason
+    if ($autorunsc.Ran) {
+        foreach ($row in @($autorunsc.Rows)) {
+            $entry = ''; $loc = ''; $img = ''
+            try { $entry = [string]$row.'Entry'; $loc = [string]$row.'Entry Location'; $img = [string]$row.'Image Path' } catch { }
+            if ([string]::IsNullOrWhiteSpace($entry)) { continue }
+            $h["autoruns:$loc\$entry"] = $img
+        }
     }
     return $h
 }
@@ -263,10 +306,14 @@ function Get-ExecutableSurface {
 }
 
 function Get-BoxSnapshot {
+    param([Parameter(Mandatory)][hashtable]$Config)
     if (-not $Quiet) { Write-Host '  looking at services, tasks, autostarts, accounts, ports, firewall, shares, WMI...' }
     $svc = Get-ServiceState
     $tsk = Get-TaskState
-    $aut = Get-AutostartState
+    $aut = Get-AutostartState -Config $Config
+    if (-not $Quiet -and -not [string]::IsNullOrWhiteSpace($script:AutorunscStatus)) {
+        Write-CcdcWarn "Autorunsc optional collection skipped: $($script:AutorunscStatus)"
+    }
     if (-not $Quiet) { Write-Host '  hashing every executable those wire to run...' }
     return [ordered]@{
         meta = [ordered]@{
@@ -327,7 +374,7 @@ if ($Bless) {
         Write-Host '  wrong with the box right now becomes the new definition of normal.' -ForegroundColor Yellow
         Write-Host ''
     }
-    $snap = Get-BoxSnapshot
+    $snap = Get-BoxSnapshot -Config $cfg
 
     $counts = @()
     foreach ($k in @('services','tasks','autostart','accounts','listeners','firewall','shares','wmi','defender','files')) {
@@ -384,7 +431,7 @@ no baseline to compare against.
     } catch {
         Write-CcdcDie "the baseline file is unreadable: $($_.Exception.Message)"
     }
-    $new = Get-BoxSnapshot
+    $new = Get-BoxSnapshot -Config $cfg
 
     $sections = @('services','tasks','autostart','accounts','listeners','firewall','shares','wmi','defender','files')
     $items = New-Object System.Collections.ArrayList

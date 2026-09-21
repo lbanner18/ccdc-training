@@ -25,13 +25,15 @@ case "$test_root" in /tmp/ccdc-sentry-test.*|"${TMPDIR:-/tmp}"/ccdc-sentry-test.
 cleanup() { rm -rf -- "$test_root"; }
 trap cleanup EXIT INT TERM HUP
 
-mkdir -p "$test_root/suite/lib" "$test_root/state" "$test_root/cron" "$test_root/systemd" "$test_root/bin"
+mkdir -p "$test_root/suite/lib" "$test_root/state" "$test_root/cron" "$test_root/systemd" "$test_root/run" "$test_root/prompt-local" "$test_root/profile-d" "$test_root/bin"
 : >"$test_root/null"
 chmod 0666 "$test_root/null"
 cp -- "$ROOT/linux/sentry.sh" "$test_root/suite/sentry.sh"
 cp -- "$ROOT/linux/triage.sh" "$test_root/suite/real-triage.sh"
+cp -- "$ROOT/linux/prompt.sh" "$test_root/suite/prompt.sh"
 cp -- "$ROOT/linux/lib/common.sh" "$test_root/suite/lib/common.sh"
-chmod 0755 "$test_root/suite/sentry.sh" "$test_root/suite/real-triage.sh"
+cp -- "$ROOT/linux/lib/provenance.sh" "$test_root/suite/lib/provenance.sh"
+chmod 0755 "$test_root/suite/sentry.sh" "$test_root/suite/real-triage.sh" "$test_root/suite/prompt.sh"
 
 cat >"$test_root/suite/triage.sh" <<'FAKE_TRIAGE'
 #!/usr/bin/env bash
@@ -64,6 +66,9 @@ case "$mode" in
     ;;
   clean)
     : >"$out"
+    ;;
+  amber)
+    printf 'AMBER|rogueunit|/etc/systemd/system/amber.service|reversible test unit\n' >"$out"
     ;;
   fail)
     exit 9
@@ -98,6 +103,7 @@ test_root=$1
 suite="$test_root/suite"
 state="$test_root/state"
 config="$test_root/test.env"
+prompt="$suite/prompt.sh"
 PATH="$test_root/bin:$PATH"
 export PATH
 pass=0
@@ -127,6 +133,27 @@ cd "$test_root" || exit 1
 "$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
 has '^RED[|]cron[|]/etc/cron.d/job;touch[$][{]IFS[}]PWNED$' "$state/sentry.queue" \
   'queue stores structured fields, not a command'
+has '^[0-9]+[|]0[|][0-9]+$' "$test_root/run/ccdc-sentry-prompt" \
+  'RED-only queue publishes a zero pending-AMBER prompt count'
+
+# The indicator changes two profile-owned files only when an operator asks for
+# it. Exercise the real root-gated install and uninstall inside this namespace,
+# whose /usr/local/lib and /etc/profile.d are disposable bindings.
+if "$prompt" --config "$config" --install --apply >/dev/null \
+   && [ -f /usr/local/lib/ccdc-prompt/prompt-hook.sh ] \
+   && [ -f /etc/profile.d/99-ccdc-prompt.sh ] \
+   && grep -qxF '# CCDC_PROMPT_HOOK v1' /usr/local/lib/ccdc-prompt/prompt-hook.sh; then
+  ok 'prompt install creates exactly its marked hook and profile entry'
+else
+  bad 'prompt install creates exactly its marked hook and profile entry'
+fi
+if "$prompt" --config "$config" --uninstall --apply >/dev/null \
+   && [ ! -e /usr/local/lib/ccdc-prompt/prompt-hook.sh ] \
+   && [ ! -e /etc/profile.d/99-ccdc-prompt.sh ]; then
+  ok 'prompt uninstall removes its owned files again'
+else
+  bad 'prompt uninstall removes its owned files again'
+fi
 "$suite/sentry.sh" --config "$config" --status >/dev/null
 if "$suite/sentry.sh" --config "$config" --approve --apply >/dev/null; then
   ok 'metacharacter-path approval completed'
@@ -137,6 +164,15 @@ fi
 [ ! -e "$test_root/PWNED" ] && ok 'shell metacharacters were never evaluated' || bad 'shell metacharacters were never evaluated'
 has '[|]cron[|]/etc/cron.d/job;touch[$][{]IFS[}]PWNED[|]' "$state/sentry.undo" \
   'approval record names structured subject and evidence'
+
+# AMBER entries need an individual sign-off, but the prompt must say that one
+# is waiting. Use a reversible unit shape so can_automate legitimately queues
+# it rather than inflating the count with a held finding.
+printf '[Service]\nExecStart=/bin/false\n' >'/etc/systemd/system/amber.service'
+printf 'amber\n' >"$test_root/mode"
+"$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
+has '^[0-9]+[|]1[|][0-9]+$' "$test_root/run/ccdc-sentry-prompt" \
+  'one actionable AMBER item publishes prompt count one'
 
 # A queue made under the old config must be rebuilt under the new protection
 # list before approval. The fake triage continues to report the same unit.
@@ -227,6 +263,8 @@ watch_before=$(wc -l <"$test_root/watch-runs" 2>/dev/null || printf 0)
 [ ! -s "$state/sentry.queue" ] && ok 'triage failure clears actionable queue' || bad 'triage failure clears actionable queue'
 has 'MONITOR HEALTH PROBLEM' "$state/ALERTS" 'triage failure is visible in ALERTS'
 has 'exit 9' "$state/sentry.health.triage" 'triage failure records exit status'
+has '^[0-9]+[|][?][|][0-9]+$' "$test_root/run/ccdc-sentry-prompt" \
+  'triage failure publishes an unknown prompt state'
 watch_after=$(wc -l <"$test_root/watch-runs" 2>/dev/null || printf 0)
 [ "$watch_after" -gt "$watch_before" ] && ok 'triage failure does not suppress the independent watch layer' || bad 'triage failure does not suppress the independent watch layer'
 has '^45[|]triage.sh$' "$test_root/timeout-calls" 'triage runs behind its configured deadline'
@@ -243,6 +281,9 @@ if ! bwrap --die-with-parent --unshare-user --uid 0 --gid 0 --unshare-pid \
     --bind "$test_root/null" /dev/null \
     --bind "$test_root/cron" /etc/cron.d \
     --bind "$test_root/systemd" /etc/systemd/system \
+    --bind "$test_root/run" /run \
+    --bind "$test_root/prompt-local" /usr/local/lib \
+    --bind "$test_root/profile-d" /etc/profile.d \
     /bin/bash "$test_root/runner.sh" "$test_root"; then
   printf 'sentry self-test failed\n' >&2
   [ ! -f "$test_root/state/sentry.log" ] || tail -n 30 "$test_root/state/sentry.log" >&2
@@ -492,6 +533,50 @@ if [ "$rt" = ok ]; then
   hok 'preserve then restore puts the original file back, byte for byte'
 else
   hno "preserve/restore round trip: $rt"
+fi
+
+# A common lab health probe is `nc -z 127.0.0.1 PORT`.  It does not execute a
+# shell, while netcat's explicit exec modes do.  Keep the shared triage pattern
+# honest because cron, units and one-hop payloads all use it.
+cron_shells=$(awk -F"'" '/^shells=/{ print $2; exit }' "$ROOT/linux/triage.sh")
+if printf '%s\n' 'exec /usr/bin/nc -z 127.0.0.1 8080' | grep -qE "$cron_shells"; then
+  hno 'netcat zero-I/O health probes are not called reverse shells'
+else
+  hok 'netcat zero-I/O health probes are not called reverse shells'
+fi
+if printf '%s\n' 'nc -l -p 4444 -e /bin/sh' | grep -qE "$cron_shells"; then
+  hok 'netcat exec-mode payloads remain reverse-shell findings'
+else
+  hno 'netcat exec-mode payloads were lost from reverse-shell findings'
+fi
+
+# Service identities belong in the protected account list, but many are
+# intentionally nologin. Availability checks and their restorative action must
+# be limited to the separately declared interactive-login set.
+interactive_block=$(sed -n '/# --- 1b\. Scored accounts/,/# --- 2\. Accounts/p' "$ROOT/linux/triage.sh")
+if grep -q 'CCDC_INTERACTIVE_USERS' <<<"$interactive_block" \
+   && ! grep -q 'for u in \${CCDC_ALLOWED_USERS' <<<"$interactive_block"; then
+  hok 'only explicitly interactive accounts are checked for login availability'
+else
+  hno 'allowed service identities are still treated as interactive scored users'
+fi
+scored_guard=$(awk '/^[[:space:]]*scoreduser\)/,/^[[:space:]]*;;/' "$ROOT/linux/sentry.sh")
+scored_action=$(awk '/^action_scoreduser\(\) \{/,/^}/' "$ROOT/linux/sentry.sh")
+if grep -q 'CCDC_INTERACTIVE_USERS' <<<"$scored_guard"$'\n'"$scored_action"; then
+  hok 'scored-user remediation also requires explicit interactive-login intent'
+else
+  hno 'scored-user remediation can unlock a protected service identity'
+fi
+
+# The action keeps forensic bytes but must not leave a second SUID escalation
+# primitive in its own evidence directory, or the next sweep flags the cure.
+if awk '/^action_suidunpackaged\(\)/,/^}/' "$ROOT/linux/sentry.sh" \
+   | grep -q 'chmod u-s,g-s -- "\$saved"' \
+   && awk '/^action_suidunpackaged\(\)/,/^}/' "$ROOT/linux/sentry.sh" \
+      | grep -q '00-original-metadata.txt'; then
+  hok 'SUID remediation records original metadata and defangs its evidence copy'
+else
+  hno 'SUID remediation leaves a potentially active evidence copy or loses its original mode'
 fi
 
 # Removing a unit can take the scored service with it, whichever detector

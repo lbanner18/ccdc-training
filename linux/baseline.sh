@@ -52,6 +52,9 @@ while [ "$#" -gt 0 ]; do
     --config) config=${2:?missing config path}; shift 2 ;;
     --bless)  mode='bless'; shift ;;
     --status) mode='status'; shift ;;
+    --review) mode='review'; shift ;;
+    --mechanisms) mode='mechanisms'; shift ;;
+    --inventory) mode='inventory'; shift ;;
     --explain) mode='explain'; explain_item=${2:?missing item number}; shift 2 ;;
     --approve) mode='approve'; approve_items=${2:?missing item number(s)}; shift 2 ;;
     --remove-key) mode='removekey'; remove_key=${2:?missing key fingerprint}; shift 2 ;;
@@ -62,12 +65,17 @@ while [ "$#" -gt 0 ]; do
     --fast)   fast=1; shift ;;
     --apply)  apply=1; CCDC_DRY_RUN=0; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--bless|--status|--approve N|--allow WHAT --reason TEXT]\n' "$0"
+      printf 'usage: %s --config FILE [--bless|--status|--review|--inventory|--approve N|--allow WHAT --reason TEXT]\n' "$0"
       printf '       [--all] [--fast] [--apply]\n'
       printf '\n'
       printf '  (no mode)   look at everything; read-only; reports what nothing explains\n'
       printf '  --bless     freeze the current box as the known-good baseline\n'
       printf '  --status    what has drifted since the blessing\n'
+      printf '  --review    one numbered, read-only screen: unexplained AND unnecessary\n'
+      printf '  --mechanisms print the known root-execution mechanism inventory; used by\n'
+      printf '              redteam/mechanism-drill.sh to generate a lab drill plan\n'
+      printf '  --inventory  print the current shared inventory as kind|subject|detail.\n'
+      printf '              It is read-only and intended for reports and parity checks.\n'
       printf '  --explain N the full case for item N: which of the three tests it\n'
       printf '              failed, what it looks like on the box right now, and\n'
       printf '              exactly what acting on it would do, in order\n'
@@ -187,6 +195,35 @@ exec_trigger_files='
 /etc/bash.bashrc
 /etc/ld.so.preload
 '
+
+# A mechanism is a place the box can turn into root-executed work, not a count
+# of checks or a claim that every possible persistence method is known. The
+# denominator is deliberately small and inspectable: changing it means adding
+# the mechanism to the inventory above, which the report and drill generator
+# both consume.
+print_mechanisms() {
+  local d
+  printf '# kind\tpath\tpresent\n'
+  for d in $exec_trigger_dirs; do
+    [ -d "$d" ] && printf 'directory\t%s\tyes\n' "$d" || printf 'directory\t%s\tno\n' "$d"
+  done
+  for d in $exec_trigger_files; do
+    [ -e "$d" ] && printf 'file\t%s\tyes\n' "$d" || printf 'file\t%s\tno\n' "$d"
+  done
+}
+
+print_coverage() {
+  local d total=0 present=0
+  for d in $exec_trigger_dirs; do
+    total=$((total + 1)); [ -d "$d" ] && present=$((present + 1))
+  done
+  for d in $exec_trigger_files; do
+    total=$((total + 1)); [ -e "$d" ] && present=$((present + 1))
+  done
+  printf 'known root-execution mechanisms: %s/%s present and enumerated (%s absent on this image).\n' \
+    "$present" "$total" "$((total - present))"
+  printf 'This is a mechanism-inventory denominator, not a percentage of all ways to compromise Linux.\n'
+}
 
 kind_for() {
   case "$1" in
@@ -772,14 +809,14 @@ unit_is_expected() {
   # look for a report whose whole job is to be believed.
   case "$subject" in
     "$SCRIPT_DIR"/*|"$(dirname -- "$SCRIPT_DIR")"/*) return 0 ;;
-    /usr/local/lib/"${CCDC_SENTRY_NAME:-ccdc-sentry}"/*) return 0 ;;
+    /usr/local/lib/"${CCDC_SENTRY_NAME:-node-observer}"/*) return 0 ;;
     /usr/local/lib/"${CCDC_GUARDIAN_NAME:-node-health}"/*) return 0 ;;
   esac
   # This kit's own layers, under whatever names the config gave them.
   for own in "${CCDC_GUARDIAN_NAME:-node-health}" \
              "${CCDC_GUARDIAN_WATCH_NAME:-${CCDC_GUARDIAN_NAME:-node-health}-watch}" \
              "${CCDC_GUARDIAN_RECONCILE_NAME:-${CCDC_GUARDIAN_NAME:-node-health}-reconcile}" \
-             "${CCDC_SENTRY_NAME:-ccdc-sentry}"; do
+             "${CCDC_SENTRY_NAME:-node-observer}"; do
     [ "$name" = "$own" ] && return 0
   done
   return 1
@@ -1744,6 +1781,7 @@ report() {
 
   printf '%s on %s\n' "$heading" "${CCDC_BOX_NAME:-this box}"
   printf 'read-only. %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  print_coverage
   [ "$fast" -eq 1 ] && printf 'FAST pass: package checksums are cached and the SUID sweep was skipped.\n'
   if [ -r "$blessed" ]; then
     printf 'compared against the baseline blessed %s\n' \
@@ -1842,6 +1880,87 @@ report() {
   fi
   print_exceptions
 
+}
+
+# The two questions are deliberately kept separate in their respective action
+# engines: --approve removes something nobody can explain, while harden --cut
+# reduces legitimate-but-unneeded surface and performs its scored-service
+# rollback. This view only joins the DECISION list. It does not merge their
+# safety models or turn a hardening decision into an approval.
+print_combined_review() {
+  local line kind subject detail sev i=0 base_n=0 hard_n=0 bitem=0 tmp
+  local class hkind key members pkgs head action
+  local -a findings=()
+
+  while IFS= read -r line; do
+    kind=$(printf '%s' "$line" | cut -d'|' -f1)
+    subject=$(printf '%s' "$line" | cut -d'|' -f2)
+    detail=$(printf '%s' "$line" | cut -d'|' -f3-)
+    [ -n "$kind" ] || continue
+    explained "$kind" "$subject" "$detail" && continue
+    if [ ! -r "$blessed" ] && [ "$show_all" -eq 0 ]; then
+      case "$kind" in module|listener|sshd|sshkey|suid|usershell) continue ;; esac
+    fi
+    if [ "$show_all" -eq 0 ] && [ -e "$subject" ] && ! newer_than_box "$subject"; then
+      case "$kind" in uid0|svcshell|procexe) ;; *) continue ;; esac
+    fi
+    findings+=("$kind|$subject|$detail")
+  done < <(inventory)
+
+  mkdir -p "$baseline_dir" 2>/dev/null; chmod 700 "$baseline_dir" 2>/dev/null
+  : >"$queue.tmp"
+  for line in "${findings[@]}"; do
+    i=$((i + 1)); printf '%s|%s\n' "$i" "$line" >>"$queue.tmp"
+  done
+  mv "$queue.tmp" "$queue" 2>/dev/null; chmod 600 "$queue" 2>/dev/null
+  base_n=$i
+
+  tmp=$(mktemp "$baseline_dir/review-harden.XXXXXX") || ccdc_die 'could not make combined-review scratch file'
+  # harden --export freezes its own queue, because its item numbers are the
+  # authoritative ones for a subsequent --cut. Its output is data, never eval.
+  if ! "$SCRIPT_DIR/harden.sh" --config "$config" --export >"$tmp" 2>/dev/null; then
+    rm -f "$tmp"
+    ccdc_die 'harden.sh could not build its read-only review list'
+  fi
+
+  printf 'baseline.sh --review - one decision list for %s\n' "${CCDC_BOX_NAME:-this box}"
+  printf 'read-only. %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  print_coverage
+  printf '\n  %s unexplained item(s); %s legitimate-but-unnecessary candidate(s).\n' \
+    "$base_n" "$(grep -c . "$tmp" 2>/dev/null || true)"
+  printf '  Same screen, different verbs: APPROVE removes unexplained things; CUT reduces\n'
+  printf '  known surface and uses harden.sh\047s independent scored-service rollback.\n\n'
+
+  for line in "${findings[@]}"; do
+    bitem=$((bitem + 1))
+    kind=$(printf '%s' "$line" | cut -d'|' -f1)
+    subject=$(printf '%s' "$line" | cut -d'|' -f2)
+    detail=$(printf '%s' "$line" | cut -d'|' -f3-)
+    sev=$(severity_for "$kind" "$subject" "$detail")
+    action=$(action_for "$kind" "$subject" "$detail")
+    printf '  [%s] UNEXPLAINED %-5s %-11s %s\n' "$bitem" "$sev" "$kind" "$subject"
+    printf '      why: %s\n' "$(why_for "$kind" "$subject" "$detail")"
+    if [ -n "$action" ]; then
+      printf '      approve: sudo %s --config %s --approve %s --apply\n' "$qself" "$qconfig" "$bitem"
+    else
+      printf '      needs judgement: sudo %s --config %s --explain %s\n' "$qself" "$qconfig" "$bitem"
+    fi
+  done
+
+  i=$base_n
+  while IFS='|' read -r class hkind key members pkgs head; do
+    [ -n "${class:-}" ] || continue
+    hard_n=$((hard_n + 1)); i=$((i + 1))
+    printf '  [%s] UNNECESSARY %-5s %-11s %s\n' "$i" "$class" "$hkind" "$key"
+    printf '      why: %s\n' "$head"
+    if [ "$class" = safe ]; then
+      printf '      cut: sudo %s/harden.sh --config %s --cut %s --apply\n' "$SCRIPT_DIR" "$qconfig" "$hard_n"
+    else
+      printf '      decide first: sudo %s/harden.sh --config %s --explain %s\n' "$SCRIPT_DIR" "$qconfig" "$hard_n"
+    fi
+  done <"$tmp"
+  rm -f "$tmp"
+  printf '\n  Numbering is a snapshot: re-run --review after any change.\n'
 }
 
 # --- --explain N --------------------------------------------------------------
@@ -2044,6 +2163,25 @@ case "$mode" in
   look)
     load_sets
     report 'baseline.sh - what nothing explains'
+    ;;
+
+  review)
+    load_sets
+    print_combined_review
+    ;;
+
+  mechanisms)
+    print_mechanisms
+    ;;
+
+  inventory)
+    # This is the public seam for the eventual one-walk/many-views design.
+    # The existing reports still retain their specialised detail collectors;
+    # do not quietly replace an operator report with a lossy machine feed.
+    # Conffiles need their package md5 data loaded even though the inventory
+    # mode does not need the heavier package-ownership or checksum sets.
+    load_conffiles
+    inventory
     ;;
 
   explain)

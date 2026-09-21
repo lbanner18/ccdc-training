@@ -289,7 +289,7 @@ fi
 # working tree cannot steer a root loop. The cost is that fixes never arrive on
 # their own, and a stale supervisor looks exactly like a current one - it was
 # still printing an --approve command bash mangles, hours after that was fixed.
-for _inst in "${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}}" \
+for _inst in "${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-node-observer}}" \
              "${CCDC_GUARDIAN_DIR:-/usr/local/lib/${CCDC_GUARDIAN_NAME:-node-health}}"; do
   [ -d "$_inst" ] || continue
   _drift=$(ccdc_tree_drift "$SCRIPT_DIR" "$_inst" 2>/dev/null)
@@ -303,7 +303,7 @@ for _inst in "${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}
 '
   printf '%s\n' "$_drift" | head -6 | sed 's/^/      /'
   case "$(basename -- "$_inst")" in
-    "${CCDC_SENTRY_NAME:-ccdc-sentry}")
+    "${CCDC_SENTRY_NAME:-node-observer}")
       printf '    refresh it:  sudo %s/sentry.sh --config %s --install --apply
 ' "$qkit" "$qconfig" ;;
     *)
@@ -321,7 +321,7 @@ if [ "$apply" -eq 1 ]; then
   ccdc_secure_state_dir "$evidence_dir" "CCDC_EVIDENCE_DIR"
 fi
 
-# --- 1. restore point --------------------------------------------------------
+# --- 1. restore points -------------------------------------------------------
 
 if [ "$skip_backup" -eq 0 ]; then
   note "restore point (backup.sh)"
@@ -333,6 +333,23 @@ if [ "$skip_backup" -eq 0 ]; then
   else
     printf '    [dry-run] would run backup.sh --apply\n'
   fi
+fi
+
+# This is deliberately a separate copy of the kit, not a second backup of the
+# machine. backup.sh protects the paths named in the config; recovery.sh gives
+# the operator a verified starting point if this checkout is deleted or its
+# scripts are replaced. It also installs its restore helper beside the bundle.
+# It restores only into a new directory, never over the running checkout.
+note "kit recovery copy (recovery.sh)"
+if [ "$apply" -eq 1 ]; then
+  if "$SCRIPT_DIR/recovery.sh" --config "$config" --install --apply >/dev/null 2>&1; then
+    good "created a checksummed recovery copy and its outside-the-checkout restore helper"
+  else
+    bad "kit recovery bundle failed — the normal machine backup may still exist"
+    fixcmd "sudo $qkit/recovery.sh --config $qconfig --install --apply"
+  fi
+else
+  printf '    [dry-run] would create a checksummed recovery bundle outside this checkout\n'
 fi
 
 # Are the decoys on disk, as the manifest describes them? Deliberately does NOT
@@ -417,7 +434,7 @@ if [ "$skip_sentry" -eq 0 ]; then
     else
       bad "sentry install failed"
       fixcmd "sudo $qkit/sentry.sh --config $qconfig --install --apply"
-      fixcmd "sudo journalctl -u ${CCDC_SENTRY_NAME:-ccdc-sentry}.service -n 30 --no-pager"
+      fixcmd "sudo journalctl -u ${CCDC_SENTRY_NAME:-node-observer}.service -n 30 --no-pager"
     fi
   else
     printf '    [dry-run] would install/start sentry as a supervised systemd service\n'
@@ -497,7 +514,7 @@ if [ "$apply" -eq 1 ]; then
     fi
   fi
   if [ "$skip_sentry" -eq 0 ] && ccdc_have systemctl; then
-    sname=${CCDC_SENTRY_NAME:-ccdc-sentry}
+    sname=${CCDC_SENTRY_NAME:-node-observer}
     if systemctl is-active --quiet "$sname.service" 2>/dev/null; then
       good "active: $sname.service"
     else

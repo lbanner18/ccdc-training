@@ -1,8 +1,7 @@
 # Bootstrap: from "I just logged in" to "recon is running"
 
-Printable. This is the first three minutes, before
-[`competition-day-playbook.md`](competition-day-playbook.md) §1 takes over.
-Read it top to bottom and type as you go; every branch is decided by one probe.
+Printable. Use this for the first three minutes after logging in. Read it from
+top to bottom. The command in Step 1 tells you which download method to use.
 
 Repo: `https://github.com/lbanner18/ccdc-training`
 
@@ -16,16 +15,15 @@ systemctl is-active <SCORED_SERVICE> 2>/dev/null || service --status-all 2>/dev/
 ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null
 ```
 
-You want three facts: which box you are on, that you are root or can `sudo`, and
-that the scored service is currently up. If the scored service is **already
-down** at minute zero, fix that before anything else on this page — uptime is
-scored from the first poll.
+You need three facts: which box this is, whether you can use `sudo`, and whether
+the scored service is up. Replace `<SCORED_SERVICE>` with the service from the
+packet. If it is already down, restore it before doing the download steps.
 
 ---
 
 ## STEP 1 — the probe that decides everything
 
-One line. Its output picks your branch:
+Run this one command. Its last line tells you which section to use next:
 
 ```bash
 command -v git curl wget tar; timeout 5 curl -sI https://github.com >/dev/null 2>&1 && echo "EGRESS-YES" || echo "EGRESS-NO"
@@ -33,10 +31,10 @@ command -v git curl wget tar; timeout 5 curl -sI https://github.com >/dev/null 2
 
 | Probe says | Go to |
 |---|---|
-| `EGRESS-YES` and `git` present | **1A — clone** |
+| `EGRESS-YES` and `git` present | **1A — clone**. You can reach GitHub and have Git. |
 | `EGRESS-YES`, no `git`, has `curl` or `wget` | **1B — tarball** |
-| `EGRESS-NO` | **1C — push it from your workstation** |
-| nothing works | **1D — the fallback that needs no kit** |
+| `EGRESS-NO` | **1C — push it from your workstation**. The box cannot reach GitHub. |
+| nothing useful | **1D — the fallback that needs no kit** |
 
 **Prefer 1B over installing git.** If a package manager works you already have
 egress, so the `curl | tar` path gets the same files in one command, installs

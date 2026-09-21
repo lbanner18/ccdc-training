@@ -209,7 +209,7 @@ protected_list() {
     "${CCDC_SYSTEMD_SERVICES:-}" \
     "${CCDC_PROTECT_SERVICES:-}" \
     "$(guardian_units)" \
-    "${CCDC_SENTRY_NAME:-ccdc-sentry}"
+    "${CCDC_SENTRY_NAME:-node-observer}"
 }
 
 classify() {

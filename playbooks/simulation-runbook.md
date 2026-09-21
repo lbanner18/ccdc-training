@@ -6,6 +6,11 @@ checklist against the disposable lab VM — real root, real auditd, real systemd
 which is where the mutating paths that could not be tested on a workstation
 actually get proven.
 
+Plain-English map: a "foothold" is any way the attacker can get back in after a
+reboot or logout, such as a cron job, extra SSH key, or service. "Eradicate"
+means remove both the visible bad item and whatever would recreate it. This
+runbook is practice for that loop, not a script to paste all at once.
+
 **Lab only.** Everything here plants real footholds and changes real config.
 Never run `redteam/plant.sh` anywhere but a VM you own and can revert. Take the
 `clean-baseline` snapshot before you start and revert to it at the end.
@@ -43,10 +48,13 @@ CFG=/tmp/ccdc-linux.env
 [ ] ./linux/recon.sh --config /tmp/ccdc-linux.env      # baseline BEFORE plant
 [ ] Note the evidence path. This is your known-good picture.
 [ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
-    # backup + canaries + sentry, then guardian/watchdog so guardian can enroll
+    # backup + a checksummed recovery copy of the kit + canaries + sentry, then
+    # guardian/watchdog so guardian can enroll
     # a fresh independent repair authority for sentry.
     # Do NOT run either loop by hand with `&`; systemd owns their lifetime.
 [ ] sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
+[ ] Optional: sudo ./linux/prompt.sh --config /tmp/ccdc-linux.env --install --apply
+    # Review and bless its /etc/profile.d provenance change deliberately.
 [ ] ./linux/canary.sh --config /tmp/ccdc-linux.env --status   # decoys + audit rules laid
 [ ] Optional: `sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --apply`; verify
     access from a second SSH session, then run
@@ -225,6 +233,13 @@ One thing to watch while you do this: run `./linux/hunt.sh` with the guardian
 armed and confirm you can tell its four artifacts apart from a red-team plant
 using nothing but the manifest. If you cannot do that under time pressure, the
 guardian is a liability rather than a defense — that is the actual test.
+
+For the separate checkout-recovery layer, run this after `arm.sh` and before
+the lab is altered: `sudo ./linux/recovery.sh --config /tmp/ccdc-linux.env --status`.
+It should report an `OK` bundle. Do not test restoration over this
+checkout: restore into a new throwaway path such as `/root/ccdc-recovered`,
+inspect it, then revert the snapshot. A bad bundle must report `BAD HASH`; it
+must never silently unpack.
 
 ---
 

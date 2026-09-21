@@ -171,6 +171,10 @@ watch_last="$state_dir/sentry.watch.last"
 watch_pending="$state_dir/sentry.watch.pending"
 watch_pending_key="$state_dir/sentry.watch.pending.key"
 lock_file="$state_dir/.sentry.lock"
+# This is deliberately outside the private evidence directory: an interactive
+# shell must be able to read the *count* without gaining access to findings,
+# paths, or evidence. It is a tiny, root-published status channel only.
+prompt_snapshot='/run/ccdc-sentry-prompt'
 artifact_seq=0
 lock_held=0
 
@@ -333,7 +337,7 @@ protected_unit() {
              "${CCDC_GUARDIAN_TICKER_NAME:-$g}" \
              "${CCDC_GUARDIAN_RECONCILE_NAME:-$g-reconcile}" \
              "${CCDC_GUARDIAN_CRON_NAME:-$g}" \
-             "${CCDC_SENTRY_NAME:-ccdc-sentry}"; do
+             "${CCDC_SENTRY_NAME:-node-observer}"; do
     [ "$u" = "$own" ] && return 0
   done
   case "$u" in ssh|sshd|cron|crond|dbus|auditd|rsyslog|ufw|firewalld) return 0 ;; esac
@@ -357,7 +361,7 @@ protected_cron() {
              "${CCDC_GUARDIAN_WATCH_NAME:-$g-watch}" \
              "${CCDC_GUARDIAN_TICKER_NAME:-$g}" \
              "${CCDC_GUARDIAN_RECONCILE_NAME:-$g-reconcile}" \
-             "${CCDC_SENTRY_NAME:-ccdc-sentry}"; do
+             "${CCDC_SENTRY_NAME:-node-observer}"; do
     [ "$f" = "$own" ] && return 0
   done
   return 1
@@ -370,7 +374,7 @@ protected_payload() {
   local path=$1 g gdir sdir
   g=${CCDC_GUARDIAN_NAME:-node-health}
   gdir=${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}
-  sdir=${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-ccdc-sentry}}
+  sdir=${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-node-observer}}
   case "$path" in
     "$gdir"/*|"$sdir"/*) return 0 ;;
   esac
@@ -553,7 +557,7 @@ protected_sudoers() {
     *) return 0 ;;
   esac
   case "${f##*/}" in
-    "${CCDC_SENTRY_NAME:-ccdc-sentry}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*) return 0 ;;
+    "${CCDC_SENTRY_NAME:-node-observer}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*) return 0 ;;
   esac
   return 1
 }
@@ -638,13 +642,16 @@ can_automate() {
     # it does not, and that is lost points for every minute it stays that way.
     #
     # Safe to automate precisely because it is restorative. The failure mode of
-    # unlocking an account that should have stayed locked is that it is in
-    # CCDC_ALLOWED_USERS, which is a config error the operator can see; the
-    # failure mode of NOT unlocking it is silent point loss.
+    # unlocking an account that should have stayed locked is that it is named
+    # in CCDC_INTERACTIVE_USERS.  That list deliberately excludes nologin
+    # service identities and key-only admins, even though both stay protected
+    # by CCDC_ALLOWED_USERS. The failure mode of NOT unlocking a real scorer
+    # account is silent point loss.
     scoreduser)
       valid_name "$subject" || return 1
       getent passwd "$subject" >/dev/null 2>&1 || return 1
       ccdc_list_contains "$subject" "${CCDC_ALLOWED_USERS:-}" || return 1
+      ccdc_list_contains "$subject" "${CCDC_INTERACTIVE_USERS:-}" || return 1
       [ "$subject" = root ] && return 1
       ;;
 
@@ -1391,6 +1398,50 @@ rebuild_queue() {
   printf '%s|%s\n' "$new" "$newred"
 }
 
+# RED gets a wall notification. AMBER is intentionally non-interrupting, but
+# it must not disappear simply because the operator is busy in another shell.
+# Publish only the number of actionable AMBER queue rows, never their subjects
+# or descriptions. The prompt hook treats a missing, malformed, or old value
+# as unknown rather than as "zero".
+publish_prompt_snapshot() {
+  local count tmp now ttl
+  [ ! -L "$prompt_snapshot" ] || {
+    slog "warning: refusing prompt snapshot symlink: $prompt_snapshot"
+    return 0
+  }
+  count=$(awk -F'|' '$1 == "AMBER" { n++ } END { print n + 0 }' "$queue" 2>/dev/null) || count='?'
+  case "$count" in ''|*[!0-9]*) count='?' ;; esac
+  now=$(date +%s) || return 0
+  ttl=$((interval + triage_timeout + watch_timeout + 15))
+  tmp=$(mktemp /run/ccdc-sentry-prompt.XXXXXX 2>/dev/null) || {
+    slog "warning: could not stage prompt snapshot in /run"
+    return 0
+  }
+  if ! printf '%s|%s|%s\n' "$now" "$count" "$ttl" >"$tmp" \
+      || ! chmod 0644 -- "$tmp" \
+      || ! mv -f -- "$tmp" "$prompt_snapshot"; then
+    rm -f -- "$tmp"
+    slog "warning: could not publish prompt snapshot: $prompt_snapshot"
+    return 0
+  fi
+  return 0
+}
+
+publish_prompt_unknown() {
+  local tmp now ttl
+  [ ! -L "$prompt_snapshot" ] || return 0
+  now=$(date +%s) || return 0
+  ttl=$((interval + triage_timeout + watch_timeout + 15))
+  tmp=$(mktemp /run/ccdc-sentry-prompt.XXXXXX 2>/dev/null) || return 0
+  if ! printf '%s|?|%s\n' "$now" "$ttl" >"$tmp" \
+      || ! chmod 0644 -- "$tmp" \
+      || ! mv -f -- "$tmp" "$prompt_snapshot"; then
+    rm -f -- "$tmp"
+    return 0
+  fi
+  return 0
+}
+
 # How stale is a health failure, and when does the next attempt land? A bare
 # timestamp cannot answer either, and the two cases it conflates - "failed once
 # and is about to retry" versus "has been failing for twenty minutes" - want
@@ -1417,7 +1468,7 @@ health_age() {
   fi
   if [ "$age" -gt $((every * 3)) ]; then
     printf '      It has not recovered across %s attempts. Treat detection as DOWN:\n' "$((age / every))"
-    printf '        sudo systemctl status %s.service --no-pager -l\n' "${CCDC_SENTRY_NAME:-ccdc-sentry}"
+    printf '        sudo systemctl status %s.service --no-pager -l\n' "${CCDC_SENTRY_NAME:-node-observer}"
     printf '        sudo %s/sentry.sh --config %s --once\n' "$qkit" "$qconfig"
   fi
 }
@@ -1461,8 +1512,10 @@ run_pass_locked() {
   local counts='0|0' queued_count triage_rc=0 watch_rc=0
   if ! run_triage; then
     triage_rc=4
+    publish_prompt_unknown
   else
     counts=$(rebuild_queue)
+    publish_prompt_snapshot
   fi
   # Triage and the broader canary/change sweep are independent detection
   # layers. A wedged or broken triage pass must not suppress the canary path.
@@ -1555,6 +1608,7 @@ action_uid0() {
 action_scoreduser() {
   local user=$1 auth_file
   ccdc_list_contains "$user" "${CCDC_ALLOWED_USERS:-}" || return 1
+  ccdc_list_contains "$user" "${CCDC_INTERACTIVE_USERS:-}" || return 1
   new_evidence_case scoreduser || return 1
   for auth_file in /etc/passwd /etc/shadow; do preserve_into_case "$auth_file" || return 1; done
   passwd -S "$user" >"$evidence_case/before.status" 2>&1 || true
@@ -1737,9 +1791,17 @@ action_nopasswd() {
 # Setuid root and owned by no package. Clear the bit first so the escalation is
 # dead even if the removal fails, then remove the file.
 action_suidunpackaged() {
-  local path=$1
+  local path=$1 saved original_mode
   new_evidence_case suidunpackaged || return 1
   preserve_into_case "$path" || return 1
+  saved=$evidence_last
+  # The retained file is forensic evidence, not a second live escalation
+  # primitive.  Keep its original mode in the case before dropping the special
+  # bits, otherwise the next sweep sees our own evidence as a fresh SUID file.
+  original_mode=$(stat -c '%a %U:%G' -- "$path" 2>/dev/null || printf 'unavailable')
+  printf 'original path: %s\noriginal mode/owner: %s\n' "$path" "$original_mode" \
+    >"$evidence_case/00-original-metadata.txt" || return 1
+  [ -z "$saved" ] || chmod u-s,g-s -- "$saved" || return 1
   chmod u-s,g-s -- "$path" || return 1
   rm -f -- "$path"
 }
@@ -2078,10 +2140,12 @@ do_approve() {
   [ -s "$reviewed" ] \
     || ccdc_die "no reviewed approval snapshot; run --status immediately before --approve"
   if ! run_triage; then
+    publish_prompt_unknown
     write_alerts
     ccdc_die "fresh triage failed; stale queued actions were discarded"
   fi
   rebuild_queue >/dev/null
+  publish_prompt_snapshot
   packet_entered || ccdc_die "refusing to act: fill both CCDC_ALLOWED_USERS and CCDC_SYSTEMD_SERVICES from the packet first"
 
   # Select from the snapshot the operator actually reviewed, then require that
@@ -2130,7 +2194,12 @@ do_approve() {
   [ "$selected" -gt 0 ] || ccdc_die "approval item $item does not exist in the reviewed snapshot; run --status again"
 
   if [ "$apply" -eq 1 ]; then
-    run_triage && rebuild_queue >/dev/null || true
+    if run_triage; then
+      rebuild_queue >/dev/null
+      publish_prompt_snapshot
+    else
+      publish_prompt_unknown
+    fi
     run_watch_if_due || true
     write_alerts
     printf '\n%s action(s) applied, %s failed. Verify scored services FROM OFF THE BOX.\n' "$done_n" "$failed_n"
@@ -2161,16 +2230,19 @@ do_revert() {
   printf 'Each record names its evidence directory; restore deliberately, then verify off-box.\n'
 }
 
-managed_name=${CCDC_SENTRY_NAME:-ccdc-sentry}
+managed_name=${CCDC_SENTRY_NAME:-node-observer}
 install_dir=${CCDC_SENTRY_DIR:-/usr/local/lib/$managed_name}
 unit_name="$managed_name.service"
 unit_path="/etc/systemd/system/$unit_name"
 installed_config="$install_dir/sentry.env"
 owner_marker="$install_dir/.ccdc-sentry-owned"
+entry_name=${CCDC_SENTRY_ENTRY:-sentry.sh}
+entry_path="$install_dir/$entry_name"
 
 validate_install_layout() {
   local probe parent
   case "$managed_name" in ''|*[!A-Za-z0-9_-]*) ccdc_die "CCDC_SENTRY_NAME must contain only letters, digits, underscore, and hyphen" ;; esac
+  case "$entry_name" in ''|*/*|*' '*|*'|'*|*':'*) ccdc_die "CCDC_SENTRY_ENTRY must be a filename without spaces or path separators" ;; esac
   case "$install_dir" in
     /usr/local/lib/?*|/opt/?*|/var/lib/?*) ;;
     *) ccdc_die "CCDC_SENTRY_DIR must be a dedicated leaf below /usr/local/lib, /opt, or /var/lib: $install_dir" ;;
@@ -2226,6 +2298,15 @@ do_install() {
   if [ "$SCRIPT_DIR" != "$install_dir" ]; then
     cp -a -- "$SCRIPT_DIR/." "$install_dir/" || ccdc_die "could not install sentry tool copy"
   fi
+  # The source tree remains readable and auditable as sentry.sh, but the
+  # long-lived process uses the explicitly configured operational entry name.
+  # This is not concealment from an administrator: the unit and owner marker
+  # remain the source of truth. It merely avoids advertising the process role
+  # to a quick ps listing.
+  if [ "$entry_name" != sentry.sh ]; then
+    cp -- "$install_dir/sentry.sh" "$entry_path" || ccdc_die "could not create sentry runtime entrypoint"
+    chmod 0700 "$entry_path" || ccdc_die "could not secure sentry runtime entrypoint"
+  fi
   if [ "$config" != "$installed_config" ]; then
     cp -- "$config" "$installed_config" || ccdc_die "could not install sentry config"
   fi
@@ -2237,17 +2318,25 @@ do_install() {
   tmp="$unit_path.tmp.$$"
   {
     printf '[Unit]\nDescription=CCDC supervised detection and approval queue\nAfter=local-fs.target\n\n'
-    printf '[Service]\nType=simple\nExecStart=%s/sentry.sh --config %s --interval %s --watch-interval %s --triage-timeout %s --watch-timeout %s --loop --no-bell\n' \
-      "$install_dir" "$installed_config" "$interval" "$watch_interval" "$triage_timeout" "$watch_timeout"
+    printf '[Service]\nType=simple\nExecStart=%s --config %s --interval %s --watch-interval %s --triage-timeout %s --watch-timeout %s --loop --no-bell\n' \
+      "$entry_path" "$installed_config" "$interval" "$watch_interval" "$triage_timeout" "$watch_timeout"
     printf 'Restart=always\nRestartSec=5s\nNice=10\nIOSchedulingClass=idle\nUMask=0077\n\n'
     printf '[Install]\nWantedBy=multi-user.target\n'
   } >"$tmp" || ccdc_die "cannot stage $unit_path"
   install -m 0644 "$tmp" "$unit_path" || ccdc_die "cannot install $unit_path"
   rm -f -- "$tmp"
   systemctl daemon-reload || ccdc_die "systemd daemon-reload failed"
-  systemctl enable --now "$unit_name" || ccdc_die "could not enable/start $unit_name"
+  systemctl enable "$unit_name" || ccdc_die "could not enable $unit_name"
+  # `enable --now` starts an inactive unit but leaves an active one executing
+  # its old in-memory shell script. An install is also the supported upgrade
+  # path, so replace that process deliberately after copying the private tree.
+  if systemctl is-active --quiet "$unit_name"; then
+    systemctl restart "$unit_name" || ccdc_die "could not restart $unit_name after install"
+  else
+    systemctl start "$unit_name" || ccdc_die "could not start $unit_name"
+  fi
   systemctl is-active --quiet "$unit_name" || ccdc_die "$unit_name did not remain active"
-  ccdc_info "installed and started $unit_name; terminal is free"
+  ccdc_info "installed and running $unit_name; terminal is free"
 }
 
 do_uninstall() {

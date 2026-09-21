@@ -317,12 +317,14 @@ staged_paths=''
 # Sentry is deliberately a separate installation with separate ownership.
 # Guardian only owns the private repair copies below; it must never remove the
 # live sentry tree or unit during --uninstall.
-sentry_name=${CCDC_SENTRY_NAME:-ccdc-sentry}
+sentry_name=${CCDC_SENTRY_NAME:-node-observer}
 sentry_dir=${CCDC_SENTRY_DIR:-/usr/local/lib/$sentry_name}
 sentry_unit="$sentry_name.service"
 sentry_unit_path="/etc/systemd/system/$sentry_unit"
 sentry_config="$sentry_dir/sentry.env"
 sentry_owner_marker="$sentry_dir/.ccdc-sentry-owned"
+sentry_entry_name=${CCDC_SENTRY_ENTRY:-sentry.sh}
+sentry_entry="$sentry_dir/$sentry_entry_name"
 manifest_repair="$guardian_dir/.repair/guardian.manifest"
 sentry_interval=${CCDC_SENTRY_INTERVAL:-60}
 sentry_watch_interval=${CCDC_WATCH_INTERVAL:-120}
@@ -331,6 +333,9 @@ sentry_watch_timeout=${CCDC_WATCH_TIMEOUT:-90}
 
 case "$sentry_name" in
   ''|*[!A-Za-z0-9_-]*) ccdc_die "CCDC_SENTRY_NAME must be [A-Za-z0-9_-] only: $sentry_name" ;;
+esac
+case "$sentry_entry_name" in
+  ''|*/*|*' '*|*'|'*|*':'*) ccdc_die "CCDC_SENTRY_ENTRY must be a filename without spaces or path separators: $sentry_entry_name" ;;
 esac
 case "$sentry_dir" in
   /*) ;;
@@ -829,6 +834,14 @@ enumerate_sentry_artifacts() {
       backup=$(sentry_backup_for "$live") || continue
       printf 'protected|%s\nprotected-repair|%s\n' "$live" "$backup"
     done < <(find "$SCRIPT_DIR" -type f -print 2>/dev/null | LC_ALL=C sort)
+    # The configured runtime entry is a byte-for-byte copy of sentry.sh made
+    # during sentry --install. It is not in the checkout under that name, so
+    # enumerate and protect it explicitly rather than treating it as attacker
+    # clutter during enrollment.
+    if [ "$sentry_entry" != "$sentry_dir/sentry.sh" ]; then
+      backup=$(sentry_backup_for "$sentry_entry") || return 1
+      printf 'protected|%s\nprotected-repair|%s\n' "$sentry_entry" "$backup"
+    fi
     for live in "$sentry_config" "$sentry_owner_marker"; do
       backup=$(sentry_backup_for "$live") || continue
       printf 'protected|%s\nprotected-repair|%s\n' "$live" "$backup"
@@ -860,7 +873,7 @@ quarantine_untracked_sentry_files() {
     [ -n "$live" ] || continue
     if [ "$mode" = source ]; then
       case "$live" in
-        "$sentry_config"|"$sentry_owner_marker") continue ;;
+        "$sentry_config"|"$sentry_owner_marker"|"$sentry_entry") continue ;;
       esac
       relative=${live#"$sentry_dir"/}
       [ -f "$SCRIPT_DIR/$relative" ] && continue
@@ -1030,7 +1043,7 @@ manifest_layout_matches_config() {
     fi
   done
   if [ "$protect_sentry" -eq 1 ] && [ "$sentry_manifest_enrolled" -eq 1 ]; then
-    for required in "$sentry_unit_path" "$sentry_config" "$sentry_owner_marker" "$sentry_dir/sentry.sh"; do
+    for required in "$sentry_unit_path" "$sentry_config" "$sentry_owner_marker" "$sentry_entry"; do
       if ! manifest_contains_path "$required"; then
         ccdc_warn "guardian manifest is missing a required sentry path: $required"
         return 1
@@ -1214,7 +1227,7 @@ repair_pair() {
 sentry_mode_for() {
   case "$1" in
     "$sentry_unit_path") printf '0644\n' ;;
-    *.sh) printf '0700\n' ;;
+    "$sentry_entry"|*.sh) printf '0700\n' ;;
     *) printf '0600\n' ;;
   esac
 }
@@ -1284,7 +1297,7 @@ validate_sentry_enrollment() {
   [ ! -L "$sentry_dir" ] || { ccdc_warn "refusing symlinked sentry install tree: $sentry_dir"; return 1; }
   [ -f "$sentry_unit_path" ] && [ ! -L "$sentry_unit_path" ] \
     || { ccdc_warn "sentry unit is missing or symlinked: $sentry_unit_path"; return 1; }
-  [ -f "$sentry_config" ] && [ -f "$sentry_dir/sentry.sh" ] \
+  [ -f "$sentry_config" ] && [ -f "$sentry_entry" ] \
     || { ccdc_warn "sentry config or entrypoint is missing from $sentry_dir"; return 1; }
   [ "$(cat "$sentry_owner_marker" 2>/dev/null || printf '')" = "$sentry_name" ] \
     || { ccdc_warn "sentry ownership marker is absent or does not match $sentry_name"; return 1; }
@@ -1296,7 +1309,7 @@ validate_sentry_enrollment() {
     esac
   done < <(find "$sentry_dir" -type f -print 2>/dev/null)
   reload_if_needed || return 1
-  unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_dir/sentry.sh" \
+  unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_entry" \
     || { ccdc_warn "effective sentry unit differs from $sentry_unit_path"; return 1; }
 }
 
@@ -1311,6 +1324,10 @@ validate_sentry_matches_checkout() {
     cmp -s -- "$source" "$live" \
       || { ccdc_warn "installed sentry payload differs from this checkout: $live (reinstall sentry first)"; return 1; }
   done < <(find "$SCRIPT_DIR" -type f -print 2>/dev/null | LC_ALL=C sort)
+  if [ "$sentry_entry" != "$sentry_dir/sentry.sh" ]; then
+    cmp -s -- "$sentry_dir/sentry.sh" "$sentry_entry" \
+      || { ccdc_warn "configured sentry runtime entry differs from sentry.sh: $sentry_entry (reinstall sentry first)"; return 1; }
+  fi
   cmp -s -- "$config" "$sentry_config" \
     || { ccdc_warn "installed sentry config differs from $config (reinstall sentry first)"; return 1; }
   expected_unit=$(printf '%s\n' \
@@ -1320,7 +1337,7 @@ validate_sentry_matches_checkout() {
     '' \
     '[Service]' \
     'Type=simple' \
-    "ExecStart=$sentry_dir/sentry.sh --config $sentry_config --interval $sentry_interval --watch-interval $sentry_watch_interval --triage-timeout $sentry_triage_timeout --watch-timeout $sentry_watch_timeout --loop --no-bell" \
+    "ExecStart=$sentry_entry --config $sentry_config --interval $sentry_interval --watch-interval $sentry_watch_interval --triage-timeout $sentry_triage_timeout --watch-timeout $sentry_watch_timeout --loop --no-bell" \
     'Restart=always' \
     'RestartSec=5s' \
     'Nice=10' \
@@ -1401,7 +1418,7 @@ EOF
     units_needing_restart="$units_needing_restart $sentry_unit"
   fi
   reload_if_needed || return 1
-  unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_dir/sentry.sh" \
+  unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_entry" \
     || { ccdc_warn "effective sentry unit failed verification after repair"; return 1; }
   ensure_unit_enabled "$sentry_unit" || return 1
   return 0
@@ -1925,7 +1942,7 @@ verify_installation() {
     run_systemctl is-active --quiet "$unit_timer" 2>/dev/null || return 1
     run_systemctl is-enabled --quiet "$unit_timer" 2>/dev/null || return 1
     if [ "$protect_sentry" -eq 1 ]; then
-      unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_dir/sentry.sh" || return 1
+      unit_effective_matches "$sentry_unit" "$sentry_unit_path" "$sentry_entry" || return 1
       run_systemctl is-active --quiet "$sentry_unit" 2>/dev/null || return 1
       run_systemctl is-enabled --quiet "$sentry_unit" 2>/dev/null || return 1
     fi

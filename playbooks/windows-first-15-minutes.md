@@ -7,8 +7,9 @@ This page is the order to do things in. It is not the complete list; it is the
 list that stops you losing points while you work out the rest.
 
 > **Everything here needs an elevated PowerShell.** Start → type `powershell` →
-> **Ctrl+Shift+Enter**. Without it the Security log reads empty, other users'
-> scheduled tasks are invisible, and you will decide a dirty box is clean.
+> **Ctrl+Shift+Enter**. If you forget this, Windows often gives you a shorter
+> answer instead of an error. For example, you may see no Security-log events
+> or miss another user's scheduled task and think the box is clean.
 
 ---
 
@@ -51,7 +52,7 @@ copy config\example.env C:\ProgramData\CCDC\ccdc.env
 notepad C:\ProgramData\CCDC\ccdc.env
 ```
 
-Five lines matter more than the rest. Everything else can wait:
+Start with these five lines. Replace the examples with values from the packet:
 
 ```ini
 CCDC_ALLOWED_USERS="Administrator youraccount svc_whatever"   # accounts that must keep working
@@ -61,11 +62,10 @@ CCDC_TCP_CHECKS="127.0.0.1:80"                                # how to tell a se
 CCDC_HTTP_CHECKS="http://127.0.0.1/"
 ```
 
-The tools **refuse to act** while `CCDC_ALLOWED_USERS` and
-`CCDC_WINDOWS_SERVICES` are empty. That is deliberate: an empty list does not
-mean "nothing is protected", it means nothing has told the tool what is scored,
-and the account you did not mean to disable is usually the one the scoring
-engine logs in with.
+The tools will not make changes while `CCDC_ALLOWED_USERS` and
+`CCDC_WINDOWS_SERVICES` are empty. That prevents a common mistake: disabling
+the account or service that the scorer needs. If you see a message saying the
+packet lists are empty, stop and fill in those two lines.
 
 ---
 
@@ -86,8 +86,7 @@ incident report is written from.
 .\windows\triage.ps1 -Config C:\ProgramData\CCDC\ccdc.env
 ```
 
-Read **RED** first. Two of them are points, not hygiene, and they come before
-everything else on this page:
+Read **RED** first. Fix these two before spending time on cleanup:
 
 - `scoreduser` — **an account the packet says must work has been disabled.**
 - `scoredservice` — **a service you are graded on is stopped.**
@@ -115,8 +114,8 @@ It numbers everything it can act on and marks each one:
 
 | | |
 |---|---|
-| **SWEEP** | safe, reversible, cannot cut your own access. A batch approve takes these. |
-| **LOOK** | stops a port, disables an account, or removes a group membership. **Yours by number only.** |
+| **SWEEP** | The tool can handle this safely. `-Approve all -Apply` includes it. |
+| **LOOK** | This could affect a login, service, or port. Read it, then approve that number only. |
 
 ```powershell
 # every SWEEP item; every LOOK item is handed back to you with its number
@@ -128,15 +127,14 @@ It numbers everything it can act on and marks each one:
 
 Leave `-Apply` off and it tells you what it would do and changes nothing.
 
-Three things worth knowing before you trust it:
+Before using the queue, know what these messages mean:
 
-- **The numbers come from `-Status` and stay put until the next `-Status`.** A
-  finding that appears in between cannot take a number you already read.
-- **It re-checks before it acts.** If the thing is gone, or you muted it, that
-  item is skipped rather than guessed at.
-- **Every change writes the previous state to an evidence directory first.**
-  There is no automatic undo — `-Undo` shows you what was applied and where the
-  "before" is, which is what the incident report gets written from.
+- **Numbers come from `-Status`.** They do not change until you run `-Status`
+  again. A new finding cannot quietly become item 7 after you read item 7.
+- **The tool checks again before changing anything.** If the item disappeared,
+  it skips it instead of guessing.
+- **It saves the old state first.** `-Undo` does not automatically reverse a
+  change; it shows what changed and where the saved "before" files are.
 
 If something is yours and you are tired of seeing it:
 
@@ -211,12 +209,106 @@ box and locking yourself out of one.
 
 ## Minute 15 — keep it up while you do injects
 
+Before writing a network or unnecessary-software response, produce the table
+that says what owns each reachable thing. `REVIEW` is an unanswered packet
+question, not permission to remove it:
+
 ```powershell
-.\windows\watchdog.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Install
+.\windows\surface.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Table
 ```
 
-Restarts a stopped scored service and logs every time it had to. Your terminal
-stays free for the thing that is worth half the points.
+```powershell
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Install -Apply
+```
+
+Installs the scored-service/canary watchdog, a Guardian SYSTEM task that
+repairs the watchdog, and a separate integrity SYSTEM task that checks whether
+Guardian itself is still running from its expected private script. Once the tripwires
+below are laid, the watchdog also runs `canary.ps1 -Check` each pass and records
+any trip in `watchdog.log`. Check `guardian.ps1 -Status` whenever you come up
+for air. The integrity checker writes changed status to `integrity.log`. An
+Administrator can still remove all three tasks; this is redundancy, not
+tamper-proofing.
+
+```powershell
+.\windows\integrity.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+```
+
+`OK` means the Guardian task exists, is running, and its task action names the
+expected private Guardian script. `MISSING`, `STOPPED`, `REDIRECTED`, or
+`PAYLOAD-MISSING` means preserve the log and investigate before reinstalling.
+
+The task labels and the private running script names come from
+`CCDC_WINDOWS_*` deployment keys in `ccdc.env`; the template uses
+`Operations-Monitor`, `Maintenance-Check`, `service-monitor.ps1`, and
+`health-check.ps1` (plus `integrity-check.ps1` for the canary child and
+`continuity-audit.ps1` for the Guardian check). They are neutral operational
+labels, not fake Windows components. If you change any of
+them on an already-armed box, remove the old pair with the old config first,
+then install the new pair:
+
+```powershell
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Uninstall -Apply -TaskName CCDC-Guardian -WatchdogTaskName CCDC-Watchdog
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Install -Apply
+```
+
+Guardian keeps a separate `.repair` authority with a SHA-256 manifest beside
+those private copies. On each pass it verifies that authority before restoring
+an altered or missing private guardian, watchdog, canary, or common payload.
+If the authority itself does not match its manifest it records an integrity gap
+and refuses to “repair” from it. An Administrator can alter both; use this to
+recover from ordinary file/task tampering, not as a claim of tamper-proofing.
+
+### Prove the chain once on the disposable VM
+
+Do this only on a snapshot you can revert. It tests the behavior that a source
+review cannot prove. This exact sequence was proven on `ccdc-win` on
+2026-09-21, then Guardian was reinstalled and all three tasks were checked as
+running. Run it again after changing any of these scripts; the old result does
+not prove a new version.
+
+```powershell
+# First record the three task states and the private directory.
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+
+# Delete ONE private watchdog file. Guardian should restore it on the next pass.
+Remove-Item C:\ProgramData\CCDC\maintenance\service-monitor.ps1
+Start-Sleep -Seconds 75
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+Get-Content C:\ProgramData\CCDC\guardian.log -Tail 20
+
+# Alter the live watchdog file. It should also be replaced from .repair.
+Add-Content C:\ProgramData\CCDC\maintenance\service-monitor.ps1 '# lab alteration'
+Start-Sleep -Seconds 75
+Get-Content C:\ProgramData\CCDC\guardian.log -Tail 20
+
+# Remove the watchdog TASK. Guardian should recreate it.
+Stop-ScheduledTask -TaskName Operations-Monitor
+Unregister-ScheduledTask -TaskName Operations-Monitor -Confirm:$false
+Start-Sleep -Seconds 75
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+
+# Remove the Guardian TASK. Continuity-Audit should report MISSING; it does not
+# pretend it can restart a Guardian that is no longer running.
+Stop-ScheduledTask -TaskName Maintenance-Check
+Unregister-ScheduledTask -TaskName Maintenance-Check -Confirm:$false
+Start-Sleep -Seconds 75
+.\windows\integrity.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+Get-Content C:\ProgramData\CCDC\integrity.log -Tail 20
+
+# Reinstall Guardian before the final test. Then alter ONE repair copy. This
+# must NOT be copied back. Look for INTEGRITY-GAP in guardian.log instead.
+.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Install -Apply
+Add-Content C:\ProgramData\CCDC\maintenance\.repair\service-monitor.ps1 '# lab alteration'
+Start-Sleep -Seconds 75
+Get-Content C:\ProgramData\CCDC\guardian.log -Tail 20
+```
+
+Use the actual configured private directory and filenames if you changed them.
+The first three tests should produce `INTEGRITY-REPAIRED` or a task-repair log.
+The removed Guardian should produce `INTEGRITY-GAP` in `integrity.log`. The
+final test should produce `INTEGRITY-GAP`, not a repair. Revert the snapshot or
+reinstall Guardian after recording the results.
 
 ---
 
@@ -253,6 +345,22 @@ indistinguishable, an hour later, from something nobody ever looked at.
 **Copy `C:\ProgramData\CCDC\state\baseline.json` off the box.** A baseline that
 lives only where the attacker is, is a baseline the attacker can edit.
 
+Use the evidence exporter after Guardian and baseline have written their first
+records. Replace the share with a workstation or team evidence share you are
+allowed to use. The ZIP includes the config, Guardian manifests, Guardian /
+watchdog / integrity logs, and baseline state; the tool verifies the copied ZIP
+hash before it says success.
+
+```powershell
+.\windows\evidence.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Destination \\workstation\evidence -Bundle -Apply
+```
+
+It never picks a destination or stores credentials. The share must already be
+reachable, and it may contain sensitive config values, so use a team-controlled
+location rather than a public or personal service. Run this exporter manually
+from your elevated operator PowerShell, not as a SYSTEM task: your allowed UNC
+share may use your account's network access.
+
 ---
 
 ## Lay the tripwires
@@ -271,14 +379,15 @@ has changed nothing, so a hash check would call the box clean. Windows records
 the read as Security event 4663, and that event carries the **account name and
 the process**.
 
-Then, whenever you come up for air:
+Check the canaries whenever you have finished a change or inject:
 
 ```powershell
 .\windows\canary.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Check
 ```
 
-Read-only, safe in a loop, exits 2 when something tripped so you can wire it
-into anything. A trip looks like this:
+Read-only, safe in a loop, exits 2 when something tripped. The installed
+watchdog runs it automatically after the tripwires are laid; use this command
+when you want the account and process on screen. A trip looks like this:
 
 ```
   TRIPPED  C:\Users\Public\Documents\domain admin.txt
@@ -360,10 +469,16 @@ that does less.
   alive when somebody tries to kill it. On Windows the watchdog is an ordinary
   scheduled task, and an administrator can simply remove it. Tripwires exist
   now (`canary.ps1`); guardian does not.
-- **Autostart coverage is four registry keys plus the Startup folders.**
-  Sysinternals Autoruns knows roughly 200 locations. If `autorunsc.exe` is on
-  the box, `baseline.ps1` uses it and covers the long tail; if it is not, that
-  tail is unwatched.
+- **Autostart coverage is deliberately bounded, not “Autoruns.”** The fallback
+  covers scheduled tasks; Run/RunOnce, 32-bit, and policy Run keys; all local
+  Startup folders; Winlogon; AppInit DLLs; IFEO debuggers; Active Setup; and
+  permanent WMI consumers. `baseline.ps1` also freezes those rows. It does not
+  cover browser or shell extensions, print monitors, LSA providers, drivers,
+  or vendor-specific hooks. The optional wider inventory requires an explicitly
+  configured absolute `CCDC_AUTORUNSC_PATH` to a validly Microsoft-signed
+  `autorunsc.exe`; it never searches `PATH` or downloads a tool. By default it
+  also will not accept the Sysinternals EULA for you. Set
+  `CCDC_AUTORUNSC_ACCEPT_EULA=1` only as an intentional operator choice.
 - **The approval queue applies a subset.** `sentry.ps1` acts on 21 of the 58
   checks. The rest print a command because their fix needs a judgement no
   table can hold — see the list in its `-?` help.

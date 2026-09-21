@@ -1,9 +1,8 @@
 # Packet → config, two days early
 
-You get the packet before the event. That is the whole ballgame: every
-judgement this kit makes comes out of one file, and if that file is filled in
-before the clock starts, competition day stops being a series of decisions and
-becomes a series of executions.
+Use the packet to fill in this file before the event. The scripts use these
+values to decide what to protect and what to flag. If a value is missing, the
+scripts should stop and ask instead of guessing.
 
 This is the worksheet for filling it. Work down it once, at a desk, with the
 packet open. It takes about twenty minutes.
@@ -12,12 +11,10 @@ packet open. It takes about twenty minutes.
 cp config/example.env ~/ccdc-real.env     # OUTSIDE the repo. Never commit it.
 ```
 
-> **Why this file matters more than any script here.** `sentry.sh` refuses to
-> act at all while `CCDC_ALLOWED_USERS` and `CCDC_SYSTEMD_SERVICES` are empty.
-> That is deliberate: an empty protect list does not mean "nothing is
-> protected", it means nobody has told the tool what is scored. Every "is this
-> port expected", "is this account protected", "is this interpreter a scored
-> service or a bind shell" traces back to a line you write here.
+> `sentry.sh` will not act while `CCDC_ALLOWED_USERS` and
+> `CCDC_SYSTEMD_SERVICES` are empty. That is a safety stop. For example, if you
+> leave the service list blank, the script cannot know whether `nginx` is a
+> scored web service or something safe to stop.
 
 ---
 
@@ -25,12 +22,14 @@ cp config/example.env ~/ccdc-real.env     # OUTSIDE the repo. Never commit it.
 
 | The packet says | Fill in | If you get it wrong |
 |---|---|---|
-| Accounts that must keep working (incl. yours and any the scorer uses) | `CCDC_ALLOWED_USERS` | The kit offers to disable a scored account, or refuses to touch a rogue one |
-| Services that are scored for uptime | `CCDC_SYSTEMD_SERVICES` | The watchdog holds up nothing; `arm.sh` preflight warns |
-| Ports the scorer connects to | `CCDC_ALLOWED_TCP_PORTS`, `CCDC_ALLOWED_UDP_PORTS` | Every scored port is reported as an unexpected listener, forever |
+| Accounts the packet permits to exist, including yours and service identities | `CCDC_ALLOWED_USERS` | The kit will not offer to remove them. Example: `websvc` belongs here even if it cannot log in. |
+| Accounts that must accept an interactive login, only if the packet says so | `CCDC_INTERACTIVE_USERS` | The kit warns if that account is locked, expired, or set to nologin. |
+| Services that are scored for uptime | `CCDC_SYSTEMD_SERVICES` | The watchdog checks and restarts these services. |
+| Ports the scorer connects to | `CCDC_ALLOWED_TCP_PORTS`, `CCDC_ALLOWED_UDP_PORTS` | The kit knows these ports are expected listeners. |
 
 ```bash
 CCDC_ALLOWED_USERS="root youradmin websvc"
+CCDC_INTERACTIVE_USERS="youradmin"   # omit websvc unless the packet says it logs in
 CCDC_SYSTEMD_SERVICES="nginx mysql"
 CCDC_ALLOWED_TCP_PORTS="22 80 443"
 CCDC_ALLOWED_UDP_PORTS=""
@@ -59,12 +58,14 @@ db|10.0.0.25|3306|mysql
 "
 ```
 
-> **Use the address the scorer uses, never `127.0.0.1`.** A localhost probe
-> cannot see you firewalling off your own service. `arm.sh --dry-run` warns
-> about this, because it has happened.
+> **Use the scorer's address, not `127.0.0.1`.** `127.0.0.1` means "this same
+> computer." It can still reach a web service after a firewall blocks everyone
+> else. Example: use `http://10.0.0.25:80/` when that is the scoring engine.
 
-Format is `name|host|port|unit` (TCP) and `name|url|unit` (HTTP). The unit
-field is what gets restarted when the probe fails; leave it empty to log only.
+TCP uses `name|host|port|unit`; HTTP uses `name|url|unit`. `name` is a label for
+the report, and `unit` is the Linux service name to restart if the check fails.
+Leave `unit` empty when you want an alert only. For example,
+`web|http://10.0.0.25:80/|nginx` checks the URL and can restart `nginx`.
 
 ---
 
@@ -74,9 +75,10 @@ field is what gets restarted when the probe fails; leave it empty to log only.
 CCDC_WATCHDOG_INTERVAL="5"
 ```
 
-Your mean outage is roughly half this. Measured on the lab box against an
-external scorer: the same killed service cost **57 seconds at 60, and 6 seconds
-at 5**. A pass is a curl and two systemctl calls. Set it to 5.
+This is how many seconds the watchdog waits between checks. With `60`, a service
+can be down for nearly a minute before the next check. In the lab, the same
+stopped service cost 57 seconds at `60` and 6 seconds at `5`. Use `5` unless
+the packet gives a reason not to.
 
 ---
 
@@ -141,6 +143,30 @@ CCDC_BACKUP_PATHS="
 
 Add the scored service's content and config. `arm.sh` takes this restore point
 before anything else happens.
+
+## 6a. Recovery copy of the kit
+
+```bash
+# Leave empty to store it beside the ordinary backup.
+CCDC_RECOVERY_DIR=""
+```
+
+`backup.sh` saves the machine files you name above. `recovery.sh` saves a
+checksummed copy of this toolkit, its playbooks, and the config file you used.
+`arm.sh --apply` creates that copy automatically. This helps if somebody
+deletes or replaces the checkout itself. It never restores over the live
+checkout: recovery always creates a new directory first.
+
+The same step leaves a root-owned restore helper beside the bundle. If the
+checkout is gone, the default command is:
+
+```bash
+sudo /var/backups/ccdc/ccdc-kit-recover.sh --restore /root/ccdc-recovered --apply
+```
+
+If you set `CCDC_RECOVERY_DIR`, replace `/var/backups/ccdc` with that path.
+The command verifies the newest archive before extracting it to
+`/root/ccdc-recovered/kit`; it refuses if that destination already exists.
 
 ---
 
@@ -207,7 +233,8 @@ If the rehearsal is boring, the config is right.
 ## The finished checklist
 
 ```
-[ ] CCDC_ALLOWED_USERS         every account that must keep working
+[ ] CCDC_ALLOWED_USERS         every account the packet permits to exist
+[ ] CCDC_INTERACTIVE_USERS     only accounts the scorer/admin must log into
 [ ] CCDC_SYSTEMD_SERVICES      every scored service
 [ ] CCDC_ALLOWED_TCP_PORTS     every scored port
 [ ] CCDC_HTTP_CHECKS/TCP       the SCORER's address, not localhost
@@ -280,6 +307,7 @@ Done. The running sentry is using /home/banneluk/ccdc-real.env as of now.
   CCDC_SYSTEMD_SERVICES=scored-web ssh inventory-api
   CCDC_ALLOWED_TCP_PORTS=22 8080
   CCDC_ALLOWED_USERS=root banneluk www-lab
+  CCDC_INTERACTIVE_USERS=banneluk
 ```
 
 `--reload-config` with no `--apply` prints the three steps it would take and

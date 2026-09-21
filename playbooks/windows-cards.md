@@ -4,12 +4,13 @@ One card per thing `windows\triage.ps1` can tell you. Each says what the
 finding means, how to confirm it yourself, exactly what to run, and what to do
 next — because the next thing is usually more important than the fix.
 
-**These are written to be read at speed, mid-event, possibly on paper.** Every
-command is pasteable as-is except where a placeholder is in `CAPITALS`.
+These cards are for use during the event. You can paste every command as shown
+except words in `CAPITALS`; replace those first. For example, replace `NAME`
+with the actual username that `triage.ps1` printed.
 
-Run everything from an **elevated** PowerShell. Not a formality: without it the
-Security log reads empty, other users' scheduled tasks are invisible, and you
-will conclude a dirty box is clean.
+Run everything from an **elevated** PowerShell. Without elevation, Windows may
+return an incomplete result instead of an error. For example, another user's
+scheduled task may be missing from the list.
 
 > Where a card says `CONFIG`, it means your config file — the same file the
 > Linux box uses. Default: `C:\ProgramData\CCDC\ccdc.env`
@@ -20,9 +21,9 @@ will conclude a dirty box is clean.
 
 `RED rogueadmin` · `RED newuser` · `RED nopassword` · `RED guest` · `RED scoreduser`
 
-The training put this first and it is right: **the red team already knows the
-default passwords.** Everything else on this list is somebody keeping access
-they have. This card is about the access itself.
+Start with accounts because known or default passwords give an attacker direct
+access. This card helps you find accounts that can log in or administer the
+box.
 
 ### The five findings, and what each one means
 

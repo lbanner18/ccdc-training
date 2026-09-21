@@ -174,6 +174,19 @@ Save-Command 'autostart' 'autostart entries' {
         catch { "  (not present)" }
     }
 }
+Save-Command 'autorunsc' 'optional Sysinternals Autorunsc persistence inventory' {
+    $capture = Invoke-CcdcAutorunsc -Config $cfg
+    if (-not $capture.Ran) { throw $capture.Reason }
+    foreach ($row in @($capture.Rows)) {
+        [pscustomobject]@{
+            Entry = [string]$row.'Entry'
+            Location = [string]$row.'Entry Location'
+            ImagePath = [string]$row.'Image Path'
+            Description = [string]$row.'Description'
+            Publisher = [string]$row.'Publisher'
+        }
+    }
+}
 Save-Command 'wmi-subscriptions' 'WMI permanent event subscriptions' {
     foreach ($cls in @('__EventFilter', 'CommandLineEventConsumer',
                        'ActiveScriptEventConsumer', '__FilterToConsumerBinding')) {

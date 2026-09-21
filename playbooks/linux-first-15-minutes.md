@@ -18,11 +18,16 @@ checkbox.
 [ ] Create the local config once if it is not already present:
         test -f "$CFG" || cp config/example.env "$CFG"
         chmod 600 "$CFG"
-    Fill CCDC_ALLOWED_USERS, CCDC_SYSTEMD_SERVICES, ports, and scorer-style
-    TCP/HTTP checks from the packet. Do not paste the finished config into chat.
-[ ] Run recon.sh and save the evidence path. This is the record of what was
-    already on the box before hardening changes it.
-[ ] Run hunt.sh and review persistence, keys, sudoers, and listening ports.
+    Fill in the packet facts: accounts that must remain, services that are
+    scored, allowed ports, and checks the scorer makes. Example: if the scorer
+    opens `http://10.0.0.5/`, put that address in CCDC_HTTP_CHECKS; do not use
+    `127.0.0.1` unless the scorer really connects from the same machine. Do not
+    paste the finished config into chat.
+[ ] Run recon.sh and save the evidence path it prints. This is the "before"
+    record. Example: later you can show that a scheduled task existed before
+    you changed anything.
+[ ] Run hunt.sh. Read its sections for startup jobs, SSH keys, sudo access, and
+    listening ports. A "listening port" is a program waiting for a connection.
 [ ] Check scored services from the outside, not only systemctl status.
 [ ] Set CCDC_WATCHDOG_INTERVAL="5" and point CCDC_HTTP_CHECKS at the address
     the SCORER uses, not 127.0.0.1.
@@ -32,24 +37,28 @@ checkbox.
     Every cut is checked against the scored services and reversed automatically
     if one stops answering. For an item you do not understand, run:
         sudo ./linux/harden.sh --config "$CFG" --explain N
-[ ] sudo ./linux/triage.sh --config "$CFG"      # what is ALREADY wrong now
-    Every finding gives a copyable action or explains, in plain language, what
-    you must compare before acting. Use its `dig:` command for full evidence
-    and its `more:` card reference when the short explanation is not enough.
+[ ] sudo ./linux/triage.sh --config "$CFG"      # problems to handle now
+    Read RED findings first. Each finding either prints a command you can copy
+    or tells you exactly what to compare before changing anything. `dig:` means
+    "show me the evidence for this one finding". `more:` names the card with a
+    slower, step-by-step version.
 [ ] sudo ./linux/baseline.sh --config "$CFG"    # what remains unexplained
 [ ] sudo ./linux/baseline.sh --config "$CFG" --bless --apply
     ONLY once the box looks the way you want it. This freezes what remains as
     known-good. New drift stays visible until you remove it or allow it; it
     never becomes normal merely because another watch pass completed.
 [ ] sudo ./linux/arm.sh --config "$CFG" --apply
-    -> backup + canaries + supervised sentry, then guardian/watchdog.
-       Guardian independently enrolls sentry's unit, config, and installed tree.
-       Never run either loop by hand; systemd keeps both alive and your one
-       terminal remains free.
+    This starts the long-running protection: a machine backup, a separate
+    checksummed kit recovery copy, canaries, sentry, and guardian/watchdog.
+    After it finishes, `systemctl` keeps the monitoring programs running in
+    the background. Do not start their `--loop` modes in your shell.
 [ ] Check the current queue: sudo ./linux/sentry.sh --config "$CFG" --status
 [ ] A new RED baseline finding is broadcast once to logged-in terminals with
     `wall` when it is installed (CCDC_WATCH_NOTIFY="1" is the default). This is
     not email or a pager, so keep checking the sentry queue between injects.
+[ ] Optional, after reviewing the profile change: sudo ./linux/prompt.sh --config "$CFG" --install --apply
+    New Bash login shells show [!N] for pending AMBER approvals; [!?] means
+    the sentry count is stale or unknown, not clear.
 [ ] sudo ./linux/audit.sh --config "$CFG" --apply
     Persistent audit rules, so the next `systemctl restart auditd` does not
     silently clear every watch canary.sh loaded. Then --capture, which is the
@@ -77,8 +86,9 @@ checkbox.
 
 ## When you find something live
 
-Not a file on disk — a process, a connection, a login. The order matters, and
-it is the opposite of the instinct:
+Use this when the suspicious thing is active now: a running process, a live
+network connection, or an active login. `PID` below means the process ID shown
+by `triage.sh` or `ps`.
 
 ```text
 [ ] DO NOT KILL IT YET.
@@ -86,19 +96,20 @@ it is the opposite of the instinct:
     Stops it, then takes the socket, the parent chain, the open files, and a
     copy of the binary recovered through /proc (which works even when the file
     was deleted). All of that is gone the moment you kill it.
-[ ] Read 00-CASE.txt. The three sentences it names ARE the incident report.
-[ ] Find what STARTED it before you kill it: ancestry.txt. ppid 1 means the
-    real parent already exited, so something scheduled it — work CARD 3 and
-    CARD 4 before killing, or it comes back in 60 seconds.
+[ ] Read 00-CASE.txt. It gives you the short incident-report summary.
+[ ] Open ancestry.txt to see what started it. If it says `ppid 1`, the original
+    parent already exited. That usually means a service, timer, or cron job
+    started it. Check CARD 3 and CARD 4 before killing it, or it may return.
 [ ] Then: kill -9 <PID>, and re-run triage to confirm the finding CLEARS.
 ```
 
 ## The three questions nothing else on the box answers
 
 ```text
-[ ] sudo ./linux/triage.sh --config "$CFG"   who is holding a socket right now?
-    A reverse shell over 443 is a permitted connection on an allowed port.
-    The finding is never the port; it is that bash is on the end of it.
+[ ] sudo ./linux/triage.sh --config "$CFG"   who owns each network connection?
+    Example: port 443 may be allowed for HTTPS, but `bash` connected to an
+    outside address on port 443 is not a web server. The owner matters, not
+    just the port number.
 [ ] sudo ./linux/audit.sh --config "$CFG"    can this box still prove anything?
 [ ]      ./linux/splunk.sh --config "$CFG"   are the logs leaving the box?
 ```

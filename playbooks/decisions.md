@@ -9,14 +9,20 @@ caused a tool to be built the way it had already been decided not to build it.
 If a decision is not written here, it does not survive. Add to this file at the
 moment of the decision, not later.
 
+This is a decision log, not a competition checklist. It preserves why a choice
+was made so a later edit does not undo it by accident. If you need the next
+command to run, open `linux-first-15-minutes.md` or
+`windows-first-15-minutes.md` instead.
+
 ---
 
 ## D1 — Provenance, not content (2026-09-17)
 
-Ask what a thing IS EXPLAINED BY, not what it contains. Content matching is
-unbounded — infinite ways to spell a reverse shell — so it only ever catches the
-spellings someone imagined. "Is this explained?" is bounded: blessed baseline,
-**or** package-owned with an intact checksum, **or** allowlisted.
+Ask why a thing is present, not whether a search happened to find scary text in
+it. There are unlimited ways to spell a reverse shell, so text matching only
+catches the versions someone imagined. Here, "explained" has three concrete
+meanings: it was present when you blessed the clean box, its package owns it and
+its checksum still matches, or you explicitly recorded it as allowed.
 
 **Why:** two drill footholds walked past every content check in the kit.
 
@@ -40,16 +46,17 @@ consolidated the tier-1 sequence. Agreed shape:
 > reading it: recon records it, harden proposes what is unnecessary, triage flags
 > what is unexplained. One walk, one truth, several views.
 
-**Why it matters, in the words used at the time:** separate enumerators *can
-disagree*, and when they do you get a finding in one and silence in the other
-with no way to tell which is right.
+**Why it matters:** two separate scans can disagree. For example, one could
+show a cron job and the other could say nothing. Under time pressure, you then
+have no clear answer about which result to trust.
 
-**Status as of 2026-09-17:** not done. `recon.sh`, `triage.sh`, `hunt.sh` and
-`baseline.sh` each walk cron, units, SUID and passwd independently, and
-`harden.sh` was built as a fifth separate tool rather than a view. This is the
-open item.
+**Status as of 2026-09-18:** the shared producer is built:
+`baseline.sh --inventory` emits `kind|subject|detail`, and `recon.sh`
+records it as `execution-inventory.txt`. `recon.sh`, `triage.sh`,
+`hunt.sh`, and `harden.sh` still retain their specialised walks, so consumer
+migration and parity proof remain the open item.
 
-## D3a — One approval queue, three sources (2026-09-17) — **NOT BUILT**
+## D3a — One approval queue, three sources (2026-09-17) — historical proposal
 
 > "The key design decision: **harden.sh proposes, it doesn't act.** Same numbered
 > list, same `--approve N --apply`, same why/will/run/more. Which means one
@@ -67,32 +74,37 @@ decision about a whole family that is legitimately present — and it carries a
 scored-service check plus an automatic rollback after every single cut, which
 `--approve` does not need. A shared verb would have had to mean both.
 
-**Still open:** whether `baseline.sh` also LISTS the unnecessary findings, so
-there is one screen that shows everything, even though acting on them happens in
-`harden.sh`.
+**Resolved 2026-09-18:** `baseline.sh --review` lists unexplained findings and
+legitimate-but-unnecessary candidates in one read-only screen. Their actions
+remain intentionally separate: provenance approval removes one unexplained
+item; `harden.sh --cut` retains its scored-service rollback.
 
-## D3b — Get a denominator (2026-09-17) — **NOT BUILT**
+## D3b — Get a denominator (2026-09-17) — historical proposal
 
 In answer to "do we need to think differently about how we iterate?", three
-method changes were agreed. Only the second was done.
+method changes were agreed. All three are now implemented, with a deliberately
+bounded meaning for the denominator.
 
 1. **Get a denominator.** Write out every mechanism on this OS that causes code
    to run as root — a finite list, perhaps forty entries — so coverage is a
    fraction that can be reported instead of "27 checks" with nothing to divide
-   by. *(The list now exists as `exec_trigger_dirs`. No fraction is ever
-   reported. NOT DONE.)*
+   by. *(Done: `baseline.sh --mechanisms` exports the declared mechanisms and
+   normal reports state how many are present. It is explicitly inventory
+   coverage, not a percentage of all possible compromise paths.)*
 2. **Flip the default from content to provenance.** *(Done — see D1.)*
 3. **Generate drills from the inventory, not from imagination.** If the planting
    fixture picks at random from the mechanism list, a drill stops measuring "did
-   Claude think of this" and starts measuring real coverage. *(NOT DONE —
-   `night-drill.sh` plants are hand-written.)*
+   Claude think of this" and starts measuring real coverage. *(Done:
+   `redteam/mechanism-drill.sh` turns the exported mechanism inventory into a
+   rotating lab plan without blindly modifying authentication or boot paths.)*
 
 ## D3c — Alerting, in three tiers (2026-09-17) — **PARTIALLY BUILT**
 
 1. Deduped `wall` on RED findings. *(Done in `watch.sh`; enabled by default
    through `CCDC_WATCH_NOTIFY=1` when `wall` is available.)*
-2. A prompt indicator, `[!3]` in `PS1`, for everything below RED. *(NOT DONE —
-   described in baseline-design.md, never built.)*
+2. A prompt indicator, `[!3]` in `PS1`, for actionable AMBER items. *(Done
+   2026-09-18 as opt-in `linux/prompt.sh`; `[!?]` is stale/unknown, and RED
+   remains on the interrupting wall path.)*
 3. A dedicated pane running the watch loop. *(Not a packaged workflow. The
    installed sentry already runs watch; use `sentry.sh --status` for the queue.)*
 

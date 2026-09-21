@@ -5,6 +5,12 @@ Written 2026-09-17, after the night drill. This is the design document for
 came out of a long conversation, and a decision nobody wrote down gets remade
 badly later.
 
+This is background reading, not the first card to open during a competition.
+For the commands to run first, use `linux-first-15-minutes.md`. When this file
+says a file is "explained," it means one simple thing: we know why it is on the
+box. For example, `/usr/sbin/sshd` is explained because its package owns it;
+`/tmp/.cache/update` is not explained merely because it has a harmless name.
+
 ---
 
 ## What was wrong
@@ -18,18 +24,18 @@ config format the worksheet documents.
 
 Underneath that were two deeper problems.
 
-**Coverage was example-driven and had no denominator.** Twenty-seven checks
-existed because twenty-seven things had gone wrong or been planted. Nobody could
-answer "twenty-seven out of what?" A crude audit of common root-execution
-triggers found roughly ten with no coverage at all, including `apt.conf.d`
-hooks, which run as root on every `apt` command.
+**Coverage followed past examples and had no total to compare against.**
+Twenty-seven checks existed because twenty-seven things had gone wrong or been
+planted. Nobody could answer "twenty-seven out of what?" A rough list of common
+ways a command can run as root found about ten with no check at all. One example
+is an `apt.conf.d` hook: it runs as root whenever someone runs `apt`.
 
 **Checks asked what a file CONTAINS, not whether it should exist.** Both
-footholds that survived the drill did so for the same reason: a systemd drop-in
+surviving attacker entries did so for the same reason: a systemd drop-in
 whose body was an ordinary `ExecStartPost`, and a script in
-`/etc/update-motd.d`. Neither file said anything evil. Content-matching is an
-unbounded question — there are infinite ways to spell a reverse shell — so a
-check written that way only ever catches the spellings someone imagined.
+`/etc/update-motd.d`. Neither file said anything obviously dangerous. There
+are endless ways to write the same malicious command, so a content search only
+catches wording somebody thought to search for.
 
 Asking whether a file is **explained** is bounded.
 
@@ -54,14 +60,14 @@ context, but it also runs `baseline.sh --fast` on every pass. That second check
 is the authority: a foothold stays in the queue until it is removed or recorded
 as an exception. It cannot become normal merely by surviving another cycle.
 
-**Bless freezes semantic readings, not just a file inventory.** The blind spot
-in pure provenance is a backdoor that is legitimate *content* inside an expected
-file: an extra `AuthorizedKeysFile` line in `sshd_config`, a `pam_exec.so` line,
-a sudoers rule, an added key, a changed hash. Those files are supposed to exist
-and `dpkg` expects conffiles to differ from shipped defaults. So the baseline
-also freezes: `sshd -T` effective config, the sudoers ruleset, UID-0 accounts,
-authorized keys per account, service-account shells, listening sockets, loaded
-kernel modules.
+**Bless records what important settings mean, not only which files exist.** A
+file can be expected but contain one extra dangerous line: for example, a new
+SSH key, a sudo rule, or `pam_exec.so`. Package checks cannot reject every
+changed configuration file because local configuration is allowed to differ
+from the shipped version. So the baseline also records the actual settings that
+matter: what SSH will use after all its config files are combined, sudo rules,
+UID-0 accounts, SSH keys, service-account shells, open ports, and loaded kernel
+modules.
 
 **Everything unnecessary goes.** Not because removal catches content-level
 backdoors directly, but because it shrinks the places one can hide while looking
@@ -94,8 +100,8 @@ sudo ./linux/baseline.sh --config ~/ccdc-real.env --bless --apply
 sudo ./linux/arm.sh --config ~/ccdc-real.env --apply
 ```
 
-`recon` runs first and is read-only, because hardening destroys the record of
-what was there and that record is inject evidence.
+`recon` runs first and only reads the box. Hardening can delete the very file
+you later need to describe in an inject, so record it before changing it.
 
 **The bless step cannot be automatic and cannot merge into step 1.** You cannot
 freeze a baseline on a box you have not cleaned — you would bless the implants.
@@ -104,9 +110,13 @@ That human checkpoint is the one place the pipeline will not collapse further.
 ### What stays separate today
 
 `recon.sh`, `hunt.sh`, `surface.sh`, `triage.sh`, `services.sh`, `sshd.sh`,
-`users.sh`, and `policy.sh` remain separate tools. The intended long-term
-single inventory is recorded in [decisions.md](decisions.md#d3--one-enumeration-several-views-2026-09-17--not-yet-built); it is not an
-implemented instruction.
+`users.sh`, and `policy.sh` remain separate tools. The first shared-inventory
+seam now exists: `baseline.sh --inventory` emits the current
+`kind|subject|detail` feed, and recon saves that exact feed as
+`execution-inventory.txt`. `inventory-compare.sh --recon-dir EVIDENCE`
+cross-checks that feed against recon’s detailed files. Reports have **not** yet
+been switched to consume it, so it is a parity/proof surface rather than a
+claim that the duplicate walks are gone.
 
 They stay independently runnable, exactly as `backup.sh` and `canary.sh` did
 under `arm.sh` — mid-event you want to re-run triage alone without re-walking
@@ -126,9 +136,10 @@ listeners, SUID, rc files. `surface.sh`'s own header admits the overlap. That is
 slow on a clock, and worse, the two can disagree with no way to tell which is
 right.
 
-That is the desired architecture, not the current implementation. Today each
-tool has its own walk; use the pipeline above rather than assuming one command
-has already consolidated the others.
+That is the desired architecture, not the current implementation. The shared
+producer is now available for comparison, but each operational tool still owns
+its specialised walk; use the pipeline above rather than assuming one command
+has already consolidated them.
 
 ---
 
@@ -292,17 +303,16 @@ service behaving, and whether anything reappears after removal.
 
 ## Implementation status
 
-Baseline drift, the sentry finish line, and deduplicated terminal alerts are
-implemented. The remaining architecture work below is not an operator
-instruction and must not be assumed to exist during an event.
+Baseline drift, the sentry finish line, deduplicated terminal alerts, and the
+opt-in prompt indicator are implemented. The remaining architecture work below
+is not an operator instruction and must not be assumed to exist during an
+event.
 
 1. **One enumeration, several views** — replace the separate tool walks with a
    shared structured inventory without changing the explicit operator stages.
-2. **Prompt indicator** — an optional, non-interrupting count of queued items.
-   It is not built; do not add an ad-hoc shell hook during competition.
-3. **Render pass** — drive every tool through every mode and read the output as
+2. **Render pass** — drive every tool through every mode and read the output as
    an operator rather than as its author.
-4. **Atomic Red Team as the adversary.** Not as a denominator — that was a wrong
+3. **Atomic Red Team as the adversary.** Not as a denominator — that was a wrong
    turn, since a curated list of 435 techniques is a better anecdote list, not a
    measure of coverage. The denominator is "every execution trigger on this box
    resolves to a package, the packet, or your own work", which `baseline.sh`
@@ -328,11 +338,26 @@ The method that produced the gaps was security by anecdote. Replacing it:
 
 ---
 
-## Proposed prompt indicator (not implemented)
+## Prompt indicator (implemented, opt-in)
 
 `wall` interrupts you when something new goes RED. It deliberately does not
 repeat itself, which leaves a separate question unanswered: *is there anything
-outstanding right now?* A shell prompt indicator is a possible future answer;
-it is intentionally not shown as a shell snippet: installing a prompt hook or
-new sudo rule during an event would be another unreviewed change to explain.
-Until it is built and tested, use the supported `sentry.sh --status` command.
+outstanding right now?* `linux/prompt.sh` answers that with `[!N]` in new
+interactive Bash login shells, where `N` is the number of actionable AMBER
+items in sentry’s current approval queue. RED is deliberately not folded into
+that number: it has the interrupting `wall` path.
+
+Sentry publishes only `epoch|count|stale-after` at `/run/ccdc-sentry-prompt`,
+readable by the shell but containing no subjects, paths, descriptions, or evidence. A
+missing, malformed, stale, or failed pass displays `[!?]`, never a false zero.
+Install is explicit and dry-run by default:
+
+```bash
+sudo ./linux/prompt.sh --config "$CFG" --install --apply
+```
+
+It writes an owned `/etc/profile.d` entry and will therefore be reported as
+legitimate baseline provenance drift. Review it and bless it when freezing the
+clean box; do not hide it behind a broad allow rule. `arm.sh` intentionally
+does not install the hook. `sentry.sh --status` remains the authoritative,
+full-detail queue.

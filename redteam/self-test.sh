@@ -70,6 +70,9 @@ elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
 
+printf '\n== kit recovery bundle ==\n'
+run_suite "$ROOT/redteam/recovery-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== pasteable output ==\n'
 run_suite "$ROOT/redteam/pasteable-self-test.sh" || failed=$((failed + 1))
 
@@ -126,6 +129,9 @@ fi
 printf '\n== hardening: what nothing scored needs ==\n'
 run_suite "$ROOT/redteam/harden-self-test.sh" || failed=$((failed + 1))
 
+printf '\n== shared inventory cross-check ==\n'
+run_suite "$ROOT/redteam/inventory-compare-self-test.sh" || failed=$((failed + 1))
+
 printf '\n== external perimeter workflow ==\n'
 run_suite "$ROOT/redteam/perimeter-self-test.sh" || failed=$((failed + 1))
 
@@ -152,6 +158,9 @@ if [ "$rc" -eq 77 ]; then
 elif [ "$rc" -ne 0 ]; then
   failed=$((failed + 1))
 fi
+
+printf '\n== sentry prompt indicator ==\n'
+run_suite "$ROOT/redteam/prompt-self-test.sh" || failed=$((failed + 1))
 
 printf '\n== windows tools ==\n'
 rc=0

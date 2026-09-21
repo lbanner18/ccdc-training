@@ -1,13 +1,12 @@
 # Competition-day playbook (solo tryout)
 
-Printable. One operator, four boxes (Linux, Windows, Splunk, firewall), six
-hours, uptime + injects scored evenly. This is the order to work in and the
-commands to work with. Practice the implementation until the sequence is
-muscle memory, because on the day the clock is the enemy as much as the red
-team is.
+Printable. You are one operator with four boxes: Linux, Windows, Splunk, and a
+firewall. You have six hours. Uptime and injects are worth the same amount, so
+do not spend the whole event only hardening hosts.
 
-Fill every `<BRACKET>` from the team packet before you touch anything. A
-command run against a guessed value is a command run twice.
+Replace every `<BRACKET>` with the real value from the team packet before you
+run a command. For example, replace `<SCORED_SERVICE>` with `apache2` only if
+the packet actually names `apache2`.
 
 **Reading the checklists:** lines beginning `[ ]` are things to complete, not
 shell input. Commands that are meant to be copied are in `bash` blocks without
@@ -37,8 +36,9 @@ win on uptime alone. Budget time for injects from minute one — see §6.
 
 ## 1. First 15 minutes — record the box before you change it
 
-Everything here is read-only. Do not harden anything until you know what normal
-looks like, or you will not be able to tell your own change from an intrusion.
+Everything here is read-only. Run it before hardening so you have a record of
+what you found on arrival. Without that record, a new service later could be an
+attacker's change or your own change, and you will not know which.
 
 ```bash
 # These are the before-picture. Triage is an urgency read here; run it again
@@ -53,9 +53,8 @@ sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env
 
 Save the evidence paths printed by recon and hunt; they are the before-picture.
 
-Read, by hand, in this order — this is where the red team's pre-placed access
-lives. **Every line below is a real command you can paste**; explanations are on
-their own `#` lines so nothing here is ambiguous at 10:05:
+Read these results in order. They show common ways someone may already have
+access. Every non-comment line below is a command you can paste:
 
 ```bash
 # who is logged in right now, and who has been
@@ -291,17 +290,21 @@ things. Patch what has a public exploit and is reachable.
 ## 3. Arm the standing defence — one command
 
 This is the machinery that works while your attention is on injects. One
-command takes a restore point, lays tripwires, starts the guardian/watchdog,
-and installs the combined sentry/change detector as a supervised service:
+command makes a restore point for the machine, saves a separate checksummed
+copy of this kit, lays tripwires, starts the guardian/watchdog, and installs
+the combined sentry/change detector as a supervised service:
 
 ```
 [ ] ./linux/arm.sh --config /tmp/ccdc-linux.env               # dry run first
 [ ] sudo ./linux/arm.sh --config /tmp/ccdc-linux.env --apply
 ```
 
-That runs `backup.sh`, `canary.sh --deploy`, `guardian.sh --install`, and
-`sentry.sh --install`. Guardian starts the watchdog; sentry runs ranked triage
-plus the broader canary/hunt/recon sweep. Both are supervised. **Do not run
+That runs `backup.sh`, `recovery.sh --install`, `canary.sh --deploy`,
+`guardian.sh --install`, and `sentry.sh --install`. The recovery copy is for
+the case where someone deletes or replaces this checkout: it verifies its hash
+and extracts only into a new directory, so it cannot silently overwrite what
+is running. Guardian starts the watchdog; sentry runs ranked triage plus the
+broader canary/hunt/recon sweep. Both are supervised. **Do not run
 either loop by hand**: a foreground loop consumes your only terminal and dies
 when your SSH session drops, which is exactly when you need it.
 
@@ -542,7 +545,7 @@ gone.
     inject, already half-written in injects/incident-report-template.md.
 ```
 
-### If it is a LIVE process, the order is different — and it is the opposite of the instinct
+### If it is a live process, preserve it before removing it
 
 A file on disk waits for you. A process does not: its socket, its parent, its
 open files and an unlinked binary all stop existing the moment you kill it, and

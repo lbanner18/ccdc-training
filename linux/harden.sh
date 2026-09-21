@@ -68,6 +68,7 @@ while [ "$#" -gt 0 ]; do
                case "${2:-}" in ''|--*) undo_item='all'; shift ;;
                                  *) undo_item=$2; shift 2 ;; esac ;;
     --table)   mode='table'; shift ;;
+    --export)  mode='export'; shift ;;
     --all)     show_all=1; shift ;;
     --apply)   apply=1; CCDC_DRY_RUN=0; shift ;;
     --i-know-it-is-blessed) allow_blessed=1; shift ;;
@@ -83,6 +84,7 @@ while [ "$#" -gt 0 ]; do
       printf '  --table       the Unnecessary Software audit inject table:\n'
       printf '                what it is, where it lives, what it listens on,\n'
       printf '                and how it was removed\n'
+      printf '  --export      machine-readable review rows for baseline.sh --review\n'
       printf '\n'
       printf '  --i-know-it-is-blessed  harden a box that has already been blessed.\n'
       printf '                Refused by default: every cut would read as drift.\n'
@@ -976,6 +978,23 @@ print_table() {
   printf '    sudo %s --config %s --undo --apply\n\n' "$qself" "$qconfig"
 }
 
+# Deliberately narrow interface between the two halves of the model. This is
+# not an API for a mutator: it emits a tab-separated, read-only description so
+# baseline.sh can put "unexplained" and "unnecessary" on one decision screen.
+# Keep the fields human text, not shell code; the actual action still goes back
+# through this tool's own frozen queue and all its scored-service checks.
+print_export() {
+  local line i=0
+  mkdir -p "$harden_dir" 2>/dev/null; chmod 700 "$harden_dir" 2>/dev/null
+  : >"$queue.tmp"
+  for line in ${FINDINGS+"${FINDINGS[@]}"}; do
+    i=$((i + 1))
+    printf '%s|%s\n' "$i" "$line" >>"$queue.tmp"
+    printf '%s\n' "$line"
+  done
+  mv "$queue.tmp" "$queue" 2>/dev/null; chmod 600 "$queue" 2>/dev/null
+}
+
 # --- main ---------------------------------------------------------------------
 ccdc_require_root
 
@@ -985,11 +1004,14 @@ case "$mode" in
   cut)
     build_keep_set
     do_cut_items "$cut_items" ;;
-  look|table)
+  look|table|export)
     build_keep_set
     enumerate_units
     enumerate_suid
     enumerate_packages
     enumerate_listeners
-    if [ "$mode" = 'table' ]; then print_table; else print_listing; fi ;;
+    if [ "$mode" = 'table' ]; then print_table
+    elif [ "$mode" = 'export' ]; then print_export
+    else print_listing
+    fi ;;
 esac

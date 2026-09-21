@@ -128,6 +128,19 @@ PROBE
 )
 ccdc_record_shell "$evidence/scheduled-tasks.txt" "$scheduled_probe"
 
+# The detailed recon files above remain the human before-picture. This is the
+# matching machine-readable view from baseline's shared inventory producer:
+# one stable kind|subject|detail feed that later reports can compare without
+# having to scrape recon's prose. It is additive for now, not a silent rewrite
+# of the specialised collectors.
+if [ -n "$config" ]; then
+  ccdc_record "$evidence/execution-inventory.txt" \
+    "$SCRIPT_DIR/baseline.sh" --config "$config" --inventory
+else
+  printf 'GAP: no --config was supplied, so the shared execution inventory was not collected.\n' \
+    >"$evidence/execution-inventory.txt"
+fi
+
 if ccdc_have ss; then
   ccdc_record "$evidence/listening.txt" ss -lntup
 elif ccdc_have netstat; then
@@ -154,3 +167,5 @@ find "$evidence" -type f ! -name SHA256SUMS -exec sha256sum {} \; >"$evidence/SH
 ccdc_info "recon evidence saved to $evidence"
 printf '  list it:  sudo ls -la %q\n' "$evidence"
 printf '  read one: sudo less %q/accounts.txt\n' "$evidence"
+printf '  compare shared inventory: sudo %q/inventory-compare.sh --recon-dir %q\n' \
+  "$SCRIPT_DIR" "$evidence"

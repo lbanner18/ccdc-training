@@ -406,6 +406,14 @@ if (-not (Test-Path -LiteralPath $sentryPath)) {
     } else {
         nope ("these became automatable without a decision: {0}" -f ($grew -join ', '))
     }
+
+    $expectedNewActions = @('taskcmd','newtask','winlogon','svcaccount')
+    $missingNewActions = @($expectedNewActions | Where-Object { $actionNames -notcontains $_ })
+    if ($missingNewActions.Count -eq 0 -and $sentryTxt -match 'Export-ScheduledTask' -and $sentryTxt -match 'winlogon-before\.txt') {
+        ok 'sentry offers the four evidenced scheduled-task, Winlogon, and service-account actions'
+    } else {
+        nope ("sentry is missing an evidenced action for: {0}" -f ($missingNewActions -join ', '))
+    }
 }
 
 # =============================================================================
@@ -442,6 +450,150 @@ if (-not (Test-Path -LiteralPath $blPath)) {
 }
 
 # =============================================================================
+# guardian.ps1 - honest task redundancy, not magic
+# =============================================================================
+$guardianPath = Join-Path $root 'windows\guardian.ps1'
+if (-not (Test-Path -LiteralPath $guardianPath)) {
+    nope 'windows\guardian.ps1 is missing'
+} else {
+    $guardianTxt = Get-Content -LiteralPath $guardianPath -Raw
+    if ($guardianTxt -match '\[switch\]\$Apply' -and $guardianTxt -match 'Write-PrivateCopies' -and
+        $guardianTxt -match 'Repair-PrivateCopies' -and $guardianTxt -match 'Ensure-Watchdog') {
+        ok 'guardian.ps1 gates installation and verifies a private watchdog repair authority'
+    } else {
+        nope 'guardian.ps1 lacks its apply gate, repair authority, or watchdog repair path'
+    }
+    if ($guardianTxt -match 'Administrator can remove or alter all three scheduled tasks') {
+        ok 'guardian.ps1 states that an Administrator can defeat its redundancy'
+    } else {
+        nope 'guardian.ps1 overclaims tamper-proofing against Administrator'
+    }
+    if ($guardianTxt -match 'CCDC_WINDOWS_GUARDIAN_TASK' -and $guardianTxt -match 'CCDC_WINDOWS_WATCHDOG_TASK' -and $guardianTxt -match 'CCDC_WINDOWS_INTEGRITY_TASK' -and
+        $guardianTxt -match 'CCDC_WINDOWS_GUARDIAN_FILE' -and $guardianTxt -match 'CCDC_WINDOWS_WATCHDOG_FILE' -and
+        $guardianTxt -match 'CCDC_WINDOWS_CANARY_FILE' -and $guardianTxt -match 'CCDC_WINDOWS_INTEGRITY_FILE' -and
+        $guardianTxt -match 'Ensure-IntegrityTask') {
+        ok 'guardian.ps1 keeps task and private runtime names in the packet config'
+    } else {
+        nope 'guardian.ps1 hard-codes a conspicuous task or private runtime name'
+    }
+}
+
+# =============================================================================
+# integrity.ps1 - separate Guardian-chain check
+# =============================================================================
+$integrityPath = Join-Path $root 'windows\integrity.ps1'
+if (-not (Test-Path -LiteralPath $integrityPath)) {
+    nope 'windows\integrity.ps1 is missing'
+} else {
+    $integrityTxt = Get-Content -LiteralPath $integrityPath -Raw
+    if ($integrityTxt -match '\[switch\]\$Apply' -and $integrityTxt -match 'Assert-CcdcPacketEntered') {
+        ok 'integrity.ps1 requires an explicit apply and packet facts before installing its task'
+    } else {
+        nope 'integrity.ps1 can install a SYSTEM task without the normal safety gates'
+    }
+    if ($integrityTxt -match 'Get-ScheduledTask' -and $integrityTxt -match '\$privateGuardian' -and
+        $integrityTxt -match 'REDIRECTED' -and $integrityTxt -match 'INTEGRITY-GAP') {
+        ok 'integrity.ps1 detects a missing, stopped, or redirected Guardian task and records a gap'
+    } else {
+        nope 'integrity.ps1 does not check Guardian task identity and report an integrity gap'
+    }
+    if ($integrityTxt -match 'install this through guardian\.ps1' -and $integrityTxt -match 'CCDC_WINDOWS_INTEGRITY_TASK') {
+        ok 'integrity.ps1 schedules only its private Guardian-installed copy'
+    } else {
+        nope 'integrity.ps1 can schedule an unprotected source-tree copy'
+    }
+}
+
+# =============================================================================
+# evidence.ps1 - off-box copy stays explicit and verified
+# =============================================================================
+$evidencePath = Join-Path $root 'windows\evidence.ps1'
+if (-not (Test-Path -LiteralPath $evidencePath)) {
+    nope 'windows\evidence.ps1 is missing'
+} else {
+    $evidenceTxt = Get-Content -LiteralPath $evidencePath -Raw
+    if ($evidenceTxt -match '\[switch\]\$Apply' -and $evidenceTxt -match 'Destination must be a UNC share' -and
+        $evidenceTxt -match 'Assert-CcdcAdmin') {
+        ok 'evidence.ps1 requires apply, elevation, and an explicit off-box UNC destination'
+    } else {
+        nope 'evidence.ps1 can export without an explicit trusted off-box destination'
+    }
+    if ($evidenceTxt -match 'SHA256SUMS\.csv' -and $evidenceTxt -match 'Get-FileHash -LiteralPath \$remoteArchive' -and
+        $evidenceTxt -match 'OFFBOX-EXPORTED') {
+        ok 'evidence.ps1 packages manifests and verifies the copied ZIP before logging success'
+    } else {
+        nope 'evidence.ps1 does not verify its off-box archive copy'
+    }
+}
+
+# =============================================================================
+# surface.ps1 - the inject-ready execution table
+# =============================================================================
+$surfacePath = Join-Path $root 'windows\surface.ps1'
+$commonPath = Join-Path $root 'windows\lib\Common.ps1'
+$baselinePath = Join-Path $root 'windows\baseline.ps1'
+$reconPath = Join-Path $root 'windows\recon.ps1'
+if (-not (Test-Path -LiteralPath $surfacePath)) {
+    nope 'windows\surface.ps1 is missing'
+} else {
+    $surfaceTxt = Get-Content -LiteralPath $surfacePath -Raw
+    if ($surfaceTxt -notmatch '\[switch\]\$Apply') { ok 'surface.ps1 is read-only by construction' }
+    else { nope 'surface.ps1 grew an -Apply switch; reporting the surface must not mutate it' }
+    if ($surfaceTxt -match 'Get-NetTCPConnection' -and $surfaceTxt -match 'Get-ScheduledTask' -and
+        $surfaceTxt -match 'Get-ItemProperty' -and $surfaceTxt -match 'REVIEW') {
+        ok 'surface.ps1 joins listeners and the main Windows autostarts into a verdict table'
+    } else {
+        nope 'surface.ps1 is missing a listener, autostart, or REVIEW branch'
+    }
+    if ($surfaceTxt -match '\[switch\]\$Table' -and $surfaceTxt -match 'Write-MarkdownTable') {
+        ok 'surface.ps1 offers an explicit markdown table mode for injects'
+    } else {
+        nope 'surface.ps1 has no inject-ready table mode'
+    }
+    if ($surfaceTxt -match '\$ownerPid' -and $surfaceTxt -notmatch '(?im)^\s*\$pid\s*=') {
+        ok 'surface.ps1 does not assign PowerShell''s read-only automatic $PID variable'
+    } else {
+        nope 'surface.ps1 assigns $PID, so its listener owner column cannot run on real Windows'
+    }
+    if ($surfaceTxt -match 'Image File Execution Options' -and $surfaceTxt -match 'Active Setup' -and
+        $surfaceTxt -match '__EventConsumer' -and $surfaceTxt -match 'AppInit_DLLs') {
+        ok 'surface.ps1 covers selected high-value logon mechanisms beyond Run keys without claiming full Autoruns coverage'
+    } else {
+        nope 'surface.ps1 did not add the selected IFEO, Active Setup, WMI, and AppInit logon mechanisms'
+    }
+    if ($surfaceTxt -match 'Get-AutorunscRows' -and $surfaceTxt -match 'Invoke-CcdcAutorunsc') {
+        ok 'surface.ps1 can add explicitly configured Autorunsc evidence without an apply path'
+    } else {
+        nope 'surface.ps1 does not wire optional Autorunsc evidence into its table'
+    }
+}
+if (-not (Test-Path -LiteralPath $commonPath) -or -not (Test-Path -LiteralPath $baselinePath) -or -not (Test-Path -LiteralPath $reconPath)) {
+    nope 'optional Autorunsc collector files are missing'
+} else {
+    $commonTxt = Get-Content -LiteralPath $commonPath -Raw
+    $baselineTxt = Get-Content -LiteralPath $baselinePath -Raw
+    $reconTxt = Get-Content -LiteralPath $reconPath -Raw
+    if ($commonTxt -match 'function Invoke-CcdcAutorunsc' -and $commonTxt -match 'CCDC_AUTORUNSC_PATH' -and
+        $commonTxt -match 'Get-AuthenticodeSignature' -and $commonTxt -match 'PATH lookup is intentionally disabled') {
+        ok 'Autorunsc collector requires an explicit path and verifies its publisher'
+    } else {
+        nope 'Autorunsc collector can still discover or run an unverified binary'
+    }
+    if ($commonTxt -match 'CCDC_AUTORUNSC_ACCEPT_EULA' -and $commonTxt -match "'-accepteula'" -and
+        $commonTxt -match 'EULA is not accepted') {
+        ok 'Autorunsc EULA acceptance is an explicit config choice'
+    } else {
+        nope 'Autorunsc EULA handling is missing or implicit'
+    }
+    if ($baselineTxt -match 'Invoke-CcdcAutorunsc' -and $baselineTxt -notmatch "Get-Command 'autorunsc.exe'" -and
+        $baselineTxt -notmatch '\-accepteula' -and $reconTxt -match "Save-Command 'autorunsc'") {
+        ok 'baseline and recon share the constrained Autorunsc evidence collector'
+    } else {
+        nope 'baseline or recon bypasses the constrained Autorunsc collector'
+    }
+}
+
+# =============================================================================
 # canary.ps1 - the tripwires
 # =============================================================================
 $cnPath = Join-Path $root 'windows\canary.ps1'
@@ -469,6 +621,9 @@ if (-not (Test-Path -LiteralPath $cnPath)) {
     } else {
         nope 'canary.ps1 hashes its canaries during -Check again; it will report its own reads as trips'
     }
+
+    if ($cnTxt -match 'AddSeconds\(10\)') { ok 'canary.ps1 leaves Windows time to commit deployment audit events' }
+    else { nope 'canary.ps1 can immediately report its own delayed deployment audit events as a trip' }
 
     # Every decoy has to be obviously a decoy to the operator, on line one.
     $bodies = [regex]::Matches($cnTxt, "Body = @'\r?\n(.*?)'@", 'Singleline')
@@ -505,6 +660,20 @@ foreach ($t in @('harden.ps1','watchdog.ps1')) {
     $txt = Get-Content -LiteralPath (Join-Path $root "windows\$t") -Raw
     if ($txt -match 'Assert-CcdcPacketEntered') { ok "$t refuses to act on an empty packet list" }
     else { nope "$t acts without checking that the packet lists are filled in" }
+}
+
+# Canary exits 2 on a trip. The watchdog must run it in a child process, record
+# that outcome, and keep its own scheduled loop alive rather than exiting too.
+$watchdogTxt = Get-Content -LiteralPath (Join-Path $root 'windows\watchdog.ps1') -Raw
+if ($watchdogTxt -match 'canary\.ps1' -and $watchdogTxt -match 'CANARY-TRIPPED' -and $watchdogTxt -match '\$canaryExit -eq 2') {
+    ok 'watchdog.ps1 checks laid canaries and survives canary exit 2'
+} else {
+    nope 'watchdog.ps1 does not safely turn a canary trip into a durable alert'
+}
+if ($watchdogTxt -match 'Stop-ScheduledTask[\s\S]*Unregister-ScheduledTask') {
+    ok 'watchdog.ps1 stops a running task before replacing or uninstalling it'
+} else {
+    nope 'watchdog.ps1 can leave a running loop behind after task removal'
 }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

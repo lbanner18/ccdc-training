@@ -100,6 +100,19 @@ function Unlock-Sentry {
     }
 }
 
+function Resolve-SentryTask {
+    param([Parameter(Mandatory)][string]$Subject)
+    # Triage's subject is TaskPath + TaskName. Resolve it back to exactly one
+    # task instead of splitting on a character a task name is allowed to use.
+    $matches = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+        ('{0}{1}' -f $_.TaskPath, $_.TaskName) -eq $Subject
+    })
+    if (@($matches).Count -ne 1) {
+        throw "could not resolve '$Subject' to exactly one scheduled task"
+    }
+    return $matches[0]
+}
+
 # --- muting ------------------------------------------------------------------
 
 function Get-MuteKeys {
@@ -366,6 +379,61 @@ $script:Actions = @{
             Get-ItemProperty -LiteralPath $k -ErrorAction SilentlyContinue |
                 Out-File (Join-Path $ev 'ifeo-before.txt') -Encoding UTF8
             Remove-Item -LiteralPath $k -Recurse -Force -ErrorAction Stop
+        }
+    }
+    'taskcmd' = @{
+        Tier = 'RED'
+        What = { param($s) "export and disable the scheduled task '$s'" }
+        Do   = { param($s, $ev)
+            $task = Resolve-SentryTask -Subject $s
+            Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop |
+                Out-File (Join-Path $ev 'task-before.xml') -Encoding UTF8
+            Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+            $after = Get-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+            if ($after.State -ne 'Disabled') { throw "task '$s' is still $($after.State)" }
+        }
+    }
+    'newtask' = @{
+        Tier = 'AMBER'
+        What = { param($s) "export and disable the newly registered task '$s'" }
+        Do   = { param($s, $ev)
+            $task = Resolve-SentryTask -Subject $s
+            Export-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop |
+                Out-File (Join-Path $ev 'task-before.xml') -Encoding UTF8
+            Disable-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop | Out-Null
+            $after = Get-ScheduledTask -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+            if ($after.State -ne 'Disabled') { throw "task '$s' is still $($after.State)" }
+        }
+    }
+    'winlogon' = @{
+        Tier = 'RED'
+        What = { param($s) "restore the stock Winlogon value '$s'" }
+        Do   = { param($s, $ev)
+            $key = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+            $name = switch ($s) {
+                'Winlogon\Userinit' { 'Userinit'; break }
+                'Winlogon\Shell'    { 'Shell'; break }
+                default { throw "unknown Winlogon subject '$s'" }
+            }
+            $stock = if ($name -eq 'Userinit') { 'C:\Windows\system32\userinit.exe,' } else { 'explorer.exe' }
+            Get-ItemProperty -LiteralPath $key -ErrorAction Stop |
+                Select-Object Userinit, Shell | Out-File (Join-Path $ev 'winlogon-before.txt') -Encoding UTF8
+            Set-ItemProperty -LiteralPath $key -Name $name -Value $stock -ErrorAction Stop
+            $after = Get-ItemProperty -LiteralPath $key -Name $name -ErrorAction Stop
+            if ($after.$name -ne $stock) { throw "Winlogon $name did not return to its stock value" }
+        }
+    }
+    'svcaccount' = @{
+        Tier = 'AMBER'
+        What = { param($s) "disable the service '$s' that logs on as an unnamed account" }
+        Do   = { param($s, $ev)
+            Get-CimInstance Win32_Service -Filter "Name='$s'" -ErrorAction Stop |
+                Select-Object Name, State, StartMode, StartName, PathName |
+                Out-File (Join-Path $ev 'service-before.txt') -Encoding UTF8
+            Set-Service -Name $s -StartupType Disabled -ErrorAction Stop
+            Stop-Service -Name $s -ErrorAction Stop
+            $after = Get-CimInstance Win32_Service -Filter "Name='$s'" -ErrorAction Stop
+            if ($after.StartMode -ne 'Disabled') { throw "service '$s' is not disabled" }
         }
     }
 }

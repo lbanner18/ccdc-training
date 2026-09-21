@@ -1,10 +1,7 @@
 # Remediation cards — you found it, now what
 
-One card per finding `triage.sh` can print. Each card is: **kill the access,
-find the way back in, verify**. Work them in that order every time.
-
-Written because finding a foothold and not knowing the next command is the same
-as not finding it.
+There is one card for each finding `triage.sh` can print. Use the same order
+each time: stop the access, find what would recreate it, then verify it is gone.
 
 > ## ⛔ DO NOT `cat` OR PASTE THIS FILE INTO A SHELL
 >
@@ -15,19 +12,16 @@ as not finding it.
 > ./linux/card.sh 1 backupsvc  # card 1, with the real username filled in
 > ```
 >
-> This is markdown. Pasted into bash it executes the prose — measured on the
-> lab box, hundreds of lines of `command not found`, plus real `sudo userdel`
-> and `pkill` lines firing blind. Nothing broke only because the placeholders
-> happened to be unset.
+> This file is not a shell script. If you paste it into bash, bash tries to run
+> the English sentences as commands. Some real commands in the file could also
+> run with the wrong values. Use `card.sh`, `less`, or the web copy instead.
 >
-> The original version of this file said "keep this open in a second window".
-> That assumed two terminals. With one, "open it" means `cat`, and `cat` of a
-> file full of `sudo` is a loaded gun aimed at whoever is in the biggest hurry
-> — which is exactly who these cards are for. `card.sh` prints; it never runs.
+> `card.sh` prints one card for you to read. It does not run the commands from
+> that card. That is safer than copying a large markdown file into a terminal.
 >
-> **Also: never leave `$U` or `$F` unset.** `grep -rn "$U" /etc/ssh/sshd_config`
-> with `$U` empty matches every line and dumps the whole file. It does not
-> error. Pass the value to `card.sh` and there is no variable to forget.
+> **Also: do not leave `$U` or `$F` empty.** For example,
+> `grep -rn "$U" /etc/ssh/sshd_config` with an empty `$U` matches every line.
+> `card.sh` fills in the value you give it, so there is less to remember.
 >
 > ### If the scripts are gone
 >
@@ -46,6 +40,18 @@ as not finding it.
 >
 > **`less`, not `cat`.** `less` pages it into a viewer; `cat` dumps it into your
 > scrollback, and the next thing you do is select-and-paste part of it.
+
+> If `linux/` was deleted, the normal `arm.sh` setup also leaves a root-owned
+> restore helper outside the checkout. It verifies the newest saved kit before
+> extracting a new copy; it does not overwrite the current directory:
+>
+> ```bash
+> sudo /var/backups/ccdc/ccdc-kit-recover.sh --restore /root/ccdc-recovered --apply
+> ```
+>
+> Use your configured `CCDC_RECOVERY_DIR` instead of `/var/backups/ccdc` if you
+> changed it. Then read or run files from `/root/ccdc-recovered/kit` after you
+> inspect them.
 >
 > Every command in this file is a real command you could have typed yourself.
 > Nothing here depends on a script in this repo, by design: the scripts are the

@@ -34,7 +34,7 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       left, http 200. Seven bugs found by running it, four of them safety
       checks that passed without comparing anything.
 
-## P0 — agreed with Luke and not built (found 2026-09-17 by auditing the
+## P0 — agreed with Luke, now complete (found 2026-09-17 by auditing the
 ## transcript instead of my own framing)
 
 - [x] **A. One approval queue.** ~~harden.sh should propose, not act.~~
@@ -42,16 +42,24 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       two actions are different shapes — `--approve` removes one thing that
       should not exist; `--cut` is a bulk decision about a family that is
       legitimately present, with a scored check and auto-rollback per cut.
-- [ ] **B. `baseline.sh` prints unexplained AND unnecessary together**, one
-      numbered sequence. Today it prints only unexplained.
-- [ ] **C. A denominator.** Report coverage as a fraction of the known
-      root-execution mechanisms rather than as a count of checks. The mechanism
-      list already exists (`exec_trigger_dirs`); nothing divides by it.
-- [ ] **D. Generate drills from that list**, not from what I thought of. A
-      hand-written plant set measures whether I imagined the mechanism, which is
-      the exact bias the whole redesign was meant to remove.
-- [ ] **E. Prompt indicator** — `[!3]` in `PS1` for findings below RED.
-      Described in `baseline-design.md:338`, never built.
+- [x] **B. One review index.** `baseline.sh --review` now prints unexplained
+      and legitimate-but-unnecessary candidates in one numbered, read-only
+      screen. It keeps their verbs separate: `--approve` uses provenance
+      remediation; `harden.sh --cut` keeps its independent scored-service
+      rollback.
+- [x] **C. A denominator.** Every baseline report prints the fraction of the
+      declared root-execution mechanisms present and enumerated. It explicitly
+      says this is an inventory denominator, not an impossible percentage of
+      all Linux compromise paths.
+- [x] **D. Generate drills from that list.** `redteam/mechanism-drill.sh`
+      consumes `baseline.sh --mechanisms` and prints a rotating lab drill plan.
+      It plans rather than blindly plants PAM/sudoers/generator fixtures, which
+      would change real authentication or boot behavior.
+- [x] **E. Prompt indicator.** `linux/prompt.sh` is an opt-in Bash profile
+      hook: `[!N]` counts pending actionable AMBER approvals; `[!?]` means the
+      root-published sentry snapshot is stale, failed, or unknown. It does not
+      auto-install through `arm.sh`, because `/etc/profile.d` is real baseline
+      drift that must be reviewed and blessed deliberately.
 
 ## P0b — sentry's finish line (2026-09-17, in progress)
 
@@ -78,8 +86,11 @@ Status key: `[ ]` not started, `[~]` in progress, `[x]` done and verified.
       CARD 14 now covers the initramfs, because a hook there runs as root
       before the real root filesystem is mounted and removing the file is not
       enough on its own: the image already built from it is what boots.
-- [ ] **Remember:** every sentry change needs guardian uninstall -> sentry
-      install -> guardian install, or guardian reverts it within a tick.
+- [x] **Guardian-coordinated sentry upgrade.** Every sentry change uses guardian
+      uninstall -> sentry install -> guardian install, or guardian reverts it
+      within a tick. `sentry.sh --install` now explicitly restarts an already
+      active service after copying its private tree; `enable --now` had only
+      reported success while the old shell process kept running.
 
 - [x] **Standing exceptions.** `sentry.sh --mute CHECK SUBJECT --reason "..."`,
       `--unmute`, `--muted`. Every finding prints its own mute command; the
@@ -126,6 +137,18 @@ suite. This is the argument for running it rather than reading it.
 8. **`action_unit` had no scored re-check** while `action_rogueunit` did, so the
    same unit file had two different safety levels depending on which detector
    named it first.
+9. **SUID evidence became a new SUID finding.** `cp -a` preserved the original
+   special bit inside root-only removal evidence, and the next sweep correctly
+   found it there. The action now records original mode/owner metadata and
+   clears special bits only on the retained copy.
+10. **`nc -z` was called a reverse shell.** The shared payload expression
+    treated every netcat option as execution. It now recognises only netcat
+    execution modes (`-e`, `-c`, `--exec`, `--sh-exec`), with both the harmless
+    liveness probe and a real `-e /bin/sh` regression covered.
+11. **An upgrade did not upgrade the running sentry.** `systemctl enable --now`
+    starts a stopped unit but does not restart an active one. The installer now
+    enables first, then restarts an active unit or starts an inactive unit; the
+    real lab proof compared its MainPID before and after.
 
 ## Windows (started 2026-09-17; proven on real Windows 2026-09-18)
 
@@ -133,8 +156,11 @@ Built to the **Basic Windows Hardening Checklist** from the team's own course
 material (`ccdc-coursework/.../Basic hrdning Chklst.pdf`), which is the closest
 thing to a spec anyone has handed us.
 
-Eight tools, 4,976 lines, 58 triage checks. **Every one has now run on a real
-Windows Server 2022 box**, not only against stubs.
+The original ten tools, 5,580 lines, and 58 triage checks have run on a real
+Windows Server 2022 box, not only against stubs. Guardian and its integrity
+task also completed the disposable-VM failure drills on 2026-09-21. The
+off-box exporter remains source-tested until it has copied a bundle to a real
+team-controlled share and verified the remote hash.
 
 - [x] `lib/Common.ps1` — config (the SAME file the Linux tools read), findings
       in the same `SEV|check|subject|desc` format, evidence, scored-service
@@ -157,7 +183,7 @@ Windows Server 2022 box**, not only against stubs.
 - [x] `recon.ps1` — rewritten 2026-09-18. Was the last file predating
       `lib/Common.ps1`. Now records a GAP as a gap: a collection that failed
       writes a file saying so rather than an empty one.
-- [x] `sentry.ps1` — the approval queue. 21 of the 58 checks are automatable;
+- [x] `sentry.ps1` — the approval queue. 25 of the 58 checks are automatable;
       `-Status` freezes a numbered snapshot, `-Approve` re-verifies identity
       against a fresh scan, a sweep takes SWEEP-tier only.
 - [x] `baseline.ps1` — configuration drift. Scoped to config plus the
@@ -167,9 +193,15 @@ Windows Server 2022 box**, not only against stubs.
       reports WHO read a decoy. Hashing cannot answer that question.
 - [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 52 assertions against planted fixtures.
+- [x] `redteam/windows-self-test.ps1` — 69 assertions against planted fixtures
+      and the read-only Windows tools' static safety contracts.
 - [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
       survived rather than assuming (Defender eats some fixtures in real time).
+- [x] `integrity.ps1` — third SYSTEM task that detects a missing, stopped, or
+      redirected Guardian task. Proven on `ccdc-win` 2026-09-21 by removing
+      Guardian's task: it wrote `INTEGRITY-GAP code=MISSING` and exited 2.
+- [~] `evidence.ps1` — source-tested explicit UNC evidence exporter. Still
+      needs a real share and an end-to-end copied-hash check on the lab VM.
 
 ### NOT YET TRUE OF THE WINDOWS HALF — read before trusting it
 
@@ -177,12 +209,21 @@ Windows Server 2022 box**, not only against stubs.
       the AD commands instead. GPO, delegation, AD ACLs, Kerberos, ADCS: all by
       hand. This is the largest remaining gap by far and it is deliberate — see
       the handoff below for why it was not attempted before the tryout.
-- [ ] **No tamper-proof watchdog.** Linux has `guardian.sh`. On Windows the
-      watchdog is an ordinary scheduled task and an administrator can delete it.
-- [ ] **Autostart coverage is 4 registry keys + the Startup folders.** Autoruns
-      knows ~200 locations. `baseline.ps1` shells out to `autorunsc.exe` when it
-      is present; when it is not, that tail is unwatched.
-- [ ] **`sentry.ps1` acts on 21 of 58 checks.** The rest print a command because
+- [ ] **No tamper-proof watchdog.** `guardian.ps1` adds a second SYSTEM task
+      that repairs the watchdog task, and `integrity.ps1` adds a third task
+      that reports when Guardian itself is missing or redirected. An
+      administrator can still remove or alter all three tasks and their private copies. That limit is intentional and
+      printed by `guardian.ps1 -Status`.
+- [~] **Autostart coverage is bounded.** The fallback now covers scheduled
+      tasks; Run/RunOnce, 32-bit and policy Run keys; all local Startup folders;
+      Winlogon; AppInit DLLs; IFEO debuggers; Active Setup; and permanent WMI
+      consumers. An explicitly configured, validly Microsoft-signed Autorunsc
+      adds read-only wider evidence without downloads, PATH lookup, or silent
+      EULA acceptance. Without that opt-in, browser/shell extensions, print
+      monitors, LSA providers, drivers, and vendor-specific hooks remain a
+      stated gap. Proven read-only on `ccdc-win` 2026-09-18; SSH stayed closed
+      and WinRM stayed up.
+- [ ] **`sentry.ps1` acts on 25 of 58 checks.** The rest print a command because
       their fix needs judgement. Four are deliberately never automatable and the
       suite asserts it: `fwinbound`, `lsappl`, `svcpath`, `svcdiracl`.
 - [ ] **The baseline does not cover files nothing wires to run.** By design.
@@ -253,12 +294,48 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 445 assertions
-bash redteam/self-test.sh                             # 392, skips the Windows suite
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 500 assertions
+bash redteam/self-test.sh                             # 430, skips the Windows suite
 ```
 
 The suite asserts its own assertion count against the README, so adding one
 means updating two numbers in `README.md`.
+
+## Deployment names are a migration, not an edit-in-place
+
+The running Linux unit/process and Windows SYSTEM task/private payload names
+are config-backed neutral operational labels. They do not impersonate OS
+components, and Guardian remains the inventory of record. Changing those keys
+on an armed box requires uninstalling the old layout first, then installing the
+new one: Linux is Guardian → Sentry → edit config → Sentry → Guardian; Windows
+is Guardian `-Uninstall -Apply -TaskName CCDC-Guardian -WatchdogTaskName
+CCDC-Watchdog` → edit config → Guardian `-Install -Apply`.
+The source tree remains deliberately descriptive for operator auditability.
+Windows Guardian now keeps a hash-verified `.repair` payload authority and
+rebuilds altered/deleted active copies from it; it intentionally stops at an
+altered repair authority instead of treating it as trustworthy.
+
+Guardian also installs `Continuity-Audit` by default: a third SYSTEM task that
+checks whether Guardian is still scheduled, running, and aimed at its expected
+private `health-check.ps1`. It logs state changes as `INTEGRITY-GAP` in
+`integrity.log`. Guardian repairs that task while Guardian is still alive; this
+is an extra alarm and recovery path, not an answer to an Administrator who
+removes every task.
+
+**Real-VM proof, 2026-09-21:** deleting the live watchdog payload made
+Guardian restore it; deleting the watchdog task made Guardian recreate it;
+removing Guardian's own task made `Continuity-Audit` report `MISSING`; and
+altering a `.repair` payload made Guardian report an integrity gap without
+copying that altered file back. Guardian was then reinstalled and all three
+tasks were confirmed running. This is evidence for the stated behavior, not a
+claim that an Administrator cannot remove the whole chain.
+
+Linux has the matching *recovery* layer for a different failure: `arm.sh`
+creates a root-owned, checksummed archive of `linux/`, the playbooks, and the
+chosen config. It also copies a small restore helper beside that archive, so a
+deleted checkout does not delete the command needed to restore it. The helper
+extracts into a new directory only; it never replaces the live checkout. This
+does not beat an administrator who can alter both the helper and its archive.
 
 **Green means the logic is right, never that it works.** The only thing that
 proves the second is the box. To prove something on it: push the kit, plant
@@ -279,25 +356,35 @@ AdminSDHolder, and unconstrained delegation. **Do not start this speculatively**
 `playbooks/environment-reality.md` first: the tryout is one Linux box, one
 Windows box, a Splunk indexer and a firewall.
 
-**2. Wire `canary.ps1 -Check` into `watchdog.ps1`.** The watchdog already runs
-as SYSTEM on an interval. `-Check` is read-only, loopable, and exits 2 on a
-trip. This is maybe twenty lines and it turns tripwires from a thing you
-remember to run into a thing that tells you.
+**2. Wire `canary.ps1 -Check` into `watchdog.ps1`.** **Done 2026-09-18.** The
+SYSTEM watchdog now checks automatically after tripwires are laid, records a
+trip durably in `watchdog.log`, and stays alive when `-Check` returns its
+intentional exit 2. `watchdog.ps1 -Status` shows that a canary has tripped and
+where to get the account/process detail. Real-box testing also caught two
+Windows-only edges: 4663 can arrive several seconds after a SACL is attached,
+so deploy gives those self-events a ten-second settling margin; and task
+replacement now stops a running instance before unregistering it, so it cannot
+leave duplicate loops behind.
 
-**3. `sentry.ps1` could offer more of the 58 checks.** `taskcmd`, `newtask`,
-`winlogon`, `svcaccount` all have reversible fixes. Each needs a `What`, a `Do`
-that captures evidence first, and a tier. The suite asserts every action names
-a real triage check.
+**3. `sentry.ps1` could offer more of the 58 checks.** **Done 2026-09-18:**
+`taskcmd` exports then disables a clear payload task (SWEEP); `newtask` exports
+then disables a newly registered task by number (LOOK); `winlogon` restores the
+two stock values (SWEEP); and `svcaccount` captures then disables an unapproved
+service by number (LOOK). The suite asserts every action names a real triage
+check and these four retain their before-state.
 
-**4. A Windows equivalent of `surface.ps1 --table`.** Two Linux tools emit the
-table an inject asks for directly. Windows has no equivalent and injects are
-half the score.
+**4. A Windows equivalent of `surface.ps1 --table`.** **Done 2026-09-18.**
+`windows/surface.ps1 -Table` joins TCP/UDP listeners to their process/service,
+marks packet-listed ports and services, and adds scheduled tasks, Run keys and
+Startup folders in paste-ready Markdown. It is read-only: `REVIEW` means the
+packet does not explain it, not that the tool chose to remove it.
 
-**5. `guardian.ps1`.** Tamper-resistance against someone who already has
-Administrator is genuinely hard on Windows and worth the least of these. I did
-not attempt it. If you do, the honest version is probably a second scheduled
-task that re-registers the first, plus a service ACL on both — and it should
-say plainly in its own help that a determined administrator wins.
+**5. `guardian.ps1`.** **Done 2026-09-18.** A second SYSTEM task keeps private
+copies of guardian/watchdog and re-registers `CCDC-Watchdog` when its task is
+removed or changed. It deliberately does not claim tamper-proofing: an
+Administrator can remove or alter both tasks and their files. This converts an
+ordinary one-task kill into a logged, automatically repaired incident; it does
+not solve the Administrator threat model.
 
 ## Things I would not change without asking Luke
 
@@ -313,12 +400,19 @@ say plainly in its own help that a determined administrator wins.
 
 - [x] **Scored accounts are checked for availability.** The notes say it
       outright: *"We have scored users in addition to scored services. We have
-      to make sure scoring users are available."* Nothing looked. A locked or
-      expired account in `CCDC_ALLOWED_USERS` now emits RED `scoreduser`, and
-      it has the one action in the kit that RESTORES rather than removes.
+      to make sure scoring users are available."* `CCDC_INTERACTIVE_USERS`
+      separates those logins from `CCDC_ALLOWED_USERS`, which also has to name
+      nologin service identities. A locked or expired explicitly interactive
+      account emits RED `scoreduser`, and it has the one action in the kit that
+      RESTORES rather than removes.
 
 ## P1 — promised in writing, not built
 
+- [~] 1. **One enumeration, several views.** `baseline.sh --inventory` now
+      exposes the structured `kind|subject|detail` producer and recon records
+      it as `execution-inventory.txt`; `inventory-compare.sh` measures what
+      recon’s detailed report also names. The specialised reports still use
+      their own walkers; prove parity before moving any decision-making consumer.
 - [x] 3. `--explain N` — built in `harden.sh` and back-ported to `baseline.sh`.
       Reports which of the three tests failed and why, shows the subject as it is
       on the box right now, and expands the action into ordered steps. Every card
@@ -416,15 +510,17 @@ say plainly in its own help that a determined administrator wins.
       already filled in. Section 3 is the part that matters: what was found and
       deliberately NOT removed, with the question each one turns on.
 - [~] 18. Windows coverage. The three cross-platform injects (login banner, SSH
-      access, endpoint protection) now carry their Windows commands, each with
-      the trap that actually catches people: the banner appears at the NEXT
-      logon; OpenSSH on Windows reads
+      access, endpoint protection) carry their Windows commands, each with the
+      trap that actually catches people: the banner appears at the NEXT logon;
+      OpenSSH on Windows reads
       `C:\ProgramData\ssh\administrators_authorized_keys` for anything in the
       Administrators group and ignores the user profile entirely; Defender's
       `RealTimeProtectionEnabled` being false IS the finding, not something to
       quietly fix.
-      **Marked untested** — the lab win11 VM has SSH open but will not take my
-      key, so none of it has been run. Verify on the box before claiming it in a
-      memo. `windows/` is still only recon.ps1 + watchdog.ps1 (63 lines); there
-      is no Windows equivalent of baseline.sh or harden.sh and there will not be
-      one before 2026-09-26.
+      The old “recon + watchdog, 63 lines, never run” description is obsolete:
+      `windows/` now has ten tools, and all 58 triage checks have run on the
+      Server 2022 lab target over WinRM. That target intentionally has no SSH
+      listener—OpenSSH installation would attempt Windows Update on the isolated
+      lab network—so a closed port 22 is provisioning reality, not a failed test.
+      The response-specific inject prose remains Luke’s work; verify each exact
+      command against the packet and its scored host before claiming it in a memo.

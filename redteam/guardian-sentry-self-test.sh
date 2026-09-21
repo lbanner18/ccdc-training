@@ -51,6 +51,7 @@ CCDC_WATCHDOG_INTERVAL="2"
 CCDC_GUARDIAN_PROTECT_SENTRY="1"
 CCDC_SENTRY_NAME="ccdc-sentry"
 CCDC_SENTRY_DIR="/usr/local/lib/ccdc-sentry"
+CCDC_SENTRY_ENTRY="observer"
 CCDC_SYSTEMD_SERVICES="ssh.service"
 EOF
 cp -- "$test_root/test.env" "$test_root/local-lib/ccdc-sentry/sentry.env"
@@ -142,6 +143,21 @@ check() { if "$@"; then return 0; fi; return 1; }
 export CCDC_TEST_ROOT=$test_root
 PATH="$test_root/bin:$PATH"
 export PATH
+
+# Reinstalling sentry is its supported update path. `enable --now` alone would
+# leave an already-active shell interpreting the old script, so the installer
+# must explicitly restart the fake active unit after it refreshes the tree.
+if "$test_root/suite/sentry.sh" --config "$config" --install --apply >/dev/null \
+   && grep -q '^restart ccdc-sentry.service$' "$test_root/systemctl.log"; then
+  ok 'sentry install restarts an already-active supervisor after copying its update'
+else
+  bad 'sentry install left an already-active supervisor on its old script'
+fi
+if grep -Fq 'ExecStart=/usr/local/lib/ccdc-sentry/observer ' "$test_root/systemd/ccdc-sentry.service"; then
+  ok 'sentry install uses its configured neutral runtime entrypoint'
+else
+  bad 'sentry install left sentry.sh as its runtime process name'
+fi
 
 if "$guardian" --config "$config" --install --apply >/dev/null; then
   ok 'guardian enrolled a freshly installed sentry'

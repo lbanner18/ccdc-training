@@ -5,6 +5,11 @@ indexer, and a firewall.** Uptime is scored on the Linux and Windows boxes.
 That is the target to prepare against, and everything in this kit should work
 there first.
 
+This is context, not a promise that all of the systems below will appear. For
+the tryout, start by securing the two scored hosts. Do not spend the first hour
+building domain-controller tooling unless the packet actually says there is a
+domain controller.
+
 The larger picture below comes from graded responses to *regional*
 competitions. It is not what you will see at tryouts. It is recorded because
 it shows where the skills go next, and because a few of its lessons are cheap
@@ -36,10 +41,11 @@ The rest is context for later.
 
 ## What the wider environment would mean for this kit
 
-**Alpine is the portability test that matters.** Alpine has no bash by default,
-no GNU coreutils, and busybox versions of `find`, `awk`, and `ps` that do not
-accept every flag used here. `#!/usr/bin/env bash` fails outright if bash is not
-installed. Before competition, every script needs a run under `busybox sh`.
+**Alpine is a useful portability test.** Alpine usually has no Bash and uses
+smaller BusyBox versions of commands such as `find`, `awk`, and `ps`. A script
+whose first line asks for Bash fails immediately if Bash is absent. Before a
+regional, try the scripts under `busybox sh` and note which ones need a Bash
+install instead of discovering it during scoring.
 
 **Red Hat family means a different firewall and SELinux.** Rocky, CentOS, and
 Fedora default to `firewalld` over nftables, and SELinux is enforcing. A

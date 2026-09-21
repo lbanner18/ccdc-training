@@ -3,15 +3,15 @@
 A defensive, lab-first toolkit for a CCDC-style competition box, built around
 two questions: **is the scored service up**, and **can I prove what changed**.
 
-- **Linux** — 25 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
+- **Linux** — 26 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
   and a supervised approval queue that applies fixes only when you say so.
-- **Windows** — 8 tools, 58 checks: triage, a checklist-driven harden, account
-  and password handling, a scored-service watchdog, the same approval queue,
+- **Windows** — 12 tools, 58 checks: triage, a checklist-driven harden, account
+  and password handling, a scored-service/canary watchdog, the same approval queue,
   configuration drift against a frozen baseline, and tripwires that report who
   read them.
 - **Playbooks** — 13 documents. Cards you can follow at 2am with a red team on
   the box.
-- **Tested** — 445 assertions across 17 suites, including fixtures that plant
+- **Tested** — 500 assertions across 20 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.
 
 Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
@@ -39,6 +39,8 @@ CFG=/tmp/ccdc-linux.env
 # 2. Remove what the scored services do not need. Read the plan first; the
 #    all-safe cut verifies every configured scored check after each removal.
 sudo ./linux/harden.sh --config "$CFG"
+# One numbered read-only decision screen: unexplained AND unnecessary.
+sudo ./linux/baseline.sh --config "$CFG" --review
 sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
 
 # 3. Review what remains unexplained. Triage is the immediate ranked view;
@@ -49,7 +51,8 @@ sudo ./linux/baseline.sh --config "$CFG"
 # 4. Freeze only the box you intend to keep. Do NOT bless an unresolved foothold.
 sudo ./linux/baseline.sh --config "$CFG" --bless --apply
 
-# 5. Arm everything persistent: backup + canaries + sentry + guardian/watchdog.
+# 5. Arm everything persistent: a machine backup, a separate kit recovery copy,
+#    canaries, sentry, and guardian/watchdog.
 #    Both monitoring loops become supervised services; your terminal stays free.
 ./linux/arm.sh --config "$CFG"
 sudo ./linux/arm.sh --config "$CFG" --apply
@@ -59,6 +62,9 @@ sudo ./linux/sentry.sh --config "$CFG" --status
 #    Use the exact --approve N command printed for the item you chose.
 #    With no N, bulk approval acts on RED items only and leaves AMBER items alone.
 sudo ./linux/sentry.sh --config "$CFG" --approve N --apply
+# Optional: show pending AMBER approvals as [!N] in new Bash login shells.
+# This does not run from arm.sh because it deliberately changes /etc/profile.d.
+sudo ./linux/prompt.sh --config "$CFG" --install --apply
 ```
 
 The supervised sentry keeps a current ranked queue, folds in canary and broader
@@ -88,8 +94,12 @@ told the tool what is scored.
 deduplicated `wall` message for each new RED baseline finding when `wall` is
 available. It is on by default (`CCDC_WATCH_NOTIFY="1"`). This reaches logged-in
 terminals; it is not email, desktop, or phone notification, and AMBER findings
-do not interrupt you. Keep using `sentry.sh --status` between injects to see
-the full queue and retained change events.
+do not interrupt you. The separate, opt-in `prompt.sh` hook shows `[!N]` for
+pending actionable AMBER approvals in new interactive Bash login shells.
+`[!?]` means its sentry snapshot is stale or unknown, never “all clear.” It is
+not part of `arm.sh`: installing a profile hook is a real provenance change
+that you should review and bless deliberately. Keep using `sentry.sh --status`
+between injects to see the full queue and retained change events.
 
 Every destructive tool is dry-run by default and needs `--apply`. Detection
 tools write evidence but do not change system configuration.
@@ -116,6 +126,14 @@ the individual sentry install followed immediately by guardian install). Never
 hand-edit the root-owned installed copies: the guardian intentionally rejects
 an unpinned config, and a manual edit can leave monitoring on different
 assumptions.
+
+Deployment names are config too. `CCDC_SENTRY_NAME` names the service and
+`CCDC_SENTRY_ENTRY` names its long-lived executable; Guardian has independent
+layer and payload-name keys. Use neutral operational labels, never a fake OS
+component. Renaming an armed chain is a layout migration: uninstall Guardian,
+uninstall Sentry with the old config, edit the names, then install Sentry and
+Guardian again in that order. This avoids an old root loop and a new root loop
+running at once.
 
 `arm.sh` deliberately leaves these to you, because each one can take a scored
 service off the board if you get it wrong:
@@ -184,8 +202,12 @@ pass/fail count, for measuring the tools rather than practising with them.
 config/example.env       safe template; real config stays outside the repo
 linux/                    Bash tools for Linux boxes:
   arm.sh                  one command to arm the standing defence
+  recovery.sh             checksummed recovery copy of the kit; restores only
+                          into a new directory if the checkout is lost. Its
+                          root-owned helper lives beside the recovery bundle
   recon.sh hunt.sh        read-only baseline and persistence sweeps
   sentry.sh               supervised: detect, diagnose, current sign-off queue
+  prompt.sh               opt-in [!N] Bash prompt signal for pending AMBER work
   triage.sh               one-shot ranked view of what is wrong NOW
   card.sh                 read one remediation card in the terminal
   watch.sh                detection sweep; folded into sentry, also runnable alone
@@ -194,6 +216,7 @@ linux/                    Bash tools for Linux boxes:
   baseline.sh             what is on this box that nothing explains, and what
                           to do about each one. Bless a known-good state, then
                           every later change is measured against it forever
+  inventory-compare.sh    cross-check canonical inventory against recon evidence
   watchdog.sh             restarts a dead scored service (run via guardian)
   guardian.sh             keeps the watchdog alive against an attacker w/ root
   harden.sh               what is running that nothing scored NEEDS. Cuts it,
@@ -227,15 +250,26 @@ windows/                  PowerShell tools for Windows boxes. Target is Windows
                           without being told twice - on many setups that is how
                           the scoring engine logs in
   watchdog.ps1            restarts a stopped scored service, re-enables a
-                          disabled scored ACCOUNT, installs as a SYSTEM task
+                          disabled scored ACCOUNT, checks laid canaries, and
+                          installs as a SYSTEM task
+  guardian.ps1            second SYSTEM task that repairs the watchdog task;
+                          redundancy only - Administrator can remove every layer
+  integrity.ps1           separate SYSTEM check that reports a missing, stopped,
+                          or redirected Guardian task; Guardian repairs it
+  evidence.ps1            bundles key defense records and verifies a copy to a
+                          user-supplied UNC share; never chooses a destination
+  surface.ps1             read-only listener/service/selected-autostart map;
+                          --Table is markdown ready and states its remaining
+                          coverage gaps; can include explicitly configured
+                          Autorunsc evidence
   recon.ps1               read-only evidence capture, before you change anything
 lab/                      building the practice targets:
   make-vm.sh              create the Windows target on the isolated lab network
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (445 assertions, non-root;
-                          392 without the Windows suite, which needs pwsh -
+  self-test.sh            runs every suite below (500 assertions, non-root;
+                          430 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag

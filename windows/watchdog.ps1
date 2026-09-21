@@ -10,7 +10,8 @@
     This checks every scored service on an interval, starts anything that has
     stopped, and writes a line every time it had to - so afterwards you can say
     "it was restarted four times between 11:20 and 11:50", which is an incident
-    report rather than a feeling.
+    report rather than a feeling. Once canary.ps1 has laid tripwires, it also
+    runs its read-only -Check on every pass and records a trip in this log.
 
     It does NOT hide the problem. A service that keeps stopping is a finding;
     the log is there so you notice the pattern.
@@ -41,7 +42,7 @@ param(
     [switch]$Install,
     [switch]$Uninstall,
     [switch]$Status,
-    [string]$TaskName = 'CCDC-Watchdog'
+    [string]$TaskName = ''
 )
 
 Set-StrictMode -Version 2.0
@@ -50,6 +51,12 @@ $ErrorActionPreference = 'Continue'
 
 $cfg = Import-CcdcConfig -Path $Config
 Initialize-CcdcRoot
+$TaskName = if ([string]::IsNullOrWhiteSpace($TaskName)) {
+    Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_WATCHDOG_TASK' -Default 'Operations-Monitor'
+} else {
+    Get-CcdcTaskName -Config @{ Override = $TaskName } -Name 'Override' -Default $TaskName
+}
+$canaryLeaf = Get-CcdcPrivateLeaf -Config $cfg -Name 'CCDC_WINDOWS_CANARY_FILE' -Default 'integrity-check.ps1' -PowerShellFile
 $logName = 'watchdog.log'
 
 function W { param([string]$m) Write-CcdcLog -Message $m -LogName $logName }
@@ -71,9 +78,16 @@ if ($Install) {
                     -StartWhenAvailable -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
                     -ExecutionTimeLimit ([TimeSpan]::Zero)
     try {
-        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
+        # Unregistering does not reliably stop an instance that is already
+        # running. Stop it first or every re-install can leave another loop.
+        $old = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($old -and $old.State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Start-Sleep -Milliseconds 250
+        }
+        if ($old) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop }
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
-            -Principal $principal -Settings $settings -Description 'CCDC scored-service keep-alive' | Out-Null
+            -Principal $principal -Settings $settings -Description 'CCDC scored-service and canary keep-alive' | Out-Null
         Start-ScheduledTask -TaskName $TaskName
         Write-CcdcInfo "installed and started scheduled task '$TaskName' (runs as SYSTEM, restarts at boot)"
         Write-Host ''
@@ -91,6 +105,11 @@ if ($Install) {
 if ($Uninstall) {
     Assert-CcdcAdmin
     try {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+        if ($task.State -eq 'Running') {
+            Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+            Start-Sleep -Milliseconds 250
+        }
         Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Stop
         Write-CcdcInfo "removed scheduled task '$TaskName'. The log is kept: $(Get-CcdcPath $logName)"
     } catch { Write-CcdcWarn "could not remove '$TaskName': $($_.Exception.Message)" }
@@ -122,6 +141,20 @@ if ($Status) {
             Write-Host ('      .\windows\triage.ps1 -Config {0}' -f $Config)
             Write-Host  '      Get-WinEvent -LogName System -MaxEvents 60 | Where-Object Id -in 7034,7031,7036,7045'
         }
+
+        $canaryTrips = @(Get-Content -LiteralPath $log | Where-Object { $_ -match 'CANARY-TRIPPED' })
+        if (@($canaryTrips).Count -gt 0) {
+            Write-Host ''
+            Write-Host ('  {0} canary trip report(s) so far. A trip is not a maybe:' -f @($canaryTrips).Count) -ForegroundColor Red
+            Write-Host ('      .\windows\canary.ps1 -Config {0} -Check' -f $Config)
+            Write-Host ('      Get-Content -LiteralPath {0} -Tail 30' -f (Get-CcdcPath 'canary.log'))
+        }
+    }
+    $canaryManifest = Get-CcdcPath 'state\canaries.txt'
+    if (-not (Test-Path -LiteralPath $canaryManifest)) {
+        Write-Host ''
+        Write-Host '  Canaries are not laid, so there is nothing for this task to check.' -ForegroundColor Yellow
+        Write-Host ('      .\windows\canary.ps1 -Config {0} -Deploy -Apply' -f $Config)
     }
     exit 0
 }
@@ -131,6 +164,41 @@ if ($Status) {
 Assert-CcdcPacketEntered -Config $cfg
 $services = Get-CcdcList -Config $cfg -Name 'CCDC_WINDOWS_SERVICES'
 $users    = Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_USERS'
+
+function Invoke-CanaryCheck {
+    # canary.ps1 deliberately exits 2 on a trip. Run it in a child PowerShell:
+    # invoking that script directly would make its exit end this watchdog too.
+    # No manifest means -Deploy has not happened yet, which is normal while the
+    # operator is still stabilising the box. The next pass picks it up on its own.
+    $manifest = Get-CcdcPath 'state\canaries.txt'
+    if (-not (Test-Path -LiteralPath $manifest)) { return }
+
+    $canary = Join-Path $PSScriptRoot $canaryLeaf
+    # In the checkout the source keeps its useful descriptive filename. The
+    # guardian's private copy uses the configured runtime filename instead.
+    if (-not (Test-Path -LiteralPath $canary -PathType Leaf) -and $canaryLeaf -ne 'canary.ps1') {
+        $canary = Join-Path $PSScriptRoot 'canary.ps1'
+    }
+    if (-not (Test-Path -LiteralPath $canary -PathType Leaf)) {
+        W "CANARY-CHECK-FAILED missing=$canary"
+        return
+    }
+
+    try {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $canary -Config $Config -Check 2>&1 | Out-Null
+        $canaryExit = $LASTEXITCODE
+    } catch {
+        W "CANARY-CHECK-FAILED err=$($_.Exception.Message)"
+        return
+    }
+
+    if ($canaryExit -eq 0) { return }
+    if ($canaryExit -eq 2) {
+        W "CANARY-TRIPPED see $(Get-CcdcPath 'canary.log') and run canary.ps1 -Check"
+        return
+    }
+    W "CANARY-CHECK-FAILED exit=$canaryExit (see $(Get-CcdcPath 'canary.log'))"
+}
 
 function Invoke-Pass {
     foreach ($name in $services) {
@@ -186,6 +254,8 @@ function Invoke-Pass {
             W "HTTP-CHECK-FAILED $u err=$($_.Exception.Message)"
         }
     }
+
+    Invoke-CanaryCheck
 }
 
 if ($Once) {
