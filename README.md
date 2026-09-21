@@ -11,7 +11,7 @@ two questions: **is the scored service up**, and **can I prove what changed**.
   read them.
 - **Playbooks** — 13 documents. Cards you can follow at 2am with a red team on
   the box.
-- **Tested** — 500 assertions across 20 suites, including fixtures that plant
+- **Tested** — 503 assertions across 20 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.
 
 Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
@@ -268,7 +268,7 @@ lab/                      building the practice targets:
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (500 assertions, non-root;
+  self-test.sh            runs every suite below (503 assertions, non-root;
                           430 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
