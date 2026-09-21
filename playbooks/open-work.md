@@ -197,7 +197,7 @@ team-controlled share and verified the remote hash.
       reports WHO read a decoy. Hashing cannot answer that question.
 - [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 73 assertions against planted fixtures
+- [x] `redteam/windows-self-test.ps1` — 77 assertions against planted fixtures
       and the read-only Windows tools' static safety contracts.
 - [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
       survived rather than assuming (Defender eats some fixtures in real time).
@@ -302,7 +302,7 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 503 assertions
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 507 assertions
 bash redteam/self-test.sh                             # 430, skips the Windows suite
 ```
 

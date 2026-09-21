@@ -527,6 +527,27 @@ if (-not (Test-Path -LiteralPath $evidencePath)) {
 }
 
 # =============================================================================
+# timeline.ps1 - evidence has to be bounded, read-only, and honest about gaps
+# =============================================================================
+$timelinePath = Join-Path $root 'windows\timeline.ps1'
+if (-not (Test-Path -LiteralPath $timelinePath)) {
+    nope 'windows\timeline.ps1 is missing'
+} else {
+    $timelineTxt = Get-Content -LiteralPath $timelinePath -Raw
+    if ($timelineTxt -notmatch '\[switch\]\$Apply') { ok 'timeline.ps1 is read-only by construction' }
+    else { nope 'timeline.ps1 grew an -Apply switch; evidence collection must not mutate the box' }
+    if ($timelineTxt -match '\[int\]\$Hours' -and $timelineTxt -match 'between 1 and 168' -and $timelineTxt -match 'MaxEventsPerSource') {
+        ok 'timeline.ps1 bounds both its time window and per-source event volume'
+    } else { nope 'timeline.ps1 can collect an unbounded event-log dump' }
+    if ($timelineTxt -match 'Microsoft-Windows-PowerShell/Operational' -and $timelineTxt -match 'Microsoft-Windows-TaskScheduler/Operational' -and $timelineTxt -match 'Windows Defender/Operational') {
+        ok 'timeline.ps1 joins the high-value PowerShell, task, and Defender evidence sources'
+    } else { nope 'timeline.ps1 is missing a high-value incident evidence source' }
+    if ($timelineTxt -match 'collection-gaps\.csv' -and $timelineTxt -match 'No events were found' -and $timelineTxt -match 'SHA256SUMS\.csv') {
+        ok 'timeline.ps1 distinguishes an empty log from a collection gap and hashes its evidence'
+    } else { nope 'timeline.ps1 can confuse empty logs, failed collection, or unhashed evidence' }
+}
+
+# =============================================================================
 # surface.ps1 - the inject-ready execution table
 # =============================================================================
 $surfacePath = Join-Path $root 'windows\surface.ps1'
