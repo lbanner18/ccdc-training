@@ -203,8 +203,8 @@ team-controlled share and verified the remote hash.
       survived rather than assuming (Defender eats some fixtures in real time).
 - [x] `redteam/windows-recovery-self-test.ps1` — LAB ONLY, two interlocks,
       repeats the Guardian recovery proof without handwritten task/file changes
-      and finishes by reinstalling the healthy chain. PowerShell 5.1 parse
-      proven on `ccdc-win` 2026-09-21; run it only from a disposable snapshot.
+      and finishes by reinstalling the healthy chain. Proven on `ccdc-win`
+      2026-09-21: 7 passed, 0 failed. Run it only from a disposable snapshot.
 - [x] `integrity.ps1` — third SYSTEM task that detects a missing, stopped, or
       redirected Guardian task. Proven on `ccdc-win` 2026-09-21 by removing
       Guardian's task: it wrote `INTEGRITY-GAP code=MISSING` and exited 2.
