@@ -701,3 +701,4 @@ Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host ("windows self-test: {0} passed, {1} failed" -f $pass, $fail)
 if ($fail -gt 0) { exit 1 }
+exit 0
