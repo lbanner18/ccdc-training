@@ -102,11 +102,18 @@ else { Fail 'deleted watchdog payload was not proven restored' }
 
 $before = LogText $guardianLog
 $task = Get-ScheduledTask -TaskName $watchdogTask -ErrorAction SilentlyContinue
-if ($task -and $task.State -eq 'Running') { Stop-ScheduledTask -TaskName $watchdogTask -ErrorAction SilentlyContinue }
-Unregister-ScheduledTask -TaskName $watchdogTask -Confirm:$false -ErrorAction SilentlyContinue
-if ((Wait-For { WatchdogTaskCorrect } 'the deleted watchdog task to return') -and
-    (NewLogHas -Before $before -Path $guardianLog -Pattern ('REPAIR watchdog-task=' + [regex]::Escape($watchdogTask)))) { Pass 'deleted watchdog task was recreated with its private action' }
-else { Fail 'deleted watchdog task was not proven recreated' }
+if ($null -eq $task) {
+    Fail 'watchdog task was missing before the task-recovery test'
+} else {
+    try {
+        if ($task.State -eq 'Running') { Stop-ScheduledTask -TaskName $watchdogTask -ErrorAction Stop }
+        Unregister-ScheduledTask -TaskName $watchdogTask -Confirm:$false -ErrorAction Stop
+        if (Get-ScheduledTask -TaskName $watchdogTask -ErrorAction SilentlyContinue) { throw 'task still exists after unregister' }
+        if ((Wait-For { WatchdogTaskCorrect } 'the deleted watchdog task to return') -and
+            (NewLogHas -Before $before -Path $guardianLog -Pattern ('REPAIR watchdog-task=' + [regex]::Escape($watchdogTask)))) { Pass 'deleted watchdog task was recreated with its private action' }
+        else { Fail 'deleted watchdog task was not proven recreated' }
+    } catch { Fail ('could not delete watchdog task for recovery test: ' + $_.Exception.Message) }
+}
 
 $before = LogText $integrityLog
 $task = Get-ScheduledTask -TaskName $guardianTask -ErrorAction SilentlyContinue
