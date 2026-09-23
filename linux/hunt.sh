@@ -22,6 +22,55 @@ evidence=${output_dir:-$(ccdc_timestamp_dir)}
 [ -n "$evidence" ] || ccdc_die "no usable evidence directory; see the error above (usually: re-run with sudo)"
 mkdir -p "$evidence" || ccdc_die "cannot create $evidence"
 
+# Canary deliberately watches reads of files that look tempting to an attacker.
+# Hunt deliberately reads broadly.  If Hunt reads its own decoys, Canary has
+# done exactly what it should and reports us as an intruder.  Keep the two jobs
+# separate: the full scans below still inspect every other file, but skip only
+# the exact decoy paths configured for this box.
+default_canary_files='/root/.ssh/id_rsa.bak
+/root/passwords.txt
+/root/backup/db_root_credentials.txt
+/home/backup.sh.orig
+/var/www/html/wp-config.php.bak
+/etc/.pgpass.save'
+canary_find_excludes=()
+while IFS= read -r canary_path; do
+  case "$canary_path" in
+    /*) canary_find_excludes+=( ! -path "$canary_path" ) ;;
+  esac
+done <<EOF
+${CCDC_CANARY_FILES:-$default_canary_files}
+EOF
+
+scan_immutable_attributes() {
+  local d
+  if ! command -v lsattr >/dev/null 2>&1; then
+    printf '%s\n' 'lsattr not available'
+    return 0
+  fi
+  for d in /etc /root /home /usr/local/bin /usr/local/sbin; do
+    [ -d "$d" ] || continue
+    # -d asks lsattr about each path handed to it; it does not recursively
+    # reopen the excluded decoy after find has skipped it.
+    find "$d" -xdev "${canary_find_excludes[@]}" -exec lsattr -d {} + 2>/dev/null \
+      | grep -E '^....i|^.....a' || true
+  done
+}
+
+scan_file_capabilities() {
+  local scan_root
+  if ! command -v getcap >/dev/null 2>&1; then
+    printf '%s\n' 'getcap not available'
+    return 0
+  fi
+  for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do
+    [ -d "$scan_root" ] || continue
+    # getcap -r opens every file below its root.  Feed it only the ordinary
+    # files find selected, so the configured canaries stay untouched.
+    find "$scan_root" -xdev -type f "${canary_find_excludes[@]}" -exec getcap {} + 2>/dev/null || true
+  done
+}
+
 persistence_probe=$(cat <<'PROBE'
 printf '%s\n' '--- cron files and contents ---'
 find /etc/cron* /var/spool/cron /var/spool/cron/crontabs -maxdepth 3 -type f -ls 2>/dev/null || true
@@ -129,16 +178,13 @@ grep -HnE 'LD_PRELOAD|LD_LIBRARY_PATH' /etc/environment /etc/profile /etc/profil
 printf '%s\n' '--- loaded kernel modules ---'
 if command -v lsmod >/dev/null 2>&1; then lsmod; else sed -n '1,200p' /proc/modules 2>/dev/null; fi
 printf '%s\n' '--- immutable/append-only files ---'
-if command -v lsattr >/dev/null 2>&1; then
-  for d in /etc /root /home /usr/local/bin /usr/local/sbin; do
-    [ -d "$d" ] && lsattr -R "$d" 2>/dev/null | grep -E '^....i|^.....a' || true
-  done
-else
-  echo 'lsattr not available'
-fi
 PROBE
 )
 ccdc_record_shell "$evidence/extra-persistence.txt" "$extra_probe"
+{
+  printf '%s\n' '--- immutable/append-only files ---'
+  scan_immutable_attributes
+} >>"$evidence/extra-persistence.txt"
 
 web_probe=$(cat <<'PROBE'
 {
@@ -165,7 +211,11 @@ ccdc_record_shell "$evidence/binary-integrity.txt" 'if command -v dpkg >/dev/nul
 # report while triage.sh - which has always used `find / -xdev` - flagged it
 # on the same box. /usr/lib hides a SUID binary well precisely because
 # ssh-keysign genuinely is SUID and genuinely does live there.
-ccdc_record_shell "$evidence/suid-capabilities.txt" 'find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null; if command -v getcap >/dev/null 2>&1; then for scan_root in /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec /usr/local /opt /home /root /var/lib /var/www /srv /tmp /var/tmp /dev/shm; do [ -d "$scan_root" ] && getcap -r "$scan_root" 2>/dev/null; done; fi'
+ccdc_record_shell "$evidence/suid-capabilities.txt" 'find / -xdev -type f \( -perm -4000 -o -perm -2000 \) -ls 2>/dev/null'
+{
+  printf '%s\n' '--- file capabilities (configured canaries excluded) ---'
+  scan_file_capabilities
+} >>"$evidence/suid-capabilities.txt"
 # The manifest must not hash itself: the redirect creates it empty before find
 # runs, so sha256sum records the hash of a partial file and "sha256sum -c"
 # then always reports FAILED.

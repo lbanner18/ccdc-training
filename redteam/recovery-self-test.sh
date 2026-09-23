@@ -48,5 +48,13 @@ else
   no 'restore contract says it will not overwrite a kit'
 fi
 
+if "$ROOT/linux/recovery.sh" --help 2>&1 | grep -Fq -- '--restore-baseline DIR' \
+   && grep -Fq 'kit/baseline-state' "$ROOT/linux/recovery.sh" \
+   && grep -Fq 'ccdc_validate_state_dir "$destination"' "$ROOT/linux/recovery.sh"; then
+  ok 'recovery bundles can carry and restore a blessed baseline only into safe state storage'
+else
+  no 'baseline recovery is missing or can write to an arbitrary directory'
+fi
+
 printf '%s passed, %s failed\n' "$passed" "$failed"
 [ "$failed" -eq 0 ]

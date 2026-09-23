@@ -33,9 +33,10 @@
       has been ALTERED. See lib\Provenance.ps1.
 
 .EXAMPLE
-    .\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Bless -Apply
-    Freeze the box as it is now. Do this once you have hardened it and believe
-    it - NOT on arrival, when whatever they left behind is still running.
+.\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Bless -StableForSeconds 20 -Apply
+    Freeze the box only after its monitored state stays unchanged for 20
+    seconds. Do this once you have hardened it and believe it - NOT on
+    arrival, when whatever they left behind is still running.
 
 .EXAMPLE
     .\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
@@ -50,6 +51,7 @@
 param(
     [Parameter(Mandatory)][string]$Config,
     [switch]$Bless,
+    [ValidateRange(0,300)][int]$StableForSeconds = 0,
     [switch]$Status,
     [int]$Explain,
     [string]$Allow,
@@ -334,6 +336,36 @@ function Get-BoxSnapshot {
     }
 }
 
+function Compare-BoxSnapshots {
+    <#
+        Return one short line per meaningful difference. The `meta` section is
+        deliberately excluded: its timestamp must change between the two
+        samples, and says nothing about whether the box changed.
+    #>
+    param(
+        [Parameter(Mandatory)]$First,
+        [Parameter(Mandatory)]$Second
+    )
+    $differences = New-Object System.Collections.ArrayList
+    foreach ($section in @('services','tasks','autostart','accounts','listeners','firewall','shares','wmi','defender','files')) {
+        $firstRows = $First[$section]
+        $secondRows = $Second[$section]
+        $keys = @((@($firstRows.Keys) + @($secondRows.Keys)) | Sort-Object -Unique)
+        foreach ($key in $keys) {
+            $inFirst = $firstRows.ContainsKey($key)
+            $inSecond = $secondRows.ContainsKey($key)
+            if (-not $inFirst) {
+                [void]$differences.Add("ADDED $section $key")
+            } elseif (-not $inSecond) {
+                [void]$differences.Add("REMOVED $section $key")
+            } elseif ([string]$firstRows[$key] -ne [string]$secondRows[$key]) {
+                [void]$differences.Add("CHANGED $section $key")
+            }
+        }
+    }
+    return @($differences)
+}
+
 # =============================================================================
 # THE ALLOWLIST
 # =============================================================================
@@ -361,6 +393,9 @@ function Test-Allowed {
 # =============================================================================
 # BLESS
 # =============================================================================
+if ($StableForSeconds -gt 0 -and -not $Bless) {
+    Write-CcdcDie '-StableForSeconds is only valid with -Bless'
+}
 if ($Bless) {
     Assert-CcdcAdmin
     Assert-CcdcPacketEntered -Config $cfg
@@ -375,6 +410,32 @@ if ($Bless) {
         Write-Host ''
     }
     $snap = Get-BoxSnapshot -Config $cfg
+
+    if ($StableForSeconds -gt 0) {
+        Write-Host ''
+        Write-Host ('  first inventory captured; waiting {0}s for a quiet blessing window...' -f $StableForSeconds)
+        Start-Sleep -Seconds $StableForSeconds
+        $secondSnap = Get-BoxSnapshot -Config $cfg
+        $changes = @(Compare-BoxSnapshots -First $snap -Second $secondSnap)
+        if (@($changes).Count -gt 0) {
+            $recorded = '  Dry run: no file was written.'
+            if ($Apply) {
+                $stamp = (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ')
+                $raceFile = Join-Path (Get-StateDir) ("baseline-bless-changed-$stamp.txt")
+                Set-Content -LiteralPath $raceFile -Value $changes -Encoding UTF8
+                $recorded = "  Recorded the changed rows in:`r`n      $raceFile"
+            }
+            Write-CcdcDie @"
+the box changed during the $StableForSeconds-second blessing window. Nothing was frozen.
+
+  This is exactly the gap the quiet window is meant to catch: inspect the
+  changes, remove or explain them, then try again.
+$recorded
+"@
+        }
+        $snap = $secondSnap
+        Write-Host ('  inventory stayed unchanged for {0}s; blessing that reviewed state.' -f $StableForSeconds) -ForegroundColor Green
+    }
 
     $counts = @()
     foreach ($k in @('services','tasks','autostart','accounts','listeners','firewall','shares','wmi','defender','files')) {
@@ -420,7 +481,7 @@ if ($Status -or $PSBoundParameters.ContainsKey('Explain')) {
 no baseline to compare against.
 
   Harden the box first, satisfy yourself it is clean, THEN freeze it:
-      .\windows\baseline.ps1 -Config $Config -Bless -Apply
+      .\windows\baseline.ps1 -Config $Config -Bless -StableForSeconds 20 -Apply
 
   Blessing on arrival freezes whatever they left behind as normal.
 "@
@@ -602,7 +663,7 @@ if ($Allow) {
 Write-Host ''
 Write-Host '  baseline.ps1 needs one of: -Bless, -Status, -Explain N, -Allow'
 Write-Host ''
-Write-Host ('    .\windows\baseline.ps1 -Config {0} -Bless -Apply     freeze this box' -f $Config)
+Write-Host ('    .\windows\baseline.ps1 -Config {0} -Bless -StableForSeconds 20 -Apply     freeze this box' -f $Config)
 Write-Host ('    .\windows\baseline.ps1 -Config {0} -Status           what changed since' -f $Config)
 Write-Host ''
 exit 1

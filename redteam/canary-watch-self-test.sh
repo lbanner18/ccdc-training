@@ -16,7 +16,12 @@ expect_rc() {
 }
 expect_text() {
   local needle=$1 file=$2 label=$3
-  grep -F -q -- "$needle" "$file" 2>/dev/null && ok "$label" || not_ok "$label"
+  if grep -F -q -- "$needle" "$file" 2>/dev/null; then
+    ok "$label"
+  else
+    not_ok "$label"
+    sed 's/^/    /' "$file" 2>/dev/null | head -20
+  fi
 }
 expect_no_text() {
   local needle=$1 file=$2 label=$3
@@ -97,7 +102,22 @@ esac
 FAKE_AUDITCTL
 cat >"$bin/ausearch" <<'FAKE_AUSEARCH'
 #!/usr/bin/env bash
-exit 0
+case "${AUDIT_EVENTS:-none}:${2:-}" in
+  config:ccdc-canary)
+    cat <<EOF
+----
+type=SYSCALL msg=audit(09/21/26 12:00:00.000:1) : comm=auditctl exe=/usr/sbin/auditctl auid=root key=(null)
+type=CONFIG_CHANGE msg=audit(09/21/26 12:00:00.000:1) : op=add_rule key=ccdc-canary
+EOF
+    ;;
+  actual:ccdc-canary)
+    cat <<EOF
+----
+type=PATH msg=audit(09/21/26 12:00:01.000:2) : name=$CCDC_TEST_DECOY inode=1
+type=SYSCALL msg=audit(09/21/26 12:00:01.000:2) : comm=cat exe=/usr/bin/cat auid=blue key=ccdc-canary
+EOF
+    ;;
+esac
 FAKE_AUSEARCH
 chmod 0755 "$bin/auditctl" "$bin/ausearch"
 printf 'decoy=rwa sensitive=wa\n' >"$state/canary.audit-active"
@@ -107,6 +127,26 @@ PATH="$bin:$PATH" "$suite/canary.sh" --config "$config" --check >"$test_root/goo
 rc=$?
 set -e
 expect_rc 0 "$rc" 'complete runtime audit rules pass health verification'
+
+# ausearch returns a whole event when a key appears anywhere in it.  A rule-load
+# event has ccdc-canary on CONFIG_CHANGE but key=(null) on its SYSCALL; it is
+# not an access and must not alert.  A real keyed SYSCALL still must alert with
+# a one-line explanation a human can use under pressure.
+printf '\nAUDIT_EVENTS="config"\n' >>"$config"
+set +e
+PATH="$bin:$PATH" "$suite/canary.sh" --config "$config" --check >"$test_root/config-event.out" 2>&1
+rc=$?
+set -e
+expect_rc 0 "$rc" 'audit rule-load records do not count as a decoy access'
+expect_no_text 'AUDIT:' "$test_root/config-event.out" 'rule-load record does not create an operator alert'
+
+sed 's/AUDIT_EVENTS="config"/AUDIT_EVENTS="actual"/' "$config" >"$test_root/actual-event.env"
+set +e
+PATH="$bin:$PATH" "$suite/canary.sh" --config "$test_root/actual-event.env" --check >"$test_root/actual-event.out" 2>&1
+rc=$?
+set -e
+expect_rc 3 "$rc" 'a keyed decoy access still alerts'
+expect_text 'cat (/usr/bin/cat), session=blue, accessed' "$test_root/actual-event.out" 'alert gives program, session, and path without raw audit noise'
 
 sed 's/AUDIT_MODE="good"/AUDIT_MODE="stale"/' "$config" >"$test_root/stale.env"
 set +e

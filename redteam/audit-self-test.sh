@@ -113,6 +113,7 @@ export FAKE_AUDITD_STATE="$test_root/auditd.state"
 cfg="$test_root/test.env"
 rules="$test_root/rules.d/60-ccdc.rules"
 audit="$test_root/suite/audit.sh"
+state="$test_root/state"
 
 pass=0; fail=0
 ok() { printf 'ok %s - %s\n' "$((pass + fail + 1))" "$1"; pass=$((pass + 1)); }
@@ -122,6 +123,16 @@ no() { printf 'not ok %s - %s\n' "$((pass + fail + 1))" "$1"; fail=$((fail + 1))
 "$audit" --config "$cfg" --apply >"$test_root/install.out" 2>&1
 if [ -f "$rules" ]; then ok "install wrote the persistent rules file"; else
   no "install did not write $rules"; sed 's/^/    /' "$test_root/install.out"; fi
+
+# Guardian renders this file from a private copy with a different script and
+# config path.  Those paths must never become part of the managed policy file:
+# otherwise identical rules hash differently and the first live check calls it
+# tampering.
+if grep -F -q -- "$cfg" "$rules"; then
+  no "generated rules embed the caller config path and would false-alert"
+else
+  ok "generated rules are independent of the caller config path"
+fi
 
 if grep -q -- "-w $test_root/logs/decoy.txt -p rwa -k ccdc-canary" "$rules"; then
   ok "decoy from the canary manifest got a read watch"
@@ -146,6 +157,24 @@ else ok "install did not set -e 2"; fi
 if grep -q -- "-w $test_root/logs/decoy.txt" "$test_root/loaded.rules"; then
   ok "install loaded the rules into the (fake) kernel"
 else no "install did not load the rules"; fi
+
+# Capturing evidence is intentionally not a configuration change.  The
+# operator should not have to remember --apply merely to create the before
+# picture that proves later log tampering; --dry-run is the explicit preview.
+rm -f -- "$state/audit.last-capture"
+"$audit" --config "$cfg" --capture >"$test_root/capture.out" 2>&1
+if [ -f "$state/audit.last-capture" ] && grep -q 'captured' "$test_root/capture.out"; then
+  ok "capture writes evidence without requiring --apply"
+else
+  no "capture unexpectedly dry-ran without --apply"
+  sed 's/^/    /' "$test_root/capture.out"
+fi
+"$audit" --config "$cfg" --capture --dry-run >"$test_root/capture-dry.out" 2>&1
+if grep -q 'dry-run.*would capture' "$test_root/capture-dry.out"; then
+  ok "capture keeps an explicit dry-run preview"
+else
+  no "capture --dry-run did not preview safely"
+fi
 
 # 2. THE ATTACK: a restart drops every runtime rule. The file on disk is
 #    untouched, which is what makes it invisible to a file-integrity check.

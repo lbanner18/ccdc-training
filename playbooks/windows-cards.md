@@ -581,8 +581,11 @@ reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" /
 Not a triage finding — the thing you wish you had done an hour ago.
 
 ```powershell
-.\windows\backup.ps1 -Config CONFIG -Apply      # config, firewall, users, service definitions
+.\windows\harden.ps1 -Config CONFIG -Only Backup -Apply  # config, firewall, users, service definitions
 ```
+
+There is no separate `backup.ps1`: the `Backup` step inside `harden.ps1` is
+the kit command that makes these local restore copies.
 
 The training warned that backups get attacked too. So:
 

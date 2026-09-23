@@ -153,6 +153,8 @@ CCDC_RECOVERY_DIR=""
 
 `backup.sh` saves the machine files you name above. `recovery.sh` saves a
 checksummed copy of this toolkit, its playbooks, and the config file you used.
+When the bundle is made after `baseline.sh --bless`, it also carries the
+blessed inventory and its exceptions.
 `arm.sh --apply` creates that copy automatically. This helps if somebody
 deletes or replaces the checkout itself. It never restores over the live
 checkout: recovery always creates a new directory first.
@@ -167,6 +169,18 @@ sudo /var/backups/ccdc/ccdc-kit-recover.sh --restore /root/ccdc-recovered --appl
 If you set `CCDC_RECOVERY_DIR`, replace `/var/backups/ccdc` with that path.
 The command verifies the newest archive before extracting it to
 `/root/ccdc-recovered/kit`; it refuses if that destination already exists.
+
+If the evidence directory or baseline inventory was deleted, restore just the
+baseline authority from that same verified bundle:
+
+```bash
+sudo /var/backups/ccdc/ccdc-kit-recover.sh --restore-baseline /var/tmp/ccdc-evidence --apply
+```
+
+This preserves any current inventory as `inventory.before-recovery.TIMESTAMP`.
+It is recovery from accidental or opportunistic deletion, not protection from
+an attacker with root who can alter every local copy. Copy the bundle and
+baseline inventory off the target after blessing.
 
 ---
 

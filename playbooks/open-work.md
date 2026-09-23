@@ -159,8 +159,8 @@ thing to a spec anyone has handed us.
 The original ten tools, 5,580 lines, and 58 triage checks have run on a real
 Windows Server 2022 box, not only against stubs. Guardian and its integrity
 task also completed the disposable-VM failure drills on 2026-09-21. The
-off-box exporter remains source-tested until it has copied a bundle to a real
-team-controlled share and verified the remote hash.
+off-box exporter has copied and hash-verified a bundle over SMB, to a loopback
+share only (2026-09-22).
 
 - [x] `lib/Common.ps1` — config (the SAME file the Linux tools read), findings
       in the same `SEV|check|subject|desc` format, evidence, scored-service
@@ -192,12 +192,18 @@ team-controlled share and verified the remote hash.
       against a fresh scan, a sweep takes SWEEP-tier only.
 - [x] `baseline.ps1` — configuration drift. Scoped to config plus the
       executable surface (~250 files, 9s), NOT the filesystem (~14,000 files,
-      5 min, measured).
+      5 min, measured). `-Bless -StableForSeconds 20 -Apply` now takes two
+      snapshots and refuses to freeze either if the monitored state changes in
+      the quiet window; the changed rows are recorded for review. Proven on
+      `ccdc-win` 2026-09-22 with the recovery chain armed: a quiet 20s window
+      blessed in 32s (the chain's own activity does not trip it), and a Run-key
+      value planted mid-window was refused, named with its target file in
+      `baseline-bless-changed-*.txt`, and left the prior manifest byte-identical.
 - [x] `canary.ps1` — tripwires via SACL + audit policy + event 4663, which
       reports WHO read a decoy. Hashing cannot answer that question.
 - [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 77 assertions against planted fixtures
+- [x] `redteam/windows-self-test.ps1` — 89 assertions against planted fixtures
       and the read-only Windows tools' static safety contracts.
 - [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
       survived rather than assuming (Defender eats some fixtures in real time).
@@ -208,8 +214,33 @@ team-controlled share and verified the remote hash.
 - [x] `integrity.ps1` — third SYSTEM task that detects a missing, stopped, or
       redirected Guardian task. Proven on `ccdc-win` 2026-09-21 by removing
       Guardian's task: it wrote `INTEGRITY-GAP code=MISSING` and exited 2.
-- [~] `evidence.ps1` — source-tested explicit UNC evidence exporter. Still
-      needs a real share and an end-to-end copied-hash check on the lab VM.
+- [x] `arm.ps1` — one guarded Windows setup command: lays canaries, installs
+      Guardian / Watchdog / Continuity-Audit, then checks task wiring, the
+      repair authority, and read auditing. It deliberately leaves firewall,
+      account, service, and off-box-destination choices to the operator.
+      Proven on `ccdc-win` 2026-09-22: all three SYSTEM tasks were Running,
+      four canaries and the private repair manifest were present, and Guardian
+      restored an altered watchdog payload to its original SHA-256.
+- [x] `recovery.ps1` — checksummed whole-kit archive outside the checkout;
+      restores only into a new empty folder and verifies every restored file.
+      It is resilience, not tamper-proofing. Proven on `ccdc-win` 2026-09-22:
+      archive/status verified, 36 files restored into a new folder, then the
+      temporary folder was removed and a fresh archive verified cleanly.
+- [x] `audit.ps1` — read-only check for PowerShell/process auditing, event-log
+      capacity and readability, plus bounded hash-manifested evidence capture.
+      Repair delegates to harden.ps1's existing Logging step. Proven on
+      `ccdc-win` 2026-09-22: capture's five hashes verified, Logging repair
+      enabled the required policy, and the final audit check was clean.
+- [x] `evidence.ps1` — explicit UNC evidence exporter. It now
+      includes the newest built-in recon and timeline evidence cases (up to
+      50 MB each) alongside the config, baseline, manifests, and chain logs.
+      Once created, the compact whole-kit recovery archive is carried too.
+      Proven on `ccdc-win` 2026-09-22 over SMB to a loopback share
+      (`\\CCDC-WIN\qwev`): remote hash re-read and matched, 31 records, every
+      manifest row verified after extraction. The first run found it hashing
+      its own open `SHA256SUMS.csv` (a red error before "verified"); fixed, and
+      the suite now checks every tool's hash pipelines for that shape.
+      Cross-host share authentication is the one thing a loopback cannot test.
 
 ### NOT YET TRUE OF THE WINDOWS HALF — read before trusting it
 
@@ -302,8 +333,8 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 507 assertions
-bash redteam/self-test.sh                             # 430, skips the Windows suite
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 530 assertions
+bash redteam/self-test.sh                             # 440, skips the Windows suite
 ```
 
 The suite asserts its own assertion count against the README, so adding one

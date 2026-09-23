@@ -32,6 +32,15 @@ $pass = 0; $fail = 0
 function ok   { param([string]$m) $script:pass++; Write-Host ("ok     - {0}" -f $m) }
 function nope { param([string]$m) $script:fail++; Write-Host ("not ok - {0}" -f $m) -ForegroundColor Red }
 
+# An assertion whose condition throws prints neither ok nor not ok, and with
+# ErrorActionPreference Continue the suite carries on and exits 0. That is a
+# check that silently did not run. Count it as a failure and say where.
+trap {
+    $script:fail++
+    Write-Host ("not ok - line {0} threw instead of deciding: {1}" -f $_.InvocationInfo.ScriptLineNumber, $_.Exception.Message) -ForegroundColor Red
+    continue
+}
+
 $work = Join-Path ([System.IO.Path]::GetTempPath()) ("ccdc-wintest-" + [guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $env:CCDC_WIN_ROOT = $work
@@ -417,6 +426,123 @@ if (-not (Test-Path -LiteralPath $sentryPath)) {
 }
 
 # =============================================================================
+# audit.ps1 - audit health is a check and a bounded evidence capture, not a
+# second hardening implementation
+# =============================================================================
+$auditPath = Join-Path $root 'windows\audit.ps1'
+if (-not (Test-Path -LiteralPath $auditPath)) {
+    nope 'windows\audit.ps1 is missing'
+} else {
+    $auditTxt = Get-Content -LiteralPath $auditPath -Raw
+    if ($auditTxt -match 'ScriptBlockLogging' -and $auditTxt -match 'Process Creation' -and
+        $auditTxt -match 'Test-EventLogSize' -and $auditTxt -match 'Get-WinEvent' -and
+        $auditTxt -match 'event 4104') {
+        ok 'audit.ps1 checks Windows logging policy, event-log capacity, and readable evidence sources'
+    } else {
+        nope 'audit.ps1 does not check the settings and log sources needed for incident evidence'
+    }
+    if ($auditTxt -match 'harden\.ps1' -and $auditTxt -match 'Save-AuditEvidence' -and
+        $auditTxt -match 'SHA256SUMS\.csv' -and $auditTxt -match 'capture writes evidence only') {
+        ok 'audit.ps1 reuses the existing Logging repair and bounds/hash-manifests its capture'
+    } else {
+        nope 'audit.ps1 duplicates logging repair or writes an unbounded, unhashed capture'
+    }
+    if ($auditTxt -match '\$_\.Name -ne ''SHA256SUMS\.csv''') {
+        ok 'audit.ps1 excludes its open hash manifest from the files it hashes'
+    } else {
+        nope 'audit.ps1 can try to hash its own still-open manifest during capture'
+    }
+    # The same bug, found by running evidence.ps1 against a real share: a
+    # Get-ChildItem | Get-FileHash | Export-Csv pipeline lists the manifest it
+    # is still writing, and Windows refuses to hash a file that is open. Stubs
+    # cannot see a file lock, so check the shape in every tool, not one by one.
+    $selfHashers = @()
+    # .NET, not Get-ChildItem: this suite stubs Get-ChildItem.
+    $toolFiles = [System.IO.Directory]::GetFiles((Join-Path $root 'windows'), '*.ps1', [System.IO.SearchOption]::AllDirectories)
+    foreach ($path in $toolFiles) {
+        $f = [System.IO.FileInfo]$path
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$null)
+        $pipes = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.PipelineAst] }, $true)
+        foreach ($p in $pipes) {
+            $names = @($p.PipelineElements | ForEach-Object {
+                if ($_ -is [System.Management.Automation.Language.CommandAst]) { $_.GetCommandName() } })
+            if ($names -contains 'Get-ChildItem' -and $names -contains 'Get-FileHash' -and
+                $names -contains 'Export-Csv' -and $names -notcontains 'Where-Object') {
+                $selfHashers += ('{0}:{1}' -f $f.Name, $p.Extent.StartLineNumber)
+            }
+        }
+    }
+    if ($selfHashers.Count -eq 0) {
+        ok 'no Windows tool hashes a directory into a manifest it is writing inside that directory'
+    } else {
+        nope ('a hash-manifest pipeline can list its own open manifest: {0}' -f ($selfHashers -join ', '))
+    }
+    if ($auditTxt -match '\$text -match ''\(\?im\)\^\\s\*maxSize:' -and $auditTxt -notmatch '\$text -notmatch ''\(\?im\)\^\\s\*maxSize:') {
+        ok 'audit.ps1 captures the event-log size match before reading $Matches'
+    } else {
+        nope 'audit.ps1 can read stale $Matches after a -notmatch event-log size test'
+    }
+}
+
+# =============================================================================
+# recovery.ps1 - whole-kit recovery must not overwrite the only evidence copy
+# =============================================================================
+$recoveryPath = Join-Path $root 'windows\recovery.ps1'
+if (-not (Test-Path -LiteralPath $recoveryPath)) {
+    nope 'windows\recovery.ps1 is missing'
+} else {
+    $recoveryTxt = Get-Content -LiteralPath $recoveryPath -Raw
+    if ($recoveryTxt -match '\[switch\]\$Apply' -and $recoveryTxt -match 'Get-FileHash' -and
+        $recoveryTxt -match 'Compress-Archive' -and $recoveryTxt -match 'Expand-Archive' -and
+        $recoveryTxt -match 'refusing to restore into an existing path') {
+        ok 'recovery.ps1 archives a checksummed kit and refuses to overwrite an existing destination'
+    } else {
+        nope 'recovery.ps1 lacks its apply gate, hash verification, or no-overwrite restore guard'
+    }
+    if ($recoveryTxt -match 'unsafe manifest path' -and $recoveryTxt -match 'not tamper-proofing') {
+        ok 'recovery.ps1 rejects unsafe manifest paths and states its Administrator limit'
+    } else {
+        nope 'recovery.ps1 can trust unsafe archive paths or overclaims its authority'
+    }
+    # PowerShell resolves `r` as Invoke-History before a same-named function.
+    # A real archive was created successfully and then reported failed because
+    # its log helper was named R; keep that lab-only failure out permanently.
+    if ($recoveryTxt -match 'function Write-RecoveryLog' -and $recoveryTxt -notmatch '(?m)^function R\b') {
+        ok 'recovery.ps1 does not shadow PowerShell''s r/Invoke-History alias'
+    } else {
+        nope 'recovery.ps1 uses the R logging helper that PowerShell resolves as Invoke-History'
+    }
+}
+
+# =============================================================================
+# arm.ps1 - one guarded setup command, not an automatic hardening decision
+# =============================================================================
+$armPath = Join-Path $root 'windows\arm.ps1'
+if (-not (Test-Path -LiteralPath $armPath)) {
+    nope 'windows\arm.ps1 is missing'
+} else {
+    $armTxt = Get-Content -LiteralPath $armPath -Raw
+    if ($armTxt -match '\[switch\]\$Apply' -and $armTxt -match 'Assert-CcdcPacketEntered' -and
+        $armTxt -match 'canary\.ps1' -and $armTxt -match 'guardian\.ps1' -and
+        $armTxt -match 'Show-CcdcArmStatus') {
+        ok 'arm.ps1 has an explicit apply gate, packet guard, and verifies its canary/Guardian chain'
+    } else {
+        nope 'arm.ps1 can arm Windows without the normal safety checks or does not verify the result'
+    }
+    if ($armTxt -match 'Does NOT touch passwords, firewall policy, accounts, or scored-service settings' -and
+        $armTxt -match 'Does NOT choose an off-box evidence share') {
+        ok 'arm.ps1 states the high-risk decisions it deliberately leaves to the operator'
+    } else {
+        nope 'arm.ps1 does not state its packet-decision and off-box-evidence boundaries'
+    }
+    if ($armTxt -notmatch '\$Label:') {
+        ok 'arm.ps1 braces the label before a colon so Windows PowerShell can parse its failure path'
+    } else {
+        nope 'arm.ps1 has an unbraced $Label: string that Windows PowerShell parses as a scoped variable'
+    }
+}
+
+# =============================================================================
 # baseline.ps1 - the drift tool
 # =============================================================================
 $blPath = Join-Path $root 'windows\baseline.ps1'
@@ -446,6 +572,16 @@ if (-not (Test-Path -LiteralPath $blPath)) {
         ok 'baseline.ps1 warns that blessing a dirty box freezes the intrusion as normal'
     } else {
         nope 'baseline.ps1 no longer warns about blessing before you have cleaned the box'
+    }
+
+    # A reviewed box can still change while you move from review to bless. The
+    # optional quiet window must compare two real snapshots and refuse to
+    # write a baseline when they differ.
+    if ($blTxt -match 'StableForSeconds' -and $blTxt -match 'Compare-BoxSnapshots' -and
+        $blTxt -match 'Nothing was frozen' -and $blTxt -match 'baseline-bless-changed-') {
+        ok 'baseline.ps1 can refuse a blessing when the box changes during a quiet window'
+    } else {
+        nope 'baseline.ps1 has no recorded quiet-window guard before blessing'
     }
 }
 
@@ -519,10 +655,12 @@ if (-not (Test-Path -LiteralPath $evidencePath)) {
         nope 'evidence.ps1 can export without an explicit trusted off-box destination'
     }
     if ($evidenceTxt -match 'SHA256SUMS\.csv' -and $evidenceTxt -match 'Get-FileHash -LiteralPath \$remoteArchive' -and
+        $evidenceTxt -match 'Get-LatestEvidenceFiles' -and $evidenceTxt -match 'Get-KitRecoveryFiles' -and
+        $evidenceTxt -match 'ccdc-kit-latest\.zip' -and $evidenceTxt -match "@\('recon', 'timeline'\)" -and
         $evidenceTxt -match 'OFFBOX-EXPORTED') {
-        ok 'evidence.ps1 packages manifests and verifies the copied ZIP before logging success'
+        ok 'evidence.ps1 packages recon/timeline plus kit recovery and verifies the copied ZIP before logging success'
     } else {
-        nope 'evidence.ps1 does not verify its off-box archive copy'
+        nope 'evidence.ps1 omits current evidence or kit recovery, or does not verify its off-box archive copy'
     }
 }
 

@@ -95,8 +95,9 @@ sudo ./linux/triage.sh --config ~/ccdc-real.env
 sudo ./linux/baseline.sh --config ~/ccdc-real.env
 sudo ./linux/baseline.sh --config ~/ccdc-real.env --explain N
 
-# 4. Freeze what is left as known-good, then watch it.
-sudo ./linux/baseline.sh --config ~/ccdc-real.env --bless --apply
+# 4. Freeze what is left as known-good, then watch it. The second inventory
+# refuses to bless if anything changed while you were reviewing the first.
+sudo ./linux/baseline.sh --config ~/ccdc-real.env --bless --stable-for 20 --apply
 sudo ./linux/arm.sh --config ~/ccdc-real.env --apply
 ```
 

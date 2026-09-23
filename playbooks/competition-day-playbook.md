@@ -262,7 +262,9 @@ record it as an exception, and nothing decays back into normal on its own.
     Before the first blessing, this asks whether each remaining item is
     package-intact or explicitly allowed. Use its `--explain N` command for
     the full evidence before you approve or allow anything.
-[ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
+[ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --stable-for 20 --apply
+    It takes the inventory again after 20 seconds and refuses to freeze it if
+    anything changed during your final review.
 [ ] sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --status
     Should say "Nothing unexplained." If it does not, you blessed something
     you did not mean to - fix it and bless again.

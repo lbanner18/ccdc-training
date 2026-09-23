@@ -43,10 +43,18 @@ checkbox.
     "show me the evidence for this one finding". `more:` names the card with a
     slower, step-by-step version.
 [ ] sudo ./linux/baseline.sh --config "$CFG"    # what remains unexplained
-[ ] sudo ./linux/baseline.sh --config "$CFG" --bless --apply
+[ ] sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
     ONLY once the box looks the way you want it. This freezes what remains as
     known-good. New drift stays visible until you remove it or allow it; it
     never becomes normal merely because another watch pass completed.
+    `--stable-for 20` takes a second full inventory after 20 seconds and
+    refuses to bless if anything changed while you were reviewing.
+[ ] If the opposing team is actively changing the box while you review, it is
+    reasonable to run `arm.sh --apply` earlier, after the packet config is
+    correct. Its first pass cannot prove the old state is clean, but it gives
+    you canaries and change evidence during the final review. After blessing,
+    re-run `arm.sh --apply` once so its recovery bundle includes the newly
+    blessed inventory.
 [ ] sudo ./linux/arm.sh --config "$CFG" --apply
     This starts the long-running protection: a machine backup, a separate
     checksummed kit recovery copy, canaries, sentry, and guardian/watchdog.
@@ -63,6 +71,9 @@ checkbox.
     Persistent audit rules, so the next `systemctl restart auditd` does not
     silently clear every watch canary.sh loaded. Then --capture, which is the
     log baseline that makes "they wiped the logs" provable later.
+[ ] sudo ./linux/audit.sh --config "$CFG" --capture
+    Saves hashes and recent log evidence. It does not restart services or edit
+    logs; `--dry-run` only previews where the evidence would be saved.
 [ ] ./linux/splunk.sh --config "$CFG"          # is it actually shipping?
     then: sudo ./linux/splunk.sh --config "$CFG" --test-event --apply
     and FIND THE TOKEN IN SPLUNK. A forwarder can be running and shipping

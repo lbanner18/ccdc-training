@@ -310,6 +310,14 @@ else
   no '--help omits a mode the tool has'
 fi
 
+if grep -q -- '--stable-for SECONDS' "$test_root/help.out" \
+   && grep -q 'inventory changed during the' "$BASE" \
+   && grep -q 'cmp -s' "$BASE"; then
+  ok 'guarded blessing takes two inventories and refuses a changing box'
+else
+  no 'guarded blessing is missing or can bless through a changed inventory'
+fi
+
 if "$BASE" --config "$test_root/nope.env" >"$test_root/cfg.out" 2>&1; then
   no 'a missing config was accepted'
 else
@@ -504,6 +512,12 @@ if awk '/^inventory_files\(\)/,/^}/' "$BASE" | grep -q 'CONFFILE_MD5\[@\]'; then
   ok 'every conffile is scanned, not only those in the trigger directories'
 else
   no 'the conffile scan misses anything outside exec_trigger_dirs'
+fi
+
+if awk '/^inventory\(\)/,/^}/' "$BASE" | grep -Fq "sort -t'|' -k1,2 -u"; then
+  ok 'one file reported by two collection paths is one baseline finding'
+else
+  no 'duplicate collection paths inflate the baseline finding count'
 fi
 
 # A path-only blessing must not explain a CONTENT change. Blessing /etc/profile

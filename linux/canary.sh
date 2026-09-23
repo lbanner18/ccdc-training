@@ -129,6 +129,77 @@ path_atime() { stat -c '%X' "$1" 2>/dev/null || stat -f '%a' "$1" 2>/dev/null ||
 path_inode() { stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1" 2>/dev/null || printf '0'; }
 path_hash()  { ccdc_hash_file "$1" 2>/dev/null | awk '{print $1}'; }
 
+# ausearch selects a whole audit *event*, not only the SYSCALL line that has the
+# requested key.  Loading a rule produces a CONFIG_CHANGE with (say)
+# ccdc-canary in it and a separate SYSCALL whose key is null.  Counting every
+# SYSCALL in ausearch's output therefore reported our own rule load as an
+# intrusion.  Keep only events whose actual access syscall carries this key.
+audit_key_count() {
+  local wanted=$1
+  awk -v wanted="$wanted" '
+    BEGIN { RS="----\n" }
+    {
+      matched=0
+      n=split($0, lines, "\n")
+      for (i=1; i<=n; i++) {
+        if (lines[i] ~ /type=SYSCALL/ \
+            && lines[i] ~ ("key=" wanted "([[:space:]]|$)")) {
+          matched=1
+          break
+        }
+      }
+      if (matched) count++
+    }
+    END { print count+0 }
+  '
+}
+
+# The raw audit stream is evidence, not an operator interface.  Give the
+# person at the keyboard the one line that matters for each recent event: when,
+# what program, which session, and which watched path.  Full raw records remain
+# available through ausearch when an incident report needs them.
+summarize_audit_events() {
+  local wanted=$1 limit=${2:-3}
+  awk -v wanted="$wanted" -v limit="$limit" '
+    BEGIN { RS="----\n" }
+    {
+      matched=0; when=""; comm="?"; exe="?"; path="?"; auid="?"
+      n=split($0, lines, "\n")
+      for (i=1; i<=n; i++) {
+        line=lines[i]
+        if (line ~ /type=SYSCALL/ \
+            && line ~ ("key=" wanted "([[:space:]]|$)")) {
+          matched=1
+          timepart=line
+          sub(/^.*msg=audit\(/, "", timepart)
+          sub(/\).*/, "", timepart)
+          when=timepart
+          value=line; sub(/^.*comm=/, "", value); sub(/ .*/, "", value)
+          if (value != line) comm=value
+          value=line; sub(/^.*exe=/, "", value); sub(/ .*/, "", value)
+          if (value != line) exe=value
+          value=line; sub(/^.*auid=/, "", value); sub(/ .*/, "", value)
+          if (value != line) auid=value
+        }
+        if (line ~ /type=PATH/ && path == "?") {
+          value=line; sub(/^.*name=/, "", value); sub(/ .*/, "", value)
+          if (value != line) path=value
+        }
+      }
+      if (matched) {
+        total++
+        if (shown < limit) {
+          printf "  %s  %s (%s), session=%s, accessed %s\n", when, comm, exe, auid, path
+          shown++
+        }
+      }
+    }
+    END {
+      if (total > limit) printf "  ... plus %d more; use ausearch only if you need the raw evidence.\n", total-limit
+    }
+  '
+}
+
 manifest_hash() {
   [ -f "$manifest" ] || return 0
   awk -F'|' -v p="$1" '$1 == p {print $2; exit}' "$manifest" 2>/dev/null
@@ -475,8 +546,8 @@ check() {
     # mistake before with `head`.
     canary_raw=$(ausearch_bounded ccdc-canary); ausearch_rc=$?
     sens_raw=$(ausearch_bounded ccdc-sensitive); sens_rc=$?
-    hits=$(printf '%s\n' "$canary_raw" | grep -c 'type=SYSCALL' || true)
-    shits=$(printf '%s\n' "$sens_raw" | grep -c 'type=SYSCALL' || true)
+    hits=$(printf '%s\n' "$canary_raw" | audit_key_count ccdc-canary)
+    shits=$(printf '%s\n' "$sens_raw" | audit_key_count ccdc-sensitive)
     if [ "${ausearch_rc:-0}" -eq 124 ] || [ "${sens_rc:-0}" -eq 124 ]; then
       ccdc_warn "ausearch timed out: the audit log could not be read this pass.
   This is NOT 'no events' - it is 'no answer'. Check the log size and the daemon:
@@ -485,8 +556,18 @@ check() {
   Raise the limit with CCDC_AUSEARCH_TIMEOUT if the box is just slow."
       health_failed=1
     fi
-    [ "${hits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on decoy files\n' "$hits"; ccdc_append_log "$alertlog" "TRIP kind=audit_decoy events=$hits"; tripped=1; }
-    [ "${shits:-0}" -gt 0 ] && { printf 'AUDIT: %s recent access event(s) on sensitive files\n' "$shits"; ccdc_append_log "$alertlog" "TRIP kind=audit_sensitive events=$shits"; tripped=1; }
+    if [ "${hits:-0}" -gt 0 ]; then
+      printf 'AUDIT: %s recent access event(s) on decoy files\n' "$hits"
+      printf '%s\n' "$canary_raw" | summarize_audit_events ccdc-canary
+      ccdc_append_log "$alertlog" "TRIP kind=audit_decoy events=$hits"
+      tripped=1
+    fi
+    if [ "${shits:-0}" -gt 0 ]; then
+      printf 'AUDIT: %s recent access event(s) on sensitive files\n' "$shits"
+      printf '%s\n' "$sens_raw" | summarize_audit_events ccdc-sensitive
+      ccdc_append_log "$alertlog" "TRIP kind=audit_sensitive events=$shits"
+      tripped=1
+    fi
     if [ "${hits:-0}" -gt 0 ] || [ "${shits:-0}" -gt 0 ]; then
       printf 'run: ausearch -k ccdc-canary -i   (and -k ccdc-sensitive) for the who/what/when\n'
     fi

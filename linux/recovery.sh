@@ -24,6 +24,7 @@ while [ "$#" -gt 0 ]; do
     --install) mode=install; shift ;;
     --status) mode=status; shift ;;
     --restore) mode=restore; destination=${2:?missing restore destination}; shift 2 ;;
+    --restore-baseline) mode=restorebaseline; destination=${2:?missing evidence state directory}; shift 2 ;;
     --apply) apply=1; CCDC_DRY_RUN=0; shift ;;
     --dry-run) apply=0; CCDC_DRY_RUN=1; shift ;;
     -h|--help)
@@ -35,12 +36,15 @@ usage: recovery.sh --config FILE [--install|--status|--restore DIRECTORY] [--app
   --status               list recovery bundles and verify their checksums
   --restore DIRECTORY    verify the newest bundle and extract it into a NEW,
                          empty directory; never overwrites an existing kit
-  --apply                required for --install and --restore
+  --restore-baseline DIR verify the newest bundle and restore its blessed
+                         baseline into the dedicated evidence state directory
+  --apply                required for --install and either restore operation
   --dry-run              show an install or restore action without changing files
 
 Examples:
   sudo ./linux/recovery.sh --config /tmp/ccdc-linux.env --install --apply
   sudo ./linux/recovery.sh --config /tmp/ccdc-linux.env --restore /root/ccdc-recovered --apply
+  sudo /var/backups/ccdc/ccdc-kit-recover.sh --restore-baseline /var/tmp/ccdc-evidence --apply
 EOF
       exit 0 ;;
     *) ccdc_die "unknown option: $1" ;;
@@ -112,6 +116,25 @@ case "$mode" in
     mkdir -p "$stage/kit" || ccdc_die "cannot prepare recovery staging directory"
     cp -a -- "$repo_root/linux" "$repo_root/playbooks" "$stage/kit/" || ccdc_die "could not copy kit into recovery bundle"
     cp -- "$config" "$stage/kit/ccdc.env" || ccdc_die "could not copy selected config into recovery bundle"
+    # A recovery bundle made after blessing also carries the small baseline
+    # authority files. This is separate from the live evidence directory, so a
+    # deleted state tree does not erase the answer to "what was known-good?"
+    state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
+    if [ -f "$state_dir/baseline/inventory" ]; then
+      mkdir -p "$stage/kit/baseline-state" || ccdc_die "could not stage blessed baseline"
+      cp -- "$state_dir/baseline/inventory" "$stage/kit/baseline-state/inventory" \
+        || ccdc_die "could not copy blessed baseline"
+      if [ -f "$state_dir/baseline/exceptions" ]; then
+        cp -- "$state_dir/baseline/exceptions" "$stage/kit/baseline-state/exceptions" \
+          || ccdc_die "could not copy baseline exceptions"
+      else
+        : >"$stage/kit/baseline-state/NO-EXCEPTIONS"
+      fi
+      if [ -f "$state_dir/baseline/bless.log" ]; then
+        cp -- "$state_dir/baseline/bless.log" "$stage/kit/baseline-state/bless.log" \
+          || ccdc_die "could not copy baseline blessing log"
+      fi
+    fi
     archive="$base/ccdc-kit-$stamp.tar.gz"
     tar -C "$stage" -czf "$archive" kit || ccdc_die "could not create recovery archive"
     printf '%s  %s\n' "$(sha256sum -- "$archive" | awk '{print $1}')" "$(basename -- "$archive")" >"${archive%.tar.gz}.SHA256SUMS" || ccdc_die "could not write recovery checksum"
@@ -141,5 +164,45 @@ case "$mode" in
     [ -f "$destination/kit/linux/recovery.sh" ] || ccdc_die "verified archive did not contain the expected kit layout"
     ccdc_info "recovered kit: $destination/kit"
     printf 'Next: inspect the recovered files, then run its scripts from %s/kit.\n' "$destination"
+    ;;
+  restorebaseline)
+    [ "$apply" -eq 1 ] || { printf '[dry-run] would restore the newest bundled baseline into %s\n' "$destination"; exit 0; }
+    ccdc_require_root
+    secure_base || ccdc_die "recovery directory is not secure: $base"
+    ccdc_validate_state_dir "$destination" "baseline restore directory"
+    archive=$(newest_bundle)
+    [ -n "$archive" ] && verify_bundle "$archive" || ccdc_die "no verified recovery bundle is available"
+    stage=$(mktemp -d "$base/.ccdc-baseline-restore.XXXXXX") || ccdc_die "could not make baseline restore staging directory"
+    trap 'rm -rf -- "$stage"' EXIT
+    tar -C "$stage" -xzf "$archive" kit/baseline-state 2>/dev/null \
+      || ccdc_die "the newest recovery bundle contains no blessed baseline; re-run arm after blessing"
+    source="$stage/kit/baseline-state"
+    [ -f "$source/inventory" ] || ccdc_die "baseline recovery copy has no inventory"
+    ccdc_secure_state_dir "$destination" "baseline restore directory"
+    mkdir -p "$destination/baseline" || ccdc_die "could not create baseline directory"
+    if [ -f "$destination/baseline/inventory" ]; then
+      cp -p -- "$destination/baseline/inventory" "$destination/baseline/inventory.before-recovery.$(ccdc_now)" \
+        || ccdc_die "could not preserve current baseline before recovery"
+    fi
+    cp -- "$source/inventory" "$destination/baseline/inventory.tmp.$$" \
+      && chown 0:0 "$destination/baseline/inventory.tmp.$$" \
+      && chmod 0600 "$destination/baseline/inventory.tmp.$$" \
+      && mv -- "$destination/baseline/inventory.tmp.$$" "$destination/baseline/inventory" \
+      || ccdc_die "could not restore blessed inventory"
+    if [ -f "$source/exceptions" ]; then
+      cp -- "$source/exceptions" "$destination/baseline/exceptions.tmp.$$" \
+        && chown 0:0 "$destination/baseline/exceptions.tmp.$$" \
+        && chmod 0600 "$destination/baseline/exceptions.tmp.$$" \
+        && mv -- "$destination/baseline/exceptions.tmp.$$" "$destination/baseline/exceptions" \
+        || ccdc_die "could not restore baseline exceptions"
+    elif [ -f "$source/NO-EXCEPTIONS" ]; then
+      rm -f -- "$destination/baseline/exceptions"
+    fi
+    if [ -f "$source/bless.log" ]; then
+      cp -- "$source/bless.log" "$destination/baseline/bless.log" \
+        || ccdc_die "could not restore baseline blessing log"
+    fi
+    ccdc_info "restored bundled baseline to $destination/baseline/inventory"
+    ccdc_info "verify it with: sudo <kit>/linux/baseline.sh --config <config> --status"
     ;;
 esac

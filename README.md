@@ -5,13 +5,13 @@ two questions: **is the scored service up**, and **can I prove what changed**.
 
 - **Linux** — 26 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
   and a supervised approval queue that applies fixes only when you say so.
-- **Windows** — 13 tools, 58 checks: triage, a checklist-driven harden, account
+- **Windows** — 16 tools, 58 checks: triage, a checklist-driven harden, account
   and password handling, a scored-service/canary watchdog, the same approval queue,
   configuration drift against a frozen baseline, and tripwires that report who
   read them.
-- **Playbooks** — 13 documents. Cards you can follow at 2am with a red team on
+- **Playbooks** — 14 documents. Cards you can follow at 2am with a red team on
   the box.
-- **Tested** — 507 assertions across 20 suites, including fixtures that plant
+- **Tested** — 530 assertions across 20 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.
 
 Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
@@ -49,7 +49,9 @@ sudo ./linux/triage.sh --config "$CFG"
 sudo ./linux/baseline.sh --config "$CFG"
 
 # 4. Freeze only the box you intend to keep. Do NOT bless an unresolved foothold.
-sudo ./linux/baseline.sh --config "$CFG" --bless --apply
+# --stable-for takes a second inventory after 20 seconds and refuses to bless
+# if anything changed while you were making the decision.
+sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
 
 # 5. Arm everything persistent: a machine backup, a separate kit recovery copy,
 #    canaries, sentry, and guardian/watchdog.
@@ -256,6 +258,12 @@ windows/                  PowerShell tools for Windows boxes. Target is Windows
                           redundancy only - Administrator can remove every layer
   integrity.ps1           separate SYSTEM check that reports a missing, stopped,
                           or redirected Guardian task; Guardian repairs it
+  arm.ps1                 lays canaries, installs the three-task recovery chain,
+                          and verifies the result; never changes packet decisions
+  recovery.ps1            checksummed whole-kit archive outside the checkout;
+                          restores only to a new empty folder, never over source
+  audit.ps1               logging/audit health check, bounded evidence capture,
+                          and repair through harden.ps1's existing Logging step
   evidence.ps1            bundles key defense records and verifies a copy to a
                           user-supplied UNC share; never chooses a destination
   timeline.ps1            read-only, time-bounded incident timeline across
@@ -270,8 +278,8 @@ lab/                      building the practice targets:
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (507 assertions, non-root;
-                          430 without the Windows suite, which needs pwsh -
+  self-test.sh            runs every suite below (530 assertions, non-root;
+                          440 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag
@@ -313,5 +321,6 @@ cited rules, including the one that governs when this repository has to be
 public.
 
 See [`ROADMAP.md`](ROADMAP.md) for the lab sequence and the remaining Windows
-and competition-day work. The PowerShell files are first-pass drafts and have
-not been executed in this Linux workspace.
+and competition-day work. The PowerShell tools have run on a real Windows Server
+2022 lab box as well as against the stubbed suite; `playbooks/open-work.md`
+records what was proven there and what was not.

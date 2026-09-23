@@ -218,17 +218,24 @@ question, not permission to remove it:
 ```
 
 ```powershell
-.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Install -Apply
+.\windows\arm.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Apply
 ```
 
-Installs the scored-service/canary watchdog, a Guardian SYSTEM task that
-repairs the watchdog, and a separate integrity SYSTEM task that checks whether
-Guardian itself is still running from its expected private script. Once the tripwires
-below are laid, the watchdog also runs `canary.ps1 -Check` each pass and records
-any trip in `watchdog.log`. Check `guardian.ps1 -Status` whenever you come up
-for air. The integrity checker writes changed status to `integrity.log`. An
-Administrator can still remove all three tasks; this is redundancy, not
-tamper-proofing.
+This is the one-command setup for the things that are safe to set up together:
+it lays the four canaries, turns on their read-audit policy, installs the
+scored-service/canary Watchdog, installs the Guardian task that repairs it,
+and installs Continuity-Audit to report a missing Guardian. It verifies all of
+that before it says `armed`.
+
+It does **not** change passwords, firewall policy, accounts, or scored-service
+settings. It also does not choose where to send off-box evidence. Those are
+packet and team decisions, so the tool leaves them with you. The next section
+freezes this deliberately installed chain into the baseline.
+
+The Watchdog runs `canary.ps1 -Check` each pass and records a trip in
+`watchdog.log`. Check `guardian.ps1 -Status` whenever you come up for air. The
+integrity checker writes changed status to `integrity.log`. An Administrator
+can still remove all three tasks; this is redundancy, not tamper-proofing.
 
 ```powershell
 .\windows\integrity.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
@@ -249,7 +256,7 @@ then install the new pair:
 
 ```powershell
 .\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Uninstall -Apply -TaskName CCDC-Guardian -WatchdogTaskName CCDC-Watchdog
-.\windows\guardian.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Install -Apply
+.\windows\arm.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Apply
 ```
 
 Guardian keeps a separate `.repair` authority with a SHA-256 manifest beside
@@ -334,10 +341,20 @@ cleaned makes whatever they left behind the definition of normal, and every
 drift report after that will agree the backdoor belongs there.
 
 ```powershell
-.\windows\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Bless -Apply
+.\windows\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Bless -StableForSeconds 20 -Apply
 ```
 
-Nine seconds. Then, any time you want to know what has happened since:
+The 20-second quiet window is intentional. The tool takes one picture, waits,
+then takes another. If a service, task, startup entry, account, listener,
+firewall rule, share, WMI subscription, Defender exclusion, or executable that
+Windows is set to run changes in between, it refuses to bless either picture.
+It saves a short list of the changed rows under `C:\ProgramData\CCDC\state` so
+you can inspect the race instead of accidentally teaching the baseline that a
+new backdoor is normal. If the box is busy because of an update or a service
+restart you understand, wait for it to settle and run the same command again.
+
+Expect roughly 40 seconds: one inventory, the 20-second wait, then a second
+inventory. Then, any time you want to know what has happened since:
 
 ```powershell
 .\windows\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
@@ -363,8 +380,13 @@ lives only where the attacker is, is a baseline the attacker can edit.
 Use the evidence exporter after Guardian and baseline have written their first
 records. Replace the share with a workstation or team evidence share you are
 allowed to use. The ZIP includes the config, Guardian manifests, Guardian /
-watchdog / integrity logs, and baseline state; the tool verifies the copied ZIP
+watchdog / integrity logs, baseline state, and the newest built-in recon and
+timeline evidence cases (up to 50 MB each); the tool verifies the copied ZIP
 hash before it says success.
+
+If you have already run `recovery.ps1 -Create -Apply`, the exporter includes
+that whole-kit archive and its hash files too (also capped at 50 MB). That is
+the copy that still helps if both the checkout and `C:\ProgramData\CCDC` vanish.
 
 ```powershell
 .\windows\evidence.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Destination \\workstation\evidence -Bundle -Apply
@@ -376,12 +398,32 @@ location rather than a public or personal service. Run this exporter manually
 from your elevated operator PowerShell, not as a SYSTEM task: your allowed UNC
 share may use your account's network access.
 
----
-
-## Lay the tripwires
+Make a recovery copy of the whole kit once it is on the box. This is separate
+from Guardian: Guardian repairs the small private scripts it runs, while this
+recovers the checkout if its folder is deleted. It restores only into a brand
+new folder, so the damaged folder remains evidence instead of being overwritten.
 
 ```powershell
-.\windows\canary.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Deploy -Apply
+.\windows\recovery.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Create -Apply
+```
+
+At any point after hardening, this one check answers whether the logs and audit
+settings you need for an incident report are still usable:
+
+```powershell
+.\windows\audit.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Check
+```
+
+---
+
+## The tripwires are already laid
+
+`arm.ps1` laid them before it installed Watchdog, so Watchdog can check them
+immediately. If `arm.ps1` printed a problem, use this read-only command to see
+whether the files and their audit policy are present before you re-run arm:
+
+```powershell
+.\windows\canary.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
 ```
 
 This puts four decoy files where somebody rummaging would find them — a
@@ -452,7 +494,7 @@ nc -z -v WINDOWS_IP 3389
 |---|---|
 | see what is wrong | `.\windows\triage.ps1 -Config CONFIG` |
 | fix it by number | `.\windows\sentry.ps1 -Config CONFIG -Status` |
-| freeze a box you believe | `.\windows\baseline.ps1 -Config CONFIG -Bless -Apply` |
+| freeze a box you believe | `.\windows\baseline.ps1 -Config CONFIG -Bless -StableForSeconds 20 -Apply` |
 | what changed since | `.\windows\baseline.ps1 -Config CONFIG -Status` |
 | lay tripwires | `.\windows\canary.ps1 -Config CONFIG -Deploy -Apply` |
 | has anything been touched | `.\windows\canary.ps1 -Config CONFIG -Check` |
@@ -460,7 +502,8 @@ nc -z -v WINDOWS_IP 3389
 | accounts and passwords | `.\windows\users.ps1 -Config CONFIG` |
 | the whole hardening checklist | `.\windows\harden.ps1 -Config CONFIG` |
 | just the firewall | `.\windows\harden.ps1 -Config CONFIG -Only Firewall -Apply` |
-| keep scored services up | `.\windows\watchdog.ps1 -Config CONFIG -Install` |
+| arm canaries and the recovery chain | `.\windows\arm.ps1 -Config CONFIG -Apply` |
+| basic Splunk and firewall help | [`splunk-and-firewalls.md`](splunk-and-firewalls.md) |
 | know what a finding means | [`windows-cards.md`](windows-cards.md) |
 | the Linux box | [`linux-first-15-minutes.md`](linux-first-15-minutes.md) |
 
@@ -480,10 +523,11 @@ that does less.
   measured, that is ~14,000 files and five minutes a pass, and Authenticode
   already answers "is this file explained?" without a baseline. A file nothing
   wires to run is not covered.
-- **No tamper-proof watchdog.** On Linux, `guardian.sh` keeps the watchdog
-  alive when somebody tries to kill it. On Windows the watchdog is an ordinary
-  scheduled task, and an administrator can simply remove it. Tripwires exist
-  now (`canary.ps1`); guardian does not.
+- **No tamper-proof watchdog.** Windows has a three-task chain: Watchdog keeps
+  scored services running, Guardian restores Watchdog, and Continuity-Audit
+  reports a missing or redirected Guardian. That catches ordinary file or task
+  tampering while you are busy. An Administrator can still remove all three
+  tasks and both private copies, so this is recovery and evidence—not magic.
 - **Autostart coverage is deliberately bounded, not “Autoruns.”** The fallback
   covers scheduled tasks; Run/RunOnce, 32-bit, and policy Run keys; all local
   Startup folders; Winlogon; AppInit DLLs; IFEO debuggers; Active Setup; and

@@ -50,6 +50,7 @@ umask 077
 config=''
 mode=check
 apply=0
+dry_run_explicit=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
@@ -59,7 +60,7 @@ while [ "$#" -gt 0 ]; do
     --status) mode=status; shift ;;
     --uninstall) mode=uninstall; shift ;;
     --apply) apply=1; shift ;;
-    --dry-run) apply=0; shift ;;
+    --dry-run) apply=0; dry_run_explicit=1; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--check|--repair|--capture|--status|--uninstall] [--apply|--dry-run]\n' "$0"
       printf '\n'
@@ -71,7 +72,7 @@ while [ "$#" -gt 0 ]; do
       printf '  --apply      install them.\n'
       printf '  --repair     idempotent, and silent when nothing is wrong, which is why\n'
       printf '               guardian can run it every tick.\n'
-      printf '  --capture    a log baseline, so "they wiped the logs" is provable later.\n'
+      printf '  --capture    write a log-evidence baseline; add --dry-run to preview only.\n'
       printf '  --status     what is installed now.\n'
       printf '  --uninstall  remove the rules this tool added.\n'
       printf '\n'
@@ -97,6 +98,11 @@ printf -v qself '%q' "$SCRIPT_DIR/audit.sh"
 # verb on the command line. Spelling it out keeps --apply from ever silently
 # meaning something different depending on argument order.
 if [ "$mode" = check ] && [ "$apply" -eq 1 ]; then mode=install; fi
+# Capture writes only our evidence directory; it never changes a service, a
+# rule, or a log.  It inherited the generic --apply gate by accident even
+# though the runbooks correctly teach the memorable `audit.sh --capture`.
+# Keep --dry-run as the explicit preview.
+if [ "$mode" = capture ] && [ "$dry_run_explicit" -eq 0 ]; then apply=1; fi
 CCDC_DRY_RUN=$((1 - apply))
 export CCDC_DRY_RUN
 
@@ -104,7 +110,7 @@ state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
 ccdc_validate_state_dir "$state_dir" "CCDC_EVIDENCE_DIR"
 case "$state_dir" in */) state_dir=${state_dir%/} ;; esac
 case "$mode" in
-  install|repair|uninstall)
+  install|repair|uninstall|capture)
     [ "$apply" -eq 0 ] || ccdc_require_root
     ;;
 esac
@@ -234,7 +240,11 @@ generate_rules() {
   local path skipped=0
   printf '# Managed by ccdc audit.sh. Do not edit by hand: --repair rewrites it\n'
   printf '# from the config, and an edit here is reported as tampering.\n'
-  printf '# Regenerate with: sudo ./linux/audit.sh --config '"$qconfig"' --apply\n'
+  # This file is also rendered by Guardian's private repair copy.  Embedding
+  # either copy's script or config path here changes the file bytes while the
+  # effective audit policy is identical, which used to create a false tamper
+  # finding immediately after arming.
+  printf '# Regenerate with your kit audit.sh and its current config: --apply\n'
   printf '#\n'
   printf '# Deliberately absent: -e 2 (immutable). It would block our own repair\n'
   printf '# until a reboot, and a reboot is scored downtime.\n\n'

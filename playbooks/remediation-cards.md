@@ -1094,7 +1094,7 @@ Harden **before** you bless. Cut first, then freeze what is left:
 
 ```bash
 sudo ./linux/harden.sh   --config /tmp/ccdc-linux.env --cut all-safe --apply
-sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --stable-for 20 --apply
 ```
 
 Blessing first and hardening after makes every cut you make read as drift for
@@ -1185,7 +1185,7 @@ mechanism. Work CARD 3, CARD 4 and CARD 11 until nothing rebuilds it.
 Say so once and stop being asked:
 
 ```bash
-sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --apply
+sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --stable-for 20 --apply
 ```
 
 Blessing records it as a standing exception. Do that only after you have

@@ -22,6 +22,8 @@ set -u
 #
 #   sudo ./baseline.sh --config FILE              look at everything (read-only)
 #   sudo ./baseline.sh --config FILE --bless      freeze what is here as known-good
+#   sudo ./baseline.sh --config FILE --bless --stable-for 20 --apply
+#                                                 refuse to bless a box that changes
 #   sudo ./baseline.sh --config FILE --status     drift since the blessing
 #   sudo ./baseline.sh --config FILE --allow WHAT --reason TEXT --apply
 #                                                 record a standing exception
@@ -46,11 +48,13 @@ force_key=0
 apply=0
 show_all=0
 fast=0
+stable_for=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
     --bless)  mode='bless'; shift ;;
+    --stable-for) stable_for=${2:?missing seconds after --stable-for}; shift 2 ;;
     --status) mode='status'; shift ;;
     --review) mode='review'; shift ;;
     --mechanisms) mode='mechanisms'; shift ;;
@@ -66,10 +70,12 @@ while [ "$#" -gt 0 ]; do
     --apply)  apply=1; CCDC_DRY_RUN=0; shift ;;
     -h|--help)
       printf 'usage: %s --config FILE [--bless|--status|--review|--inventory|--approve N|--allow WHAT --reason TEXT]\n' "$0"
-      printf '       [--all] [--fast] [--apply]\n'
+      printf '       [--stable-for SECONDS] [--all] [--fast] [--apply]\n'
       printf '\n'
       printf '  (no mode)   look at everything; read-only; reports what nothing explains\n'
       printf '  --bless     freeze the current box as the known-good baseline\n'
+      printf '  --stable-for SECONDS  with --bless, inventory twice and refuse to bless\n'
+      printf '              if anything changes during this interval (for example: 20)\n'
       printf '  --status    what has drifted since the blessing\n'
       printf '  --review    one numbered, read-only screen: unexplained AND unnecessary\n'
       printf '  --mechanisms print the known root-execution mechanism inventory; used by\n'
@@ -97,6 +103,12 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$config" ] || ccdc_die "--config is required"
+[ "$stable_for" = 0 ] || [ "$mode" = bless ] \
+  || ccdc_die "--stable-for is only valid with --bless"
+case "$stable_for" in
+  ''|*[!0-9]*) ccdc_die "--stable-for must be a whole number of seconds" ;;
+esac
+[ "$stable_for" -le 300 ] || ccdc_die "--stable-for is limited to 300 seconds; bless in a quiet window instead"
 ccdc_load_config "$config"
 
 printf -v qconfig '%q' "$config"
@@ -627,7 +639,11 @@ inventory_processes() {
 }
 
 inventory() {
-  { inventory_files; inventory_semantic; inventory_processes; } | LC_ALL=C sort -u
+  # A modified file under (say) /etc/profile.d is both an execution trigger and
+  # a changed package conffile. Those are two reasons for ONE finding, not two
+  # findings. Keep one deterministic record per kind/path; the content detail
+  # remains part of the blessed record, so later edits still drift.
+  { inventory_files; inventory_semantic; inventory_processes; } | LC_ALL=C sort -t'|' -k1,2 -u
 }
 
 # --- the explained test ------------------------------------------------------
@@ -2208,12 +2224,32 @@ case "$mode" in
     fi
     mkdir -p "$baseline_dir" || ccdc_die "cannot create $baseline_dir"
     chmod 700 "$baseline_dir"
+    candidate="$blessed.candidate.$$"
+    verify="$blessed.verify.$$"
+    trap 'rm -f -- "$candidate" "$verify"' EXIT
+    inventory >"$candidate" || ccdc_die "enumeration failed; baseline not written"
+    if [ "$stable_for" -gt 0 ]; then
+      printf 'first inventory captured; waiting %ss for a quiet blessing window...\n' "$stable_for"
+      sleep "$stable_for"
+      inventory >"$verify" || ccdc_die "second enumeration failed; baseline not written"
+      if ! cmp -s -- "$candidate" "$verify"; then
+        stamp=$(ccdc_now)
+        cp -- "$candidate" "$baseline_dir/bless-changed-$stamp.before" || true
+        cp -- "$verify" "$baseline_dir/bless-changed-$stamp.after" || true
+        printf 'REFUSED: the inventory changed during the %ss blessing window. Nothing was blessed.\n' "$stable_for" >&2
+        printf '  evidence: %s/bless-changed-%s.{before,after}\n' "$baseline_dir" "$stamp" >&2
+        printf '  review:   diff -u %q %q\n' "$baseline_dir/bless-changed-$stamp.before" "$baseline_dir/bless-changed-$stamp.after" >&2
+        exit 2
+      fi
+      printf 'inventory stayed unchanged for %ss; blessing that reviewed state.\n' "$stable_for"
+    fi
     if [ -e "$blessed" ]; then
       cp -p "$blessed" "$blessed.$(ccdc_now).bak" \
         || ccdc_die "cannot keep a copy of the previous baseline"
     fi
-    inventory >"$blessed.tmp" || ccdc_die "enumeration failed; baseline not written"
-    mv "$blessed.tmp" "$blessed"
+    mv "$candidate" "$blessed"
+    rm -f -- "$verify"
+    trap - EXIT
     chmod 600 "$blessed"
     ccdc_append_log "$baseline_dir/bless.log" \
       "BLESS items=$(grep -c . "$blessed") by=$(id -un)"
