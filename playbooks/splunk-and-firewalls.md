@@ -98,10 +98,14 @@ that smaller time range for the actual events.
 - When you find something important, write down the event time, host, user,
   source address, query, and the raw-event text or screenshot. That is the
   evidence for the inject, not just a hunch.
-- Prove forwarding once per box. On Linux, the kit's
-  `./linux/splunk.sh --config "$CFG" --test-event --apply` writes a tagged test
-  event and prints the search for finding that exact token. Finding the token
-  in Splunk proves delivery; a green local service alone does not.
+- Prove forwarding once per box. On Linux,
+  `sudo ./linux/splunk.sh --config "$CFG" --test-event --apply`; on Windows,
+  `.\windows\splunk.ps1 -Config CONFIG -TestEvent -Apply`. Each writes a
+  tagged test event and prints the search for that exact token. Finding the
+  token in Splunk proves delivery; a green local service alone does not.
+- Building the indexer and forwarders yourself? Follow
+  [`splunk-setup.md`](splunk-setup.md): every command in it was run in the lab,
+  with the traps that silently ship nothing.
 
 Splunk's own documentation covers indexed-field searches and time bounds,
 fields such as `host`, `source`, and `sourcetype`, and the basic SPL commands:

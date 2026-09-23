@@ -5,13 +5,13 @@ two questions: **is the scored service up**, and **can I prove what changed**.
 
 - **Linux** — 26 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
   and a supervised approval queue that applies fixes only when you say so.
-- **Windows** — 16 tools, 58 checks: triage, a checklist-driven harden, account
+- **Windows** — 17 tools, 58 checks: triage, a checklist-driven harden, account
   and password handling, a scored-service/canary watchdog, the same approval queue,
   configuration drift against a frozen baseline, and tripwires that report who
   read them.
-- **Playbooks** — 14 documents. Cards you can follow at 2am with a red team on
+- **Playbooks** — 15 documents. Cards you can follow at 2am with a red team on
   the box.
-- **Tested** — 530 assertions across 20 suites, including fixtures that plant
+- **Tested** — 548 assertions across 20 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.
 
 Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
@@ -266,6 +266,9 @@ windows/                  PowerShell tools for Windows boxes. Target is Windows
                           and repair through harden.ps1's existing Logging step
   evidence.ps1            bundles key defense records and verifies a copy to a
                           user-supplied UNC share; never chooses a destination
+  splunk.ps1              are the event logs actually reaching Splunk? Reads
+                          effective config via btool, checks the live indexer
+                          connection, and -TestEvent -Apply proves delivery
   timeline.ps1            read-only, time-bounded incident timeline across
                           Security, System, PowerShell, Task Scheduler, and Defender
   surface.ps1             read-only listener/service/selected-autostart map;
@@ -278,8 +281,8 @@ lab/                      building the practice targets:
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (530 assertions, non-root;
-                          440 without the Windows suite, which needs pwsh -
+  self-test.sh            runs every suite below (548 assertions, non-root;
+                          448 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag

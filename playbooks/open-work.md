@@ -203,7 +203,7 @@ share only (2026-09-22).
       reports WHO read a decoy. Hashing cannot answer that question.
 - [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 89 assertions against planted fixtures
+- [x] `redteam/windows-self-test.ps1` — 99 assertions against planted fixtures
       and the read-only Windows tools' static safety contracts.
 - [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
       survived rather than assuming (Defender eats some fixtures in real time).
@@ -231,6 +231,26 @@ share only (2026-09-22).
       Repair delegates to harden.ps1's existing Logging step. Proven on
       `ccdc-win` 2026-09-22: capture's five hashes verified, Logging repair
       enabled the required policy, and the final audit check was clean.
+- [x] `splunk.ps1` — is this box's event log actually reaching Splunk? Reads
+      effective config via `splunk btool` (falls back to precedence-ordered
+      files, and says so), checks the live connection, the four required logs
+      and their index, and `-TestEvent -Apply` writes one tagged Application
+      event. Proven 2026-09-22 against a real Splunk 10.4.0 indexer on
+      `ubuntu-target`: no-forwarder → finding; fresh MSI install → caught the
+      missing PowerShell/Operational input; its printed fix pasted verbatim
+      worked; tokens found on the indexer in `main`, then `windows` after
+      re-routing. `playbooks/splunk-setup.md` is the proven build order.
+      **Linux `splunk.sh` was run against a real forwarder the same day and
+      was wrong in five ways**, all fixed and regression-tested: it let an app
+      default outvote system/local; it called `$SPLUNK_HOME/...` inputs
+      missing (6 false findings); it reported `auth.log` healthy while
+      `splunkfwd` could not read it (the training's own steps produce this);
+      its boot-start fix named a unit that does not exist; and without sudo it
+      reported "no output target" from 0600 configs it silently skipped (now
+      exit 4). Its repair line also once restarted the forwarder as root —
+      it now prints `sudo -u splunkfwd` and reports a root forwarder.
+      Lab state: indexer + forwarder remain on `ubuntu-target`; snapshot
+      `pre-splunk-lab` is the box before any of it.
 - [x] `evidence.ps1` — explicit UNC evidence exporter. It now
       includes the newest built-in recon and timeline evidence cases (up to
       50 MB each) alongside the config, baseline, manifests, and chain logs.
@@ -333,8 +353,8 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 530 assertions
-bash redteam/self-test.sh                             # 440, skips the Windows suite
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 548 assertions
+bash redteam/self-test.sh                             # 448, skips the Windows suite
 ```
 
 The suite asserts its own assertion count against the README, so adding one

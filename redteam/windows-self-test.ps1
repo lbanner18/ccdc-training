@@ -835,6 +835,83 @@ if ($watchdogTxt -match 'Stop-ScheduledTask[\s\S]*Unregister-ScheduledTask') {
     nope 'watchdog.ps1 can leave a running loop behind after task removal'
 }
 
+# =============================================================================
+# splunk.ps1 - against a planted forwarder install. Every plant is a
+# precedence question, because that is where a config dump lies to you.
+# =============================================================================
+Write-Host ''
+Write-Host '== windows splunk forwarding, against a planted forwarder =='
+$uf = Join-Path $work 'SplunkUniversalForwarder'
+function Write-Fixture { param([string]$Rel, [string[]]$Lines)
+    $p = $uf
+    foreach ($seg in ($Rel -split '/')) { $p = Join-Path $p $seg }
+    [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $p))
+    [System.IO.File]::WriteAllLines($p, $Lines)
+}
+# App default ships every log disabled; the app's local turns them on.
+Write-Fixture 'etc/apps/SplunkUniversalForwarder/default/inputs.conf' @(
+    '[WinEventLog://Security]', 'disabled = 1', '[WinEventLog://System]', 'disabled = 1',
+    '[WinEventLog://Application]', 'disabled = 1')
+Write-Fixture 'etc/apps/SplunkUniversalForwarder/local/inputs.conf' @(
+    '[WinEventLog://Security]', 'disabled = 0', 'index = windows',
+    '[WinEventLog://System]', 'disabled = 0', 'index = windows',
+    '[WinEventLog://Application]', 'disabled = 0', 'index = windows')
+# PLANT: system/local outranks every app, and quietly switches System off.
+Write-Fixture 'etc/system/local/inputs.conf' @('[WinEventLog://System]', 'disabled = 1')
+# PLANT: outputs.conf exists and names no server. The packet does name one.
+Write-Fixture 'etc/system/local/outputs.conf' @('[tcpout]', 'defaultGroup = default-autolb-group')
+$splunkCfg = Join-Path $work 'splunk.env'
+@"
+CCDC_BOX_NAME="win-target"
+CCDC_SPLUNK_HOME="$uf"
+CCDC_SPLUNK_INDEXERS="127.0.0.1:1"
+"@ | Set-Content -LiteralPath $splunkCfg -Encoding UTF8
+$splunkTool = Join-Path $root 'windows\splunk.ps1'
+$sOut = (& $splunkTool -Config $splunkCfg *>&1 | Out-String)
+$sExit = $LASTEXITCODE
+
+if ($sOut -match 'ok\s+Security is collected \(index=windows\)') {
+    ok 'splunk.ps1: an app''s local outranks its default (Security is collected)'
+} else { nope 'splunk.ps1 read the shipped default over the app''s local setting for Security' }
+if ($sOut -match 'System is configured as an input but DISABLED') {
+    ok 'splunk.ps1: system/local outranks every app (System reported disabled)'
+} else { nope 'splunk.ps1 missed a system/local override that switches System off' }
+if ($sOut -match 'Microsoft-Windows-PowerShell/Operational is NOT collected' -and
+    $sOut -match "\[WinEventLog://Microsoft-Windows-PowerShell/Operational\]', 'disabled = 0', 'index = windows'") {
+    ok 'splunk.ps1: the fix for a missing log reuses the index the working logs already use'
+} else { nope 'splunk.ps1 missed PowerShell/Operational, or its fix aims at an index nothing proves exists' }
+if ($sOut -match 'NO output target' -and $sOut -match 'add forward-server 127\.0\.0\.1:1') {
+    ok 'splunk.ps1: a packet indexer does not hide an empty outputs.conf'
+} else { nope 'splunk.ps1 let the packet''s indexer stand in for the forwarder''s own missing output' }
+if ($sOut -match 'indexer 127\.0\.0\.1:1 is NOT REACHABLE') {
+    ok 'splunk.ps1: measures the packet''s indexer and reports it unreachable'
+} else { nope 'splunk.ps1 did not test reachability of the packet''s indexer' }
+if ($sOut -match 'btool did not run') {
+    ok 'splunk.ps1 says when it fell back from btool to reading files'
+} else { nope 'splunk.ps1 used its own precedence reading without saying so' }
+if ($sExit -eq 3) { ok 'splunk.ps1 exits 3 on findings' } else { nope ("splunk.ps1 exited {0} on findings, not 3" -f $sExit) }
+
+$sInv = (& $splunkTool -Config $splunkCfg -Inventory *>&1 | Out-String)
+if ($sInv -match '\| System \| \*\*NO - input disabled\*\* \|' -and $sInv -match '\| Security \| yes \| windows \|') {
+    ok 'splunk.ps1 -Inventory marks a disabled input NO, not yes'
+} else { nope 'splunk.ps1 -Inventory reports a disabled input as forwarded' }
+
+$tokenPath = Join-Path (Join-Path $work 'state') 'splunk.test-token'
+$sDry = (& $splunkTool -Config $splunkCfg -TestEvent *>&1 | Out-String)
+if ($sDry -match 'DRY RUN' -and -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $tokenPath)) {
+    ok 'splunk.ps1 -TestEvent without -Apply writes nothing'
+} else { nope 'splunk.ps1 -TestEvent wrote without -Apply' }
+
+$goneCfg = Join-Path $work 'splunk-gone.env'
+@"
+CCDC_BOX_NAME="win-target"
+CCDC_SPLUNK_HOME="$(Join-Path $work 'no-such-forwarder')"
+"@ | Set-Content -LiteralPath $goneCfg -Encoding UTF8
+$sGone = (& $splunkTool -Config $goneCfg *>&1 | Out-String)
+if ($sGone -match 'CCDC_SPLUNK_HOME is set to a path that does not exist' -and $sGone -match 'NOTHING on this box forwards') {
+    ok 'splunk.ps1: a mistyped home is a finding, and no forwarder is never "just not running"'
+} else { nope 'splunk.ps1 trusted a configured home that does not exist' }
+
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host ("windows self-test: {0} passed, {1} failed" -f $pass, $fail)

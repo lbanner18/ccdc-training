@@ -135,13 +135,20 @@ fi
 # needs to be: for a health check, what an operator wants is every place a value
 # is set and which file it came from, because the confusing failures are the
 # ones where two files disagree.
+#
+# Files are listed in Splunk's global-context precedence, highest first:
+# system/local, every app's local, every app's default, system/default. A
+# reader that needs one value takes the FIRST it sees. An earlier order put
+# system/default second and let the last match win, so a shipped
+# "disabled = 1" in an app's default outvoted the operator's system/local
+# "disabled = 0" and a live input was reported dead.
 conf_files() {
   local name=$1
   [ -n "$splunk_home" ] || return 0
   ls "$splunk_home/etc/system/local/$name" 2>/dev/null
+  LC_ALL=C ls -d "$splunk_home"/etc/apps/*/local/"$name" 2>/dev/null
+  LC_ALL=C ls -d "$splunk_home"/etc/apps/*/default/"$name" 2>/dev/null
   ls "$splunk_home/etc/system/default/$name" 2>/dev/null
-  ls "$splunk_home"/etc/apps/*/local/"$name" 2>/dev/null
-  ls "$splunk_home"/etc/apps/*/default/"$name" 2>/dev/null
 }
 
 # Print "file|stanza|key|value" for every setting in the named conf.
@@ -172,9 +179,9 @@ $(conf_files "$name")
 EOF
 }
 
-# Indexers this box is configured to send to, plus any the operator declared.
-configured_targets() {
-  local server target
+# Indexers the forwarder itself is configured to send to.
+output_targets() {
+  local target
   while IFS='|' read -r _ _ key value; do
     [ "$key" = server ] || continue
     printf '%s\n' "$value" | tr ',' '\n' | while IFS= read -r target; do
@@ -184,6 +191,13 @@ configured_targets() {
   done <<EOF
 $(conf_settings outputs.conf)
 EOF
+}
+
+# Plus any the packet declared. Those are measured too, but never stand in for
+# the forwarder's own outputs (see do_check).
+configured_targets() {
+  local server
+  output_targets
   for server in ${CCDC_SPLUNK_INDEXERS:-}; do printf '%s\n' "$server"; done
 }
 
@@ -193,9 +207,15 @@ monitored_paths() {
   # otherwise be counted three times - and "9 monitored inputs" when there are
   # three is the kind of number an operator acts on without re-checking.
   {
+    # Splunk's own defaults name "$SPLUNK_HOME/var/log/splunk". Read literally,
+    # six of those were reported missing on a healthy forwarder.
+    local p
     while IFS='|' read -r _ stanza _ _; do
       case "$stanza" in
-        monitor://*) printf '%s\n' "${stanza#monitor://}" ;;
+        monitor://*)
+          p=${stanza#monitor://}
+          case "$p" in '$SPLUNK_HOME'*) p="$splunk_home${p#\$SPLUNK_HOME}" ;; esac
+          printf '%s\n' "$p" ;;
       esac
     done <<EOF
 $(conf_settings inputs.conf)
@@ -204,25 +224,86 @@ EOF
 }
 
 stanza_disabled() {
-  local want=$1 stanza key value result=0
+  # First match wins: conf_files lists the highest-precedence file first.
+  local want=$1 stanza key value
   while IFS='|' read -r _ stanza key value; do
     [ "$stanza" = "$want" ] || continue
     [ "$key" = disabled ] || continue
-    case "$value" in 1|true|True|TRUE) result=1 ;; *) result=0 ;; esac
+    case "$value" in 1|true|True|TRUE) return 0 ;; *) return 1 ;; esac
   done <<EOF
 $(conf_settings inputs.conf)
 EOF
-  [ "$result" -eq 1 ]
+  return 1
+}
+
+# splunkd processes belonging to THIS install. An indexer and a forwarder on
+# one box are both "splunkd" (the lab box ran both, and the forwarder was
+# called running while only the indexer was). /proc/PID/exe is readable only
+# as root or the owner; where it cannot be read the process is counted, which
+# is the old behaviour, rather than calling a live forwarder dead.
+splunkd_pids() {
+  local pid exe
+  ccdc_have pgrep || return 0
+  for pid in $(pgrep -x splunkd 2>/dev/null); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+    [ -z "$exe" ] || [ "$exe" = "$splunk_home/bin/splunkd" ] || continue
+    printf '%s\n' "$pid"
+  done
 }
 
 splunkd_running() {
-  if ccdc_have pgrep && pgrep -x splunkd >/dev/null 2>&1; then return 0; fi
+  if [ -n "$(splunkd_pids)" ]; then return 0; fi
   if ccdc_have systemctl; then
     systemctl is-active --quiet SplunkForwarder 2>/dev/null && return 0
     systemctl is-active --quiet splunk 2>/dev/null && return 0
     systemctl is-active --quiet Splunkd 2>/dev/null && return 0
   fi
   return 1
+}
+
+# The user THIS install's splunkd runs as. Matched on the executable, not the
+# name: an indexer and a forwarder on one box are both "splunkd".
+splunkd_user() {
+  # By uid: `ps -o user=` can truncate a nine-character name like splunkfwd to
+  # "splunkf+", and runuser would then test a user that does not exist.
+  local pid exe uid
+  ccdc_have pgrep || return 0
+  for pid in $(pgrep -x splunkd 2>/dev/null); do
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null)
+    [ "$exe" = "$splunk_home/bin/splunkd" ] || continue
+    uid=$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')
+    [ -n "$uid" ] && id -nu "$uid" 2>/dev/null
+    return 0
+  done
+}
+
+# The account this install is MEANT to run as: the package's dedicated user.
+# Not SPLUNK_OS_USER alone - one `splunk enable boot-start -user root` rewrites
+# that to root (it happened on the lab box), and a check that trusts it would
+# then call a root forwarder correct.
+intended_user() {
+  local os_user
+  case "$splunk_home" in
+    *splunkforwarder*) id splunkfwd >/dev/null 2>&1 && { printf 'splunkfwd\n'; return 0; } ;;
+  esac
+  id splunk >/dev/null 2>&1 && { printf 'splunk\n'; return 0; }
+  os_user=$(sed -n 's/^[[:space:]]*SPLUNK_OS_USER[[:space:]]*=[[:space:]]*//p' \
+    "$splunk_home/etc/splunk-launch.conf" 2>/dev/null | tail -1)
+  [ -n "$os_user" ] && [ "$os_user" != root ] && printf '%s\n' "$os_user"
+  return 0
+}
+
+# How to restart without changing who it runs as. A bare `sudo splunk restart`
+# on an install with no systemd unit brings splunkd back as ROOT, which hides
+# every permission problem and hands a log reader root. That too happened.
+restart_line() {
+  local u
+  if ccdc_have systemctl && systemctl cat SplunkForwarder >/dev/null 2>&1; then
+    printf 'sudo systemctl restart SplunkForwarder\n'
+  else
+    u=$(intended_user)
+    printf 'sudo -u %s %s/bin/splunk restart\n' "${u:-splunkfwd}" "$splunk_home"
+  fi
 }
 
 # A TCP connect, with a timeout, using whatever this box has. No payload is
@@ -323,6 +404,33 @@ do_check() {
 
   okline "forwarder found at $splunk_home"
 
+  # Installed properly, the forwarder's tree belongs to splunkfwd. Read as
+  # anyone else, every .conf is invisible and the report fills with confident
+  # nonsense ("sending to nowhere", its own splunkd.log "missing") - seen on the
+  # lab box. Refuse instead: a check that could not look is not a finding.
+  # On the lab box the directories were world-readable and the .conf files in
+  # them 0600, and conf_settings skips a file it cannot read - so the check
+  # went on to report "no output target" about a forwarder that had one.
+  local d unreadable=''
+  for d in "$splunk_home" "$splunk_home/etc" "$splunk_home/etc/system/local"; do
+    [ -e "$d" ] || continue
+    if [ ! -r "$d" ] || [ ! -x "$d" ]; then unreadable=$d; break; fi
+  done
+  if [ -z "$unreadable" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      [ -r "$d" ] || { unreadable=$d; break; }
+    done <<EOF
+$(conf_files inputs.conf; conf_files outputs.conf)
+EOF
+  fi
+  if [ -n "$unreadable" ]; then
+    printf '\n  CANNOT CHECK: %s is not readable as %s.\n' "$unreadable" "$(id -un)"
+    printf '  Everything below it would be reported from half a config. Re-run with sudo:\n'
+    printf '      sudo %s --config %s\n' "$qself" "$qconfig"
+    exit 4
+  fi
+
   if splunkd_running; then
     okline "splunkd is running"
   else
@@ -332,13 +440,41 @@ do_check() {
     fixline "sudo systemctl enable --now SplunkForwarder 2>/dev/null"
   fi
 
+  # Running as root when the package made a dedicated account: somebody
+  # started it with a bare sudo, or boot-start was enabled with -user root.
+  local want_user now_user
+  want_user=$(intended_user)
+  now_user=$(splunkd_user)
+  if [ -n "$want_user" ] && [ "$now_user" = root ]; then
+    finding "splunkd is running as ROOT; this install's account is $want_user"
+    detail "a root forwarder hides every permission problem, and parses attacker-writable logs as root"
+    fixhdr
+    fixline "sudo systemctl stop SplunkForwarder 2>/dev/null; sudo $splunk_home/bin/splunk stop"
+    fixline "sudo $splunk_home/bin/splunk disable boot-start"
+    fixline "sudo chown -R $want_user:$want_user $splunk_home"
+    fixline "sudo $splunk_home/bin/splunk enable boot-start -user $want_user -systemd-managed 1"
+    fixline "sudo systemctl start SplunkForwarder"
+  fi
+
   if ccdc_have systemctl; then
     if systemctl is-enabled --quiet SplunkForwarder 2>/dev/null \
       || systemctl is-enabled --quiet splunk 2>/dev/null; then
       okline "the forwarder starts at boot"
     else
       finding "the forwarder is not enabled at boot - a reboot silences it"
-      fixline "sudo systemctl enable SplunkForwarder"
+      # Installed the way the training does it (dpkg + `splunk start`), there
+      # is no unit at all, and `systemctl enable SplunkForwarder` fails with
+      # "Unit file does not exist". Proven on the lab box.
+      if systemctl cat SplunkForwarder >/dev/null 2>&1; then
+        fixline "sudo systemctl enable SplunkForwarder"
+      else
+        local boot_user
+        boot_user=$(intended_user)
+        [ -n "$boot_user" ] || boot_user=splunkfwd
+        fixline "sudo -u $boot_user $splunk_home/bin/splunk stop"
+        fixline "sudo $splunk_home/bin/splunk enable boot-start -user $boot_user -systemd-managed 1"
+        fixline "sudo systemctl start SplunkForwarder"
+      fi
     fi
   fi
 
@@ -368,11 +504,16 @@ do_check() {
 $(configured_targets | sort -u)
 EOF
 
-  if [ "$configured" -eq 0 ]; then
+  # Counted from outputs.conf alone. The packet's indexers were measured above,
+  # but a packet entry with an empty outputs.conf is still a forwarder sending
+  # nowhere, and hiding that behind the packet's list is the quiet failure.
+  if [ -z "$(output_targets)" ]; then
+    local suggest=INDEXER:9997
+    for target in ${CCDC_SPLUNK_INDEXERS:-}; do suggest=$target; break; done
     finding "the forwarder has NO output target configured"
     detail "it is running, and it is sending to nowhere"
     fixline "sudo cat $splunk_home/etc/system/local/outputs.conf"
-    fixline "sudo $splunk_home/bin/splunk add forward-server INDEXER:9997"
+    fixline "sudo $splunk_home/bin/splunk add forward-server $suggest"
   fi
 
   # --- what is it watching ---
@@ -419,6 +560,40 @@ EOF
 $(monitored_paths)
 EOF
 
+  # A path that exists and that the forwarder's user cannot read. Found on the
+  # lab box: the stock forwarder runs as splunkfwd, /var/log/auth.log is
+  # 0640 root:adm (syslog:adm on Ubuntu), and `splunk add monitor` accepts it
+  # anyway. Every config reader calls that input healthy; nothing arrives.
+  local run_user
+  run_user=$(splunkd_user)
+  if [ -n "$run_user" ] && [ "$run_user" != root ]; then
+    if [ "$(id -u)" -eq 0 ] && ccdc_have runuser; then
+      while IFS= read -r path; do
+        [ -n "$path" ] || continue
+        case "$path" in *'*'*|"$splunk_home"/*) continue ;; esac
+        [ -e "$path" ] || continue
+        runuser -u "$run_user" -- test -r "$path" 2>/dev/null && continue
+        finding "$path is monitored, and $run_user (the forwarder's user) CANNOT READ it"
+        detail "splunk add monitor accepted it; nothing from it is being shipped"
+        detail "$(stat -c '%A %U:%G' "$path" 2>/dev/null) $path"
+        local grp
+        grp=$(stat -c '%G' "$path" 2>/dev/null)
+        fixhdr
+        # Never hand the forwarder the root group to read one file.
+        case "$grp" in
+          root|'') fixline "sudo setfacl -m u:$run_user:r $path"
+                   detail "an ACL can be lost when the log rotates; re-check after rotation" ;;
+          *)       fixline "sudo usermod -aG $grp $run_user" ;;
+        esac
+        fixline "$(restart_line)"
+      done <<EOF
+$(monitored_paths)
+EOF
+    else
+      detail "splunkd runs as $run_user; re-run with sudo to check it can read each monitored file"
+    fi
+  fi
+
   # --- is it keeping up ---
   local splunkd_log="$splunk_home/var/log/splunk/splunkd.log"
   if [ -r "$splunkd_log" ]; then
@@ -432,6 +607,24 @@ EOF
     else
       okline "no blocked-queue messages in splunkd.log"
     fi
+    # splunkd's own record of an input it could not open. This is the only
+    # place that failure is written down, and it needs no root to read here.
+    # Only the LATEST word on each path counts: every (re)start logs "Adding
+    # watch on path: X." and a still-broken input follows it with "Unable to
+    # open 'X'". Counting every old failure kept reporting auth.log after the
+    # lab box's permissions were fixed and events were arriving.
+    local unopened
+    unopened=$(tail -n 5000 "$splunkd_log" 2>/dev/null | awk '
+      /Adding watch on path: / { p = $0; sub(/.*Adding watch on path: /, "", p); sub(/\.$/, "", p); st[p] = "ok" }
+      /Unable to open \047/    { p = $0; sub(/.*Unable to open \047/, "", p); sub(/\047.*/, "", p); st[p] = "bad" }
+      END { for (p in st) if (st[p] == "bad") print p }' | sort)
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      finding "splunkd cannot open $path - that input ships nothing"
+      detail "usually the forwarder's user lacks read permission; re-run with sudo for the fix"
+    done <<EOF
+$unopened
+EOF
     local recent_errors
     recent_errors=$(grep -c 'ERROR' "$splunkd_log" 2>/dev/null || true)
     [ -n "$recent_errors" ] || recent_errors=0

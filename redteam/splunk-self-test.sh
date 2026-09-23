@@ -156,5 +156,91 @@ else
   ok 'a nonexistent CCDC_SPLUNK_HOME is not reported as an install'
 fi
 
+# --- precedence: a shipped default must not outvote system/local ---
+# Splunk resolves system/local > apps/*/local > apps/*/default > system/default.
+# An app default that ships an input disabled is overridden by the operator's
+# local "disabled = 0"; reading the files in the wrong order reports a live
+# input as dead, and the fix it prints is a no-op the operator then distrusts.
+mkdir -p "$home/etc/apps/extra/default"
+cat >"$home/etc/apps/extra/default/inputs.conf" <<CONF
+[monitor://$test_root/logs/app.log]
+disabled = 1
+CONF
+"$ROOT/linux/splunk.sh" --config "$test_root/test.env" >"$test_root/prec.out" 2>&1 || true
+hasnt "app.log is configured as an input but DISABLED" "$test_root/prec.out" \
+  'an app default does not outvote the system/local setting'
+has 'auth.log is configured as an input but DISABLED' "$test_root/prec.out" \
+  'while a system/local disable is still reported'
+rm -rf "$home/etc/apps/extra/default"
+
+# --- found on a real forwarder, 2026-09-22 ---
+# Splunk's own default inputs name paths as "$SPLUNK_HOME/var/log/splunk". Read
+# literally, six of those were reported missing on a healthy install: noise
+# that teaches the operator to skim past the finding list.
+mkdir -p "$home/etc/apps/SplunkUniversalForwarder/default" "$home/var/log/introspection"
+cat >"$home/etc/apps/SplunkUniversalForwarder/default/inputs.conf" <<'CONF'
+[monitor://$SPLUNK_HOME/var/log/splunk]
+index = _internal
+
+[monitor://$SPLUNK_HOME/var/log/introspection]
+index = _introspection
+CONF
+# And the real failure on that box: "splunk add monitor /var/log/auth.log"
+# succeeds for a splunkfwd user who cannot read a 0640 root:adm file. The only
+# record is splunkd.log; the input looks configured and ships nothing.
+printf '%s\n' \
+  "09-17-2026 03:52:04.624 +0000 WARN  FileClassifierManager [1 tailreader0] - Unable to open '$test_root/logs/auth.log'." \
+  "09-17-2026 03:52:04.624 +0000 WARN  FileClassifierManager [1 tailreader0] - The file '$test_root/logs/auth.log' is invalid. Reason: cannot_open." \
+  >>"$home/var/log/splunk/splunkd.log"
+"$ROOT/linux/splunk.sh" --config "$test_root/test.env" >"$test_root/real.out" 2>&1 || true
+hasnt 'does not exist: \$SPLUNK_HOME' "$test_root/real.out" \
+  '$SPLUNK_HOME in a monitor stanza is expanded, not reported missing'
+has "splunkd cannot open $test_root/logs/auth.log" "$test_root/real.out" \
+  'a monitored file the forwarder cannot open is reported from splunkd.log'
+# After the permission fix and a restart, splunkd logs a fresh watch and no new
+# failure. The old failure lines are still in the file and must not count.
+printf '%s\n' \
+  "09-17-2026 03:55:49.305 +0000 INFO  TailingProcessor [2 MainTailingThread] - Adding watch on path: $test_root/logs/auth.log." \
+  >>"$home/var/log/splunk/splunkd.log"
+"$ROOT/linux/splunk.sh" --config "$test_root/test.env" >"$test_root/real2.out" 2>&1 || true
+hasnt "splunkd cannot open $test_root/logs/auth.log" "$test_root/real2.out" \
+  'a failure that a later successful watch superseded is not reported'
+rm -rf "$home/etc/apps/SplunkUniversalForwarder"
+
+# --- a config it cannot read is "could not check", never a finding ---
+# A properly installed forwarder's .conf files are 0600 splunkfwd. Run without
+# sudo, the old check skipped them silently and reported "NO output target".
+if [ "$(id -u)" -ne 0 ]; then
+  chmod 000 "$home/etc/system/local/outputs.conf"
+  rc=0
+  "$ROOT/linux/splunk.sh" --config "$test_root/test.env" >"$test_root/unread.out" 2>&1 || rc=$?
+  chmod 600 "$home/etc/system/local/outputs.conf"
+  if [ "$rc" -eq 4 ] && grep -q 'CANNOT CHECK' "$test_root/unread.out" \
+     && ! grep -q 'NO output target' "$test_root/unread.out"; then
+    ok 'an unreadable .conf stops the check (exit 4) instead of reporting from half a config'
+  else
+    no "an unreadable .conf produced findings (exit $rc) instead of refusing"
+    sed 's/^/    /' "$test_root/unread.out" | head -12
+  fi
+else
+  ok 'unreadable-config refusal: skipped as root (root reads a 0000 file)'
+fi
+
+# --- the packet's indexer must not hide an empty outputs.conf ---
+empty="$test_root/emptyfwd"
+mkdir -p "$empty/etc/system/local"
+printf '[tcpout]\ndefaultGroup = nothing\n' >"$empty/etc/system/local/outputs.conf"
+cat >"$test_root/empty.env" <<EOF
+CCDC_BOX_NAME="empty-outputs"
+CCDC_EVIDENCE_DIR="$test_root/state"
+CCDC_SPLUNK_HOME="$empty"
+CCDC_SPLUNK_INDEXERS="203.0.113.9:9997"
+EOF
+"$ROOT/linux/splunk.sh" --config "$test_root/empty.env" >"$test_root/empty.out" 2>&1 || true
+has 'NO output target' "$test_root/empty.out" \
+  'an empty outputs.conf is reported even when the packet names an indexer'
+has 'add forward-server 203.0.113.9:9997' "$test_root/empty.out" \
+  'and the fix names the packet indexer rather than a placeholder'
+
 printf 'splunk self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
