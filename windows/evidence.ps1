@@ -15,7 +15,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [string]$Destination = '',
     [switch]$Bundle,
     [switch]$Apply

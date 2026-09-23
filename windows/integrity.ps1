@@ -21,7 +21,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [int]$IntervalSeconds = 60,
     [switch]$Install,
     [switch]$Uninstall,

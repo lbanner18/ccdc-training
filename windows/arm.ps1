@@ -33,7 +33,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [int]$GuardianIntervalSeconds = 60,
     [switch]$Apply,
     [switch]$Status

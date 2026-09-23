@@ -83,8 +83,10 @@ incident report is written from.
 ## Minutes 3–6 — what is wrong right now
 
 ```powershell
-.\windows\triage.ps1 -Config C:\ProgramData\CCDC\ccdc.env
+.\windows\triage.ps1
 ```
+
+> **Tip**: All Windows tools auto-detect `C:\ProgramData\CCDC\ccdc.env`. You do not need to type `-Config` unless using a custom path.
 
 Read **RED** first. Fix these two before spending time on cleanup:
 
@@ -107,7 +109,7 @@ inject open, and copying is where the wrong hostname gets into the right
 command.
 
 ```powershell
-.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
+.\windows\sentry.ps1 -Status
 ```
 
 It numbers everything it can act on and marks each one:
@@ -119,10 +121,10 @@ It numbers everything it can act on and marks each one:
 
 ```powershell
 # every SWEEP item; every LOOK item is handed back to you with its number
-.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Approve all -Apply
+.\windows\sentry.ps1 -Approve all -Apply
 
 # then the LOOK items, one at a time, once you have looked
-.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Approve 7 -Apply
+.\windows\sentry.ps1 -Approve 7 -Apply
 ```
 
 Leave `-Apply` off and it tells you what it would do and changes nothing.
@@ -139,7 +141,7 @@ Before using the queue, know what these messages mean:
 If something is yours and you are tired of seeing it:
 
 ```powershell
-.\windows\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Mute 'listener|tcp/8080'
+.\windows\sentry.ps1 -Mute 'listener|tcp/8080'
 ```
 
 It stays in `triage.ps1`. It just stops asking you to decide.
@@ -152,7 +154,7 @@ The training's own words: *"Generally the #1 priority is to change passwords.
 The red team knows the default passwords."*
 
 ```powershell
-.\windows\users.ps1 -Config C:\ProgramData\CCDC\ccdc.env
+.\windows\users.ps1
 ```
 
 Read the table. The column that matters is the last one — `** NO **` means
@@ -162,13 +164,13 @@ enabled and not named in your packet list.
 Administrators, this is the difference between a bad ten minutes and a lost box:
 
 ```powershell
-.\windows\users.ps1 -Config C:\ProgramData\CCDC\ccdc.env -CreateAdmin ops2 -Apply
+.\windows\users.ps1 -CreateAdmin ops2 -Apply
 ```
 
 Then rotate everything that is not scored:
 
 ```powershell
-.\windows\users.ps1 -Config C:\ProgramData\CCDC\ccdc.env -RotateAll -Apply
+.\windows\users.ps1 -RotateAll -Apply
 ```
 
 > **It skips scored accounts on purpose.** On many setups the scoring engine
@@ -186,14 +188,14 @@ somebody is attacking.
 ## Minutes 10–14 — the checklist, one command
 
 ```powershell
-.\windows\harden.ps1 -Config C:\ProgramData\CCDC\ccdc.env
+.\windows\harden.ps1
 ```
 
 That is a **dry run**. It prints every change it would make and does nothing.
 Read it. Then:
 
 ```powershell
-.\windows\harden.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Apply
+.\windows\harden.ps1 -Apply
 ```
 
 In order, it does: backup → firewall → Defender → logging → password policy →
@@ -214,11 +216,11 @@ that says what owns each reachable thing. `REVIEW` is an unanswered packet
 question, not permission to remove it:
 
 ```powershell
-.\windows\surface.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Table
+.\windows\surface.ps1 -Table
 ```
 
 ```powershell
-.\windows\arm.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Apply
+.\windows\arm.ps1 -Apply
 ```
 
 This is the one-command setup for the things that are safe to set up together:

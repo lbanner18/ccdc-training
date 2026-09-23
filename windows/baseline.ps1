@@ -49,7 +49,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [switch]$Bless,
     [ValidateRange(0,300)][int]$StableForSeconds = 0,
     [switch]$Status,

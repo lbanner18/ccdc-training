@@ -152,9 +152,28 @@ this must run elevated, and it is not.
 # this file may have been edited by someone who is not you.
 
 function Import-CcdcConfig {
-    param([Parameter(Mandatory)][string]$Path)
+    param([string]$Path = '')
 
-    if ([string]::IsNullOrWhiteSpace($Path)) { Write-CcdcDie "no config given (-Config FILE)" }
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        if ($env:CCDC_CONFIG -and (Test-Path -LiteralPath $env:CCDC_CONFIG -PathType Leaf)) {
+            $Path = $env:CCDC_CONFIG
+        } elseif (Test-Path -LiteralPath (Join-Path $script:CcdcRoot 'ccdc.env') -PathType Leaf) {
+            $Path = Join-Path $script:CcdcRoot 'ccdc.env'
+        } elseif (Test-Path -LiteralPath 'C:\ProgramData\CCDC\ccdc.env' -PathType Leaf) {
+            $Path = 'C:\ProgramData\CCDC\ccdc.env'
+        } else {
+            Write-CcdcDie @"
+no config given (-Config FILE) and default config not found.
+
+  Copy the template and fill it in from the team packet:
+      copy .\config\example.env C:\ProgramData\CCDC\ccdc.env
+      notepad C:\ProgramData\CCDC\ccdc.env
+
+  Then run this tool again (it will find C:\ProgramData\CCDC\ccdc.env automatically).
+"@
+        }
+    }
+
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         Write-CcdcDie @"
 config file not found: $Path

@@ -45,7 +45,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [switch]$Status,
     [string]$Approve,
     [switch]$Apply,

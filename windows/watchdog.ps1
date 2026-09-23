@@ -36,7 +36,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [int]$IntervalSeconds = 30,
     [switch]$Once,
     [switch]$Install,

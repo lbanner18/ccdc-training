@@ -21,7 +21,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [switch]$Check,
     [switch]$Repair,
     [switch]$Capture,

@@ -241,11 +241,28 @@ Unregister-ScheduledTask -TaskName 'NAME' -TaskPath '\PATH\' -Confirm:$false
 The task ran something. Find that file, preserve it, remove it — and find what
 *created the task*, which is the part that brings it back.
 
+### `webshell` — web root backdoors (IIS / W3SVC)
+
+When IIS is running, an attacker can drop an `.aspx`, `.ashx`, or `.php` file in `C:\inetpub\wwwroot` that executes system commands over HTTP without authentication.
+
+Find and remove:
+```powershell
+# List executable scripts placed in web root
+Get-ChildItem -Path C:\inetpub\wwwroot -Recurse -File |
+    Select-Object FullName,Length,LastWriteTime | Format-Table -AutoSize
+
+# Search for execution patterns (cmd.exe, powershell, eval, ProcessStartInfo)
+Select-String -Path C:\inetpub\wwwroot\* -Pattern 'eval\(|ProcessStartInfo|cmd\.exe|powershell'
+
+# Delete the webshell
+Remove-Item -LiteralPath 'C:\inetpub\wwwroot\cmd.aspx' -Force
+```
+
 ---
 
 ## CARD W4 — autostart, registry, and the login-screen backdoors
 
-`RED runkey` · `RED ifeo` · `RED winlogon`
+`RED runkey` · `RED ifeo` · `RED winlogon` · `RED startupfile`
 
 Everything on this card runs without anyone logging in, or the instant somebody
 does.
@@ -602,18 +619,23 @@ secedit /export /cfg C:\ProgramData\CCDC\backup\secpol.inf
 
 ---
 
-## CARD W10 — RDP and SSH
+## CARD W10 — RDP, SSH, and broadcast poisoning (LLMNR / NetBIOS)
 
-Not a triage finding yet — a checklist item, and the two ways in that are
-*supposed* to be there.
+`RED rdpnla` · `AMBER llmnr` · `AMBER netbios`
+
+The remote access controls that keep attackers out of your console, and the
+broadcast protocols that leak credentials across the local subnet.
 
 ```powershell
 # is RDP on, and does it require Network Level Authentication?
 Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections
 Get-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication
 
-# require NLA - this alone stops a large class of attack
+# require NLA - this alone stops a large class of unauthenticated RDP exploits
 Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name UserAuthentication -Value 1
+
+# enable RDP Restricted Admin mode (prevents credentials being harvested from memory if RDP is compromised)
+Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Lsa' -Name DisableRestrictedAdmin -Value 0 -Type DWord
 
 # who is allowed to use RDP?
 net localgroup "Remote Desktop Users"
@@ -633,6 +655,23 @@ logoff ID
 If RDP is **not** scored and not how you are working, turn it off:
 ```powershell
 Set-ItemProperty 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name fDenyTSConnections -Value 1
+```
+
+### Broadcast poisoning (Responder / Inveigh hash theft)
+
+When Windows fails to resolve a hostname over DNS, it broadcasts to the local subnet
+via LLMNR (UDP 5355) and NetBIOS (UDP 137). An attacker running Responder answers these
+broadcasts instantly and captures your NTLMv2 challenge-response hashes.
+
+```powershell
+# Disable LLMNR multicast resolution:
+$dnsKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+if (-not (Test-Path -LiteralPath $dnsKey)) { New-Item -Path $dnsKey -Force | Out-Null }
+Set-ItemProperty -Path $dnsKey -Name EnableMulticast -Value 0 -Type DWord
+
+# Disable NetBIOS over TCP/IP across active adapters:
+Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' |
+    ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = [uint32]2 } }
 ```
 
 ---

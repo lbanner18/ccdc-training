@@ -30,7 +30,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [switch]$Quiet,
     [switch]$NoEvidence
 )
@@ -577,7 +577,7 @@ if (@($listeners).Count -gt 0) {
         # 135/139/445 and the ephemeral RPC range are stock Windows noise. They
         # are attack surface, but they are not a finding - reporting them every
         # pass is how a list stops being read.
-        if ($port -in @('135','139','445','5985','49664','49665','49666','49667','49668','49669','49670')) { continue }
+        if ($port -in @('135','139','445','5985','5986','47001','49664','49665','49666','49667','49668','49669','49670')) { continue }
         if ([int]$port -ge 49152) { continue }
 
         $procName = 'unknown'; $procPath = ''

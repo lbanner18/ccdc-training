@@ -46,7 +46,7 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)][string]$Config,
+    [string]$Config = '',
     [switch]$Apply,
     [ValidateSet('Backup','PasswordPolicy','Services','RemoteAccess','Firewall','Logging','Defender','Persistence')]
     [string[]]$Only,
