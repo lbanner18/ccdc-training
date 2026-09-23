@@ -44,12 +44,13 @@ Two distinct styles show up, and they read differently:
   note that it recommends rate limiting rather than hard lockout, which is what
   makes the trap above defensible in the memo rather than just convenient.
 
-## Drafts exist for most of these
+## Drafts exist for all eight of these
 
-Seven of the injects above are pre-written in [`responses/`](responses/): login
+All eight of the injects above are pre-written in [`responses/`](responses/): login
 banner, SSH access, incident response procedure, password policy, endpoint
-protection, the perimeter assessment, and the unnecessary software audit. Each is about a page, in the memo
-format, with its source cited inline and its failure mode called out.
+protection, perimeter assessment, unnecessary software audit, and VPN options.
+Each is in the team's memo format, with its source cited inline, failure modes
+called out, and alignment with the Canvas training course rubric.
 
 The unnecessary software audit is a rendering job rather than a research job,
 because `harden.sh --table` emits the "location / ports opened / removal steps"
@@ -58,7 +59,8 @@ in the first hour.* If it was not, the inject arrives and the honest move is to
 run `harden.sh` read-only and write the memo about what you are about to do,
 rather than cut fifteen things at minute 50 with a scoreboard running.
 
-Still unwritten, and it needs a decision rather than a draft: the **VPN Options**
-video. Three minutes, recorded, posted. Decide the tool and the account before
-competition day — this is the one inject that cannot be produced by anything in
-this repo.
+The **VPN Options** draft ([`responses/vpn-options.md`](responses/vpn-options.md))
+provides the complete written 3-way evaluation (Tailscale vs OpenVPN vs Cloudflare),
+a fully timed 3-minute script to read into a video recorder, slide deck outline,
+and an illustrated step-by-step user guide for non-technical employees, addressing
+the exact grading feedback from past competition tryouts.

@@ -94,10 +94,13 @@ $homeBad = $false
 $splunkHome = ''
 # A configured path is used only if it is really there. Taking it on trust made
 # a typo look like a working install that was merely "not running".
-if ($configuredHome -and [System.IO.Directory]::Exists($configuredHome)) {
-    $splunkHome = $configuredHome
+if ($configuredHome) {
+    if ([System.IO.Directory]::Exists($configuredHome)) {
+        $splunkHome = $configuredHome
+    } else {
+        $homeBad = $true
+    }
 } else {
-    if ($configuredHome) { $homeBad = $true }
     $splunkHome = Get-HomeFromService -Service $service
     if (-not $splunkHome) {
         foreach ($candidate in @('C:\Program Files\SplunkUniversalForwarder', 'C:\Program Files\Splunk')) {

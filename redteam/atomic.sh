@@ -219,10 +219,12 @@ state_fingerprint() {
     # mtimes called that a change, so it scored as MISSED - the tool hunting a
     # gap that does not exist, which is the one wrong answer that costs hours.
     # Rewriting a file with the bytes it already had is not a security event.
-    find /etc /root /home /usr/local /var/spool/cron /srv /opt -xdev -type f \
-         -size -256k -print0 2>/dev/null | xargs -0 -r md5sum 2>/dev/null | sort
+    find /etc /root /home /usr/local /var/spool/cron /srv /opt -xdev \
+         \( -path '/opt/*/var*' -o -path '/opt/*/run*' \) -prune -o \
+         -type f -size -256k -print0 2>/dev/null | xargs -0 -r md5sum 2>/dev/null | sort
     # Anything too big to hash cheaply, and every symlink by where it points.
     find /etc /root /home /usr/local /var/spool/cron /srv /opt -xdev \
+         \( -path '/opt/*/var*' -o -path '/opt/*/run*' \) -prune -o \
          \( \( -type f -size +256k \) -o -type l \) \
          -printf '%p %s %m %l\n' 2>/dev/null | sort
     systemctl list-units --all --no-legend --plain 2>/dev/null | awk '{print $1, $3, $4}'

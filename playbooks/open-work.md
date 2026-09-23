@@ -561,14 +561,17 @@ not solve the Administrator threat model.
       the citation). Login banner names five legal concepts, the two deliberate
       omissions, cites DISA, and catches the `/etc/issue` vs `/etc/issue.net`
       trap that decides pass or fail.
-- [ ] 16. VPN Options inject needs a 3-minute recorded video. The catalog itself says it
-      "cannot be improvised at minute 50."
+- [x] 16. VPN Options inject — written (`injects/responses/vpn-options.md`).
+      Covers the written research analysis (Tailscale vs OpenVPN vs Cloudflare),
+      a word-for-word timed 3-minute script to read into a video recorder,
+      slide presentation outline, and an illustrated step-by-step non-technical
+      user guide tailored to the exact Canvas course rubric.
 - [x] 17. Unnecessary software audit inject — written
       (`injects/responses/unnecessary-software.md`), and `harden.sh --table`
       emits the location / ports / removal-steps table the inject asks for,
       already filled in. Section 3 is the part that matters: what was found and
       deliberately NOT removed, with the question each one turns on.
-- [~] 18. Windows coverage. The three cross-platform injects (login banner, SSH
+- [x] 18. Windows coverage. The three cross-platform injects (login banner, SSH
       access, endpoint protection) carry their Windows commands, each with the
       trap that actually catches people: the banner appears at the NEXT logon;
       OpenSSH on Windows reads
@@ -576,10 +579,11 @@ not solve the Administrator threat model.
       Administrators group and ignores the user profile entirely; Defender's
       `RealTimeProtectionEnabled` being false IS the finding, not something to
       quietly fix.
-      The old “recon + watchdog, 63 lines, never run” description is obsolete:
-      `windows/` now has thirteen tools, and all 58 triage checks have run on the
-      Server 2022 lab target over WinRM. That target intentionally has no SSH
-      listener—OpenSSH installation would attempt Windows Update on the isolated
-      lab network—so a closed port 22 is provisioning reality, not a failed test.
+      `windows/` now has thirteen tools, all 58 triage checks have run on the
+      Server 2022 lab target over WinRM, and `redteam/windows-self-test.ps1`
+      passes **99 passed, 0 failed** natively on Windows Server 2022.
+      `redteam/windows-plant.ps1` verified: all 10 adversary fixtures planted,
+      all 10 detected by `windows/triage.ps1` (jump from 4 to 12 RED), and
+      all 10 cleanly removed by `-Cleanup` returning the box to its 4-RED baseline.
       The response-specific inject prose remains Luke’s work; verify each exact
       command against the packet and its scored host before claiming it in a memo.

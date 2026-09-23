@@ -279,6 +279,16 @@ if ($steps -contains 'Logging') {
         Set-ItemProperty -Path "$mod\ModuleNames" -Name '*' -Value '*'
     } 'CARD W8'
 
+    $trans = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\Transcription'
+    $transDir = Get-CcdcPath 'logs\transcripts'
+    Do-Change 'enable PowerShell transcription logging' {
+        if (-not (Test-Path -LiteralPath $trans)) { New-Item -Path $trans -Force | Out-Null }
+        if (-not (Test-Path -LiteralPath $transDir)) { New-Item -Path $transDir -ItemType Directory -Force | Out-Null }
+        Set-ItemProperty -Path $trans -Name 'EnableTranscripting' -Value 1 -Type DWord
+        Set-ItemProperty -Path $trans -Name 'OutputDirectory' -Value $transDir
+        Set-ItemProperty -Path $trans -Name 'EnableInvocationHeader' -Value 1 -Type DWord
+    } 'CARD W8'
+
     $audKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
     Do-Change 'record the FULL COMMAND LINE with every process-creation event' {
         if (-not (Test-Path -LiteralPath $audKey)) { New-Item -Path $audKey -Force | Out-Null }
@@ -403,6 +413,49 @@ if ($steps -contains 'RemoteAccess') {
         Set-ItemProperty -Path $lsa -Name 'RestrictAnonymous'    -Value 1
         Set-ItemProperty -Path $lsa -Name 'RestrictAnonymousSAM' -Value 1
         Set-ItemProperty -Path $lsa -Name 'EveryoneIncludesAnonymous' -Value 0
+    } 'CARD W10'
+
+    # Windows DNS Server hardening (Canvas cheat sheet: limit attack surface against WPAD/ISATAP spoofing)
+    $dnsCmd = Get-Command -Name 'Set-DnsServerGlobalQueryBlockList' -ErrorAction SilentlyContinue
+    if ($null -ne $dnsCmd) {
+        $dnsSvc = Get-Service -Name 'DNS' -ErrorAction SilentlyContinue
+        if ($null -ne $dnsSvc -and $dnsSvc.Status -eq 'Running') {
+            Do-Change 'block WPAD and ISATAP queries on DNS server (mitigates proxy auto-discovery spoofing)' {
+                Set-DnsServerGlobalQueryBlockList -List 'wpad','isatap' -ErrorAction SilentlyContinue
+            } 'CARD W10'
+        }
+    }
+
+    Do-Change 'enable LSA Protection (RunAsPPL) to prevent LSASS credential dumping' {
+        Set-ItemProperty -Path $lsa -Name 'RunAsPPL' -Value 1 -Type DWord
+    } 'CARD W10'
+
+    Do-Change 'enable Restricted Admin mode for RDP to prevent credential caching' {
+        Set-ItemProperty -Path $lsa -Name 'DisableRestrictedAdmin' -Value 0 -Type DWord
+    } 'CARD W10'
+
+    $wdigest = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'
+    Do-Change 'disable WDigest plaintext credential caching in memory' {
+        if (-not (Test-Path -LiteralPath $wdigest)) { New-Item -Path $wdigest -Force | Out-Null }
+        Set-ItemProperty -Path $wdigest -Name 'UseLogonCredential' -Value 0 -Type DWord
+    } 'CARD W10'
+
+    $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+    Do-Change 'limit cached domain credentials to 1 to hinder offline cracking' {
+        Set-ItemProperty -Path $winlogon -Name 'CachedLogonsCount' -Value '1'
+    } 'CARD W10'
+
+    $dnsClient = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+    Do-Change 'disable LLMNR to prevent Responder NTLMv2 hash poisoning' {
+        if (-not (Test-Path -LiteralPath $dnsClient)) { New-Item -Path $dnsClient -Force | Out-Null }
+        Set-ItemProperty -Path $dnsClient -Name 'EnableMulticast' -Value 0 -Type DWord
+    } 'CARD W10'
+
+    Do-Change 'disable NetBIOS over TCP/IP on active network adapters (mitigates NBT-NS spoofing)' {
+        Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+            ForEach-Object {
+                try { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = [uint32]2 } | Out-Null } catch { }
+            }
     } 'CARD W10'
 
     if (-not $IHaveConsoleAccess) {

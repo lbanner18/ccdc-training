@@ -867,7 +867,7 @@ CCDC_SPLUNK_HOME="$uf"
 CCDC_SPLUNK_INDEXERS="127.0.0.1:1"
 "@ | Set-Content -LiteralPath $splunkCfg -Encoding UTF8
 $splunkTool = Join-Path $root 'windows\splunk.ps1'
-$sOut = (& $splunkTool -Config $splunkCfg *>&1 | Out-String)
+$sOut = (& $splunkTool -Config $splunkCfg *>&1 | Out-String -Width 4096)
 $sExit = $LASTEXITCODE
 
 if ($sOut -match 'ok\s+Security is collected \(index=windows\)') {
@@ -877,7 +877,7 @@ if ($sOut -match 'System is configured as an input but DISABLED') {
     ok 'splunk.ps1: system/local outranks every app (System reported disabled)'
 } else { nope 'splunk.ps1 missed a system/local override that switches System off' }
 if ($sOut -match 'Microsoft-Windows-PowerShell/Operational is NOT collected' -and
-    $sOut -match "\[WinEventLog://Microsoft-Windows-PowerShell/Operational\]', 'disabled = 0', 'index = windows'") {
+    $sOut -match "\[WinEventLog://Microsoft-Windows-PowerShell/Operational\]',\s*'disabled\s*=\s*0',\s*'index\s*=\s*windows'") {
     ok 'splunk.ps1: the fix for a missing log reuses the index the working logs already use'
 } else { nope 'splunk.ps1 missed PowerShell/Operational, or its fix aims at an index nothing proves exists' }
 if ($sOut -match 'NO output target' -and $sOut -match 'add forward-server 127\.0\.0\.1:1') {
@@ -891,13 +891,13 @@ if ($sOut -match 'btool did not run') {
 } else { nope 'splunk.ps1 used its own precedence reading without saying so' }
 if ($sExit -eq 3) { ok 'splunk.ps1 exits 3 on findings' } else { nope ("splunk.ps1 exited {0} on findings, not 3" -f $sExit) }
 
-$sInv = (& $splunkTool -Config $splunkCfg -Inventory *>&1 | Out-String)
+$sInv = (& $splunkTool -Config $splunkCfg -Inventory *>&1 | Out-String -Width 4096)
 if ($sInv -match '\| System \| \*\*NO - input disabled\*\* \|' -and $sInv -match '\| Security \| yes \| windows \|') {
     ok 'splunk.ps1 -Inventory marks a disabled input NO, not yes'
 } else { nope 'splunk.ps1 -Inventory reports a disabled input as forwarded' }
 
 $tokenPath = Join-Path (Join-Path $work 'state') 'splunk.test-token'
-$sDry = (& $splunkTool -Config $splunkCfg -TestEvent *>&1 | Out-String)
+$sDry = (& $splunkTool -Config $splunkCfg -TestEvent *>&1 | Out-String -Width 4096)
 if ($sDry -match 'DRY RUN' -and -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $tokenPath)) {
     ok 'splunk.ps1 -TestEvent without -Apply writes nothing'
 } else { nope 'splunk.ps1 -TestEvent wrote without -Apply' }
@@ -907,7 +907,7 @@ $goneCfg = Join-Path $work 'splunk-gone.env'
 CCDC_BOX_NAME="win-target"
 CCDC_SPLUNK_HOME="$(Join-Path $work 'no-such-forwarder')"
 "@ | Set-Content -LiteralPath $goneCfg -Encoding UTF8
-$sGone = (& $splunkTool -Config $goneCfg *>&1 | Out-String)
+$sGone = (& $splunkTool -Config $goneCfg *>&1 | Out-String -Width 4096)
 if ($sGone -match 'CCDC_SPLUNK_HOME is set to a path that does not exist' -and $sGone -match 'NOTHING on this box forwards') {
     ok 'splunk.ps1: a mistyped home is a finding, and no forwarder is never "just not running"'
 } else { nope 'splunk.ps1 trusted a configured home that does not exist' }

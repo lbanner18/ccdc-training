@@ -464,6 +464,32 @@ foreach ($k in $runKeys) {
     } catch { }
 }
 
+# Filesystem Startup directories: anything placed here runs at logon
+    $startupDirs = @('C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup')
+    $userProfiles = 'C:\Users'
+    if (Test-Path -LiteralPath $userProfiles) {
+        foreach ($uDir in (Get-ChildItem -LiteralPath $userProfiles -Directory -ErrorAction SilentlyContinue)) {
+            $pStartup = Join-Path $uDir.FullName 'AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup'
+            if (Test-Path -LiteralPath $pStartup) { $startupDirs += $pStartup }
+        }
+    }
+    foreach ($sd in $startupDirs) {
+        if (-not (Test-Path -LiteralPath $sd)) { continue }
+        try {
+            $sFiles = @(Get-ChildItem -LiteralPath $sd -File -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -notmatch '(?i)^desktop\.ini$' })
+            foreach ($sf in $sFiles) {
+                Report -Severity 'RED' -Check 'startupfile' -Subject $sf.FullName `
+                    -Description ('file in Startup folder executes at logon: {0}' -f $sf.Name) `
+                    -Detail @(('  path: {0} ({1} bytes)' -f $sf.FullName, $sf.Length),
+                              ('  last write: {0}' -f $sf.LastWriteTime),
+                              'Files in this folder execute automatically when a user logs on.') `
+                    -Fix @(("Remove-Item -LiteralPath {0} -Force" -f (Q $sf.FullName))) `
+                    -Card 'CARD W4'
+            }
+        } catch { }
+    }
+
 # Image File Execution Options "Debugger" - the accessibility backdoor.
 # Set a debugger on sethc.exe and five shifts at the lock screen is SYSTEM.
 Begin-Check 'ifeo'
@@ -1131,6 +1157,95 @@ if ($rdpOn) {
             -Card 'CARD W10'
     }
     if (@($rdu).Count -gt 0) { Clean ("{0} member(s) of Remote Desktop Users reviewed" -f @($rdu).Count) }
+}
+
+# =============================================================================
+# 12. NETWORK BROADCAST POISONING (LLMNR / NetBIOS)
+# =============================================================================
+Begin-Check 'broadcast'
+$dnsClientKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+$llmnrVal = Get-RegValue -Path $dnsClientKey -Name 'EnableMulticast'
+if ($null -eq $llmnrVal -or [int]$llmnrVal -ne 0) {
+    Report -Severity 'AMBER' -Check 'llmnr' -Subject 'EnableMulticast' `
+        -Description 'LLMNR is enabled; susceptible to Responder NTLMv2 hash poisoning' `
+        -Detail @('When DNS resolution fails, Windows broadcasts on UDP 5355.',
+                  'Responder or Inveigh answers these requests on the subnet to capture NTLMv2 hashes.') `
+        -Fix @("if (-not (Test-Path -LiteralPath '{0}')) {{ New-Item -Path '{0}' -Force | Out-Null }}" -f $dnsClientKey,
+               ("Set-ItemProperty -Path '{0}' -Name EnableMulticast -Value 0 -Type DWord" -f $dnsClientKey)) `
+        -Card 'CARD W10'
+} else { Clean 'LLMNR multicast resolution is disabled' }
+
+$netbiosEnabled = $false
+try {
+    $adapters = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue)
+    foreach ($nic in $adapters) {
+        if ($null -ne $nic.TcpipNetbiosOptions -and [uint32]$nic.TcpipNetbiosOptions -ne 2) {
+            $netbiosEnabled = $true; break
+        }
+    }
+} catch { }
+if ($netbiosEnabled) {
+    Report -Severity 'AMBER' -Check 'netbios' -Subject 'NetBT' `
+        -Description 'NetBIOS over TCP/IP is active; susceptible to NBT-NS spoofing' `
+        -Detail @('NetBIOS name service broadcasts on UDP 137 can be spoofed by attackers on the local subnet.') `
+        -Fix @('Get-CimInstance Win32_NetworkAdapterConfiguration -Filter ''IPEnabled=True'' | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = [uint32]2 } }') `
+        -Card 'CARD W10'
+} else { Clean 'NetBIOS over TCP/IP is disabled on active adapters' }
+
+# =============================================================================
+# 13. WEB ROOT / WEBSHELLS (IIS / W3SVC)
+# =============================================================================
+Begin-Check 'webroot'
+$webRoots = @()
+if (Test-Path -LiteralPath 'C:\inetpub\wwwroot') { $webRoots += 'C:\inetpub\wwwroot' }
+$customWeb = Get-CcdcValue -Config $cfg -Name 'CCDC_WINDOWS_WEB_ROOT'
+if ($customWeb -and (Test-Path -LiteralPath $customWeb) -and ($webRoots -notcontains $customWeb)) {
+    $webRoots += $customWeb
+}
+if ($webRoots.Count -gt 0) {
+    $suspExt = '(?i)\.(aspx?|ashx|asmx|php|ps1|bat|cmd|exe|dll|vbs)$'
+    $webshellSig = '(?i)(eval\s*\(|cmd\.exe|powershell(\.exe)?|ProcessStartInfo|System\.Diagnostics\.Process|Request\[|Request\.Form|Request\.QueryString|base64_decode|shell_exec|passthru|exec\s*\()'
+    $webFilesChecked = 0
+    foreach ($root in $webRoots) {
+        $files = @()
+        try {
+            $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force -ErrorAction SilentlyContinue)
+        } catch { }
+        foreach ($f in $files) {
+            $webFilesChecked++
+            # Skip known canaries
+            if ($f.Name -match '(?i)^web\.config\.bak$') { continue }
+            if ($f.Extension -match $suspExt) {
+                $isMalicious = $false
+                $matchedSnippet = ''
+                try {
+                    $content = [System.IO.File]::ReadAllText($f.FullName)
+                    if ($content -match $webshellSig) {
+                        $isMalicious = $true
+                        $matchedSnippet = $Matches[0]
+                    }
+                } catch { }
+
+                if ($isMalicious) {
+                    Report -Severity 'RED' -Check 'webshell' -Subject $f.FullName `
+                        -Description ('web script matches webshell signature or command execution pattern: {0}' -f $f.Name) `
+                        -Detail @(('  file: {0} ({1} bytes)' -f $f.FullName, $f.Length),
+                                  ('  matched pattern: {0}' -f $matchedSnippet),
+                                  'Webshells in wwwroot provide remote unauthenticated command execution.') `
+                        -Fix @(("Remove-Item -LiteralPath {0} -Force" -f (Q $f.FullName))) `
+                        -Card 'CARD W3'
+                } elseif ($facts['BoxBuilt'] -and $f.LastWriteTimeUtc -gt $facts['BoxBuilt'].AddHours(2)) {
+                    Report -Severity 'AMBER' -Check 'newwebfile' -Subject $f.FullName `
+                        -Description ('executable web script placed in web root after box installation: {0}' -f $f.Name) `
+                        -Detail @(('  file: {0} ({1} bytes)' -f $f.FullName, $f.Length),
+                                  ('  last write time: {0}' -f $f.LastWriteTime)) `
+                        -Fix @(("Remove-Item -LiteralPath {0} -Force" -f (Q $f.FullName))) `
+                        -Card 'CARD W3'
+                }
+            }
+        }
+    }
+    Clean ("web root reviewed ({0} file(s) checked)" -f $webFilesChecked)
 }
 
 # =============================================================================
