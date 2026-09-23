@@ -9,7 +9,7 @@ two questions: **is the scored service up**, and **can I prove what changed**.
   and password handling, a scored-service/canary watchdog, the same approval queue,
   configuration drift against a frozen baseline, and tripwires that report who
   read them.
-- **Playbooks** — 15 documents. Cards you can follow at 2am with a red team on
+- **Playbooks** — 16 documents. Cards you can follow at 2am with a red team on
   the box.
 - **Tested** — 548 assertions across 20 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.

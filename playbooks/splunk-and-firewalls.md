@@ -115,6 +115,14 @@ and the [SPL tutorial](https://docs.splunk.com/Documentation/SplunkCloud/latest/
 
 ## Firewalls: do not confuse "closed" with "safe"
 
+For the firewall *appliance* itself (VyOS, pfSense, OPNsense, Cisco, Palo
+Alto): default logins, how each one undoes a change, and the order of work are
+in [`firewall-appliance.md`](firewall-appliance.md).
+
+For the firewall *appliance* itself (VyOS, pfSense, OPNsense, Cisco, Palo
+Alto): default logins, how each one undoes a change, and the order of work are
+in [`firewall-appliance.md`](firewall-appliance.md).
+
 A firewall rule is a traffic decision. Before you make one, be able to answer
 all seven of these questions:
 
