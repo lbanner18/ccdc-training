@@ -2,6 +2,122 @@
 
 Use the team packet to fill the bracketed values before competition day.
 
+## Linux at a glance
+
+The whole flow on one screen, in the order rehearsed end to end on a fresh
+lab box (2026-09-23). Every command is complete; replace only `<USER>@<BOX>`.
+The checklist further down has the detail.
+
+### A. Once, at the start
+
+**1. Get the kit** — on YOUR workstation, not the box (no internet on the box):
+```bash
+cd ~/ccdc-training
+tar czf - --exclude=.git . | ssh <USER>@<BOX> 'mkdir -p ~/ccdc-training && tar xzf - -C ~/ccdc-training && chmod +x ~/ccdc-training/linux/*.sh ~/ccdc-training/redteam/*.sh'
+```
+The box HAS internet? On the box instead: `git clone https://github.com/lbanner18/ccdc-training ~/ccdc-training`
+
+**2. On the box: the config** — fill in users, scored services, ports, checks
+```bash
+cd ~/ccdc-training
+CFG=/tmp/ccdc-linux.env
+cp config/example.env "$CFG" && chmod 600 "$CFG"
+nano "$CFG"
+```
+Set: `CCDC_ALLOWED_USERS` · `CCDC_SYSTEMD_SERVICES` · `CCDC_TCP_CHECKS` · `CCDC_HTTP_CHECKS` · `CCDC_ALLOWED_TCP_PORTS`.
+Checks are one per line, e.g. `web|127.0.0.1|8080|scored-web`.
+Every new terminal needs `CFG=/tmp/ccdc-linux.env` again.
+
+**3. The "before" record** (read-only)
+```bash
+sudo ./linux/recon.sh --config "$CFG"
+sudo ./linux/hunt.sh --config "$CFG"
+```
+
+**4. What is wrong right now** (read-only)
+```bash
+sudo ./linux/triage.sh --config "$CFG"
+```
+
+**5. Cut what nothing scored needs** — read the list, then cut the safe ones (about 2 minutes)
+```bash
+sudo ./linux/harden.sh --config "$CFG"
+sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
+```
+
+**6. A backup admin, then your own password** — both on paper
+```bash
+sudo ./linux/users.sh --config "$CFG" --create-admin ops2 --apply
+passwd
+```
+
+**7. Firewall** — it rolls itself back in 60s unless confirmed from a NEW connection
+```bash
+sudo ./linux/fw.sh --config "$CFG" --dry-run
+sudo ./linux/fw.sh --config "$CFG" --apply
+```
+Then in a SECOND terminal: `ssh <USER>@<BOX>`, and there:
+```bash
+cd ~/ccdc-training && sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --confirm
+```
+
+**8. sshd** — same rollback-and-confirm pattern
+```bash
+sudo ./linux/sshd.sh --config "$CFG"
+sudo ./linux/sshd.sh --config "$CFG" --apply
+```
+Then from a NEW connection: `cd ~/ccdc-training && sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --confirm`
+
+**9. Down to 0 RED**
+```bash
+sudo ./linux/triage.sh --config "$CFG"
+```
+
+**10. Freeze the clean box**
+```bash
+sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
+```
+
+**11. Arm everything** — backups, canaries, sentry, guardian/watchdog under systemd
+```bash
+sudo ./linux/arm.sh --config "$CFG" --apply
+sudo ./linux/audit.sh --config "$CFG" --apply
+sudo ./linux/audit.sh --config "$CFG" --capture
+```
+Changed the config after this? `sudo ./linux/sentry.sh --config "$CFG" --reload-config --apply`
+
+### B. When something new appears — the loop
+
+A new RED is broadcast to your terminals (`wall`). Then:
+
+**1. The numbered queue**
+```bash
+sudo ./linux/sentry.sh --config "$CFG" --status
+```
+
+**2. Everything that changed since the freeze, with a fix for each**
+```bash
+sudo ./linux/baseline.sh --config "$CFG" --status
+sudo ./linux/baseline.sh --config "$CFG" --explain N
+```
+
+**3. Fix it** — one item, or yours: allow it with a reason
+```bash
+sudo ./linux/sentry.sh --config "$CFG" --approve N --apply
+sudo ./linux/baseline.sh --config "$CFG" --allow 'WHAT' --reason 'why this is mine' --apply
+```
+
+**4. Until baseline says "Nothing unexplained"**
+```bash
+sudo ./linux/baseline.sh --config "$CFG" --status
+```
+
+### C. Traps from the lab
+
+- `--confirm` from the SAME session proves nothing: that session is already in. Always a new `ssh`.
+- triage offers a delete line for every SSH key, including yours (`you@your-workstation`). Delete only keys you do not recognise.
+- `test -f "$CFG" || cp ...` keeps an OLD config if one is already there. On a lab snapshot, check the file is yours.
+
 Before using this card, set the config path once in the shell:
 
 ```bash
