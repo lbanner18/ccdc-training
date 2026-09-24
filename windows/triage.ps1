@@ -729,7 +729,9 @@ if ($facts['HasDefender']) {
         if ($st.PSObject.Properties.Name -contains 'AntivirusSignatureAge' -and $st.AntivirusSignatureAge -gt 7) {
             Report -Severity 'AMBER' -Check 'defendersig' -Subject 'signatures' `
                 -Description ('Defender signatures are {0} days old' -f $st.AntivirusSignatureAge) `
-                -Fix @('Update-MpSignature') -Card 'CARD W6'
+                -Fix @('Update-MpSignature',
+                       '# error 0x8024402c/0x80072ee7 with internet up usually means a WSUS policy points elsewhere:',
+                       'Update-MpSignature -UpdateSource MicrosoftUpdateServer') -Card 'CARD W6'
         }
         Clean 'Defender status and exclusions reviewed'
     } catch {

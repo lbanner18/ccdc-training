@@ -258,7 +258,12 @@ if ($steps -contains 'Defender') {
             Note 'Look at what was parked in each excluded path before you move on - that is where the payload lives.'
         } catch { Note "could not read Defender exclusions: $($_.Exception.Message)" }
 
-        Do-Change 'update signatures' { Update-MpSignature } 'CARD W6'
+        # A domain policy often points Defender at a WSUS server the event does
+        # not provide; with the internet up, going direct is what works.
+        Do-Change 'update signatures (falls back to Microsoft directly if the default source fails)' {
+            try { Update-MpSignature -ErrorAction Stop }
+            catch { Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Stop }
+        } 'CARD W6'
         Do-Change 'run a quick scan (runs in the background; check the GUI for results)' {
             Start-MpScan -ScanType QuickScan -AsJob | Out-Null
         } 'CARD W6'

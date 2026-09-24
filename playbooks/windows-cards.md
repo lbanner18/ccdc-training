@@ -451,6 +451,9 @@ Get-ChildItem -Recurse 'C:\THE\PATH' -ErrorAction SilentlyContinue |
 
 # then scan
 Update-MpSignature
+# error 0x8024402c / 0x80072ee7: no route to the update server. No internet -
+# nothing to do. Internet up but a domain policy points at WSUS - go direct:
+Update-MpSignature -UpdateSource MicrosoftUpdateServer
 Start-MpScan -ScanType QuickScan
 ```
 
