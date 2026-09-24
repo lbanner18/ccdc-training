@@ -48,6 +48,9 @@ if [ "${1:-}" = "--clean" ]; then
     tr '\0' '\n' <"$proc" 2>/dev/null | grep -q 'exec 3<>/dev/tcp/' || continue
     tr '\0' '\n' <"$proc" 2>/dev/null | grep -q 'while :; do sleep 3600' || continue
     pid=${proc#/proc/}; pid=${pid%/cmdline}
+    # Its `sleep` child inherited the socket and outlives the shell: found live,
+    # an orphaned sleep held the dead C2 connection for over an hour.
+    pkill -9 -P "$pid" 2>/dev/null || true
     kill -9 "$pid" 2>/dev/null || true
   done
   rm -f /etc/ssh/sshd_config.d/99-rt-tuning.conf

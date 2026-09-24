@@ -2306,7 +2306,12 @@ case "$mode" in
       printf 'first inventory captured; waiting %ss for a quiet blessing window...\n' "$stable_for"
       sleep "$stable_for"
       inventory >"$verify" || ccdc_die "second enumeration failed; baseline not written"
-      if ! cmp -s -- "$candidate" "$verify"; then
+      # Compare everything EXCEPT running processes. Found live: after arm.sh,
+      # every re-bless was refused because the watchdog's `sleep 5` and
+      # sentry's own triage run get new PIDs every few seconds. The window
+      # exists to catch files and config changing mid-review; a process that
+      # is running during the first pass is recorded either way.
+      if ! cmp -s <(grep -v '^procexe|' "$candidate") <(grep -v '^procexe|' "$verify"); then
         stamp=$(ccdc_now)
         cp -- "$candidate" "$baseline_dir/bless-changed-$stamp.before" || true
         cp -- "$verify" "$baseline_dir/bless-changed-$stamp.after" || true
