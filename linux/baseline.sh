@@ -873,9 +873,22 @@ explained() {
   case "$kind" in
     # root having UID 0 is not a finding. Any OTHER account with UID 0 is.
     uid0) [ "$subject" = root ] && return 0; return 1 ;;
+    # The socket-diagnostics modules are autoloaded by the kernel the first time
+    # anything - including this kit's own `ss` - asks about that socket family.
+    # Found live: four NOTEs after every arm, all caused by sentry itself. Only
+    # the in-tree module of that exact name counts: one loaded from anywhere but
+    # the running kernel's module tree is still news.
+    module)
+      case "$subject" in
+        inet_diag|tcp_diag|udp_diag|raw_diag|unix_diag|netlink_diag|af_packet_diag|sock_diag|packet_diag|vsock_diag|mptcp_diag|smc_diag|xsk_diag|tipc_diag)
+          case "$(modinfo -F filename "$subject" 2>/dev/null)" in
+            /lib/modules/"$(uname -r)"/kernel/net/*|/usr/lib/modules/"$(uname -r)"/kernel/net/*) return 0 ;;
+          esac ;;
+      esac
+      return 1 ;;
     # Semantic readings are never "explained" by a package. An account, a key or
     # a listening socket is either in the blessed baseline or it is news.
-    svcshell|sshkey|sshd|listener|module|sudorule|sudogrp|rootadj) return 1 ;;
+    svcshell|sshkey|sshd|listener|sudorule|sudogrp|rootadj) return 1 ;;
     procexe)
       # These three can never be explained by anything, and the blessed
       # baseline must not be able to whitewash them either. A deleted
@@ -1088,26 +1101,46 @@ action_for() {
 # The shape that works: what was found and when, why it will not be touched
 # automatically, the one command that resolves the ambiguity, and what to do if
 # the answer is surprising.
+# Every NEEDS YOU item ends in the same two marked blocks. Asked for after the
+# live Linux run on 2026-09-24: the items explained the problem at length, and
+# "what do I actually run once I know it is not mine" was buried in prose or
+# missing. The operator scans for these two lines, like triage's "run this".
+not_yours() { printf '\n       ---- NOT YOURS: run this ------------------------------------\n'; }
+yours()     { printf '\n       ---- YOURS: record it so it stops being reported -----------\n'; }
+# Where bless keeps its copy of a shell startup file (see the bless step).
+blessed_copy() { printf '%s/files/%s' "$baseline_dir" "$(printf '%s' "$1" | sed 's|/|%|g')"; }
+
 needs_you_for() {
-  local kind=$1 subject=$2 detail=$3 user fp who __l __k __now __want
+  local kind=$1 subject=$2 detail=$3 user fp who __l __k __now __want bc line home
 
   case "$kind" in
     usershell)
       printf '       A shell startup file that does not contain what it contained\n'
-      printf '       when you froze this box:\n\n'
+      printf '       when you froze this box. It runs every time that user opens a\n'
+      printf '       shell, so a line added here runs as them, over and over:\n\n'
       printf '         %s\n\n' "$subject"
-      printf '       This file runs every time that user opens a shell. Nothing\n'
-      printf '       here is deleted for you, because the file is legitimately\n'
-      printf '       theirs and most of it is probably still their own config.\n\n'
-      printf '       The last few lines, which is where an append lands:\n\n'
-      tail -5 -- "$subject" 2>/dev/null | sed 's/^/         | /'
-      printf '\n       Compare it against the copy every new account starts from:\n\n'
-      printf '         diff /etc/skel/%s %q\n\n' "$(basename -- "$subject")" "$subject"
-      printf '       Look for anything that runs a command rather than setting a\n'
-      printf '       variable - a trap, a curl or wget, a background job, or a\n'
-      printf '       line ending in &. Remove just that line with an editor.\n\n'
-      printf '       If the change is yours, record it and the new contents\n'
-      printf '       become the blessed ones:\n\n'
+      bc=$(blessed_copy "$subject")
+      if [ -r "$bc" ]; then
+        # The diff, not the tail: the planted hook in the live run was on
+        # LINE 1 of /root/.bashrc, and a tail -5 showed five innocent lines.
+        printf '       What changed since you froze it (- was there, + is new):\n\n'
+        diff -u -- "$bc" "$subject" 2>/dev/null | sed -n '3,40p' | grep -E '^[-+@]' \
+          | sed 's/^/         /'
+        not_yours
+        printf '         sudo cp -a %q %s/removed/\n' "$subject" "$state_dir"
+        printf '         sudo cp %q %q\n' "$bc" "$subject"
+        printf '       The first keeps their version as evidence; the second puts back\n'
+        printf '       exactly the file you froze.\n'
+      else
+        printf '       (No frozen copy of this file - it was blessed before copies were\n'
+        printf '       kept. Compare against the file every new account starts from.)\n\n'
+        diff -u -- "/etc/skel/$(basename -- "$subject")" "$subject" 2>/dev/null | sed -n '3,30p' \
+          | grep -E '^[-+@]' | sed 's/^/         /'
+        not_yours
+        printf '         sudo cp -a %q %s/removed/\n' "$subject" "$state_dir"
+        printf '         sudo nano %q        # delete the + lines above that run a command\n' "$subject"
+      fi
+      yours
       printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
       printf '              --reason "my own shell config" --apply\n'
       return 0 ;;
@@ -1119,10 +1152,10 @@ needs_you_for() {
       printf '         GID 0     - read and write anything the root GROUP can\n'
       printf '         /root     - its home IS root'"'"'s home directory, so its\n'
       printf '                     shell startup files are root'"'"'s startup files\n\n'
-      printf '       Decide first whether you put it there. If not, and nothing\n'
-      printf '       is running as it, remove it - and note that -r is NOT used,\n'
-      printf '       because its home directory is /root:\n\n'
-      printf '         ps -u %s\n' "$subject"
+      printf '       Removing it uses -f alone - NOT the recursive flag - because\n'
+      printf '       its home directory is /root.\n'
+      not_yours
+      printf '         ps -u %s                 # nothing should be running as it\n' "$subject"
       printf '         sudo userdel -f %s\n\n' "$subject"
       printf '       Use -f alone. Do NOT add the recursive flag: this account'"'"'s\n'
       printf '       home directory IS /root, and the recursive form would take\n'
@@ -1131,7 +1164,7 @@ needs_you_for() {
       printf '       give it its own and leave the account alone:\n\n'
       printf '         sudo groupadd %s 2>/dev/null; sudo usermod -g %s %s\n\n' \
         "$subject" "$subject" "$subject"
-      printf '       If it is yours and correct, record it:\n\n'
+      yours
       printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
       printf '              --reason "why this account sits next to root" --apply\n'
       return 0 ;;
@@ -1167,10 +1200,10 @@ needs_you_for() {
       printf '       box into a router, rp_filter off allowing spoofed sources,\n'
       printf '       suid_dumpable letting a setuid crash dump its memory, and\n'
       printf '       kptr_restrict or dmesg_restrict going back to 0.\n\n'
-      printf '       If it is theirs, remove it and reload:\n\n'
+      not_yours
       printf '         sudo cp -a %q %s/removed/\n' "$subject" "$state_dir"
-      printf '         sudo rm -f %q && sudo sysctl --system\n\n' "$subject"
-      printf '       If it is yours, record it:\n\n'
+      printf '         sudo rm -f %q && sudo sysctl --system\n' "$subject"
+      yours
       printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
       printf '              --reason "my hardening" --apply\n'
       return 0 ;;
@@ -1183,15 +1216,18 @@ needs_you_for() {
       printf '       and the only way back is the console.\n\n'
       printf '       Read it, and make the change, with the editor that refuses to\n'
       printf '       save a file that would do that:\n\n'
+      not_yours
       if [ "$detail" = /etc/sudoers ]; then
-        printf '         sudo visudo\n\n'
+        printf '         sudo visudo          # delete the line above, save\n'
       else
-        printf '         sudo visudo -f %s\n\n' "$detail"
+        printf '         sudo cp -a %q %s/removed/\n' "$detail" "$state_dir"
+        printf '         sudo visudo -f %s    # delete the line above, save\n' "$detail"
         printf '       If the whole file is theirs rather than one line of it, the\n'
         printf '       file itself is also a finding in this list - approve that\n'
-        printf '       instead and it is removed with an evidence copy.\n\n'
+        printf '       instead and it is removed with an evidence copy.\n'
       fi
-      printf '       If the rule is yours, record it so it stops being reported:\n\n'
+      printf '         sudo visudo -c       # MUST say parsed OK\n'
+      yours
       printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
       printf '              --reason "why this rule exists" --apply\n'
       return 0 ;;
@@ -1204,15 +1240,15 @@ needs_you_for() {
       printf '       had to change for it. `usermod -aG sudo %s` is one command,\n' "$who"
       printf '       it leaves every sudoers file byte-identical, and it survives\n'
       printf '       every check that only reads those files.\n\n'
-      printf '       Confirm it is not you or a teammate, then remove the\n'
-      printf '       membership - this removes ONLY the group membership and\n'
-      printf '       leaves the account alone:\n\n'
+      printf '       Removing it takes ONLY the group membership and leaves the\n'
+      printf '       account alone.\n'
+      not_yours
       printf '         sudo gpasswd --delete %s %s\n\n' "$who" "${subject%%:*}"
       printf '       That takes effect on their NEXT login. If they have a shell\n'
       printf '       open right now, it keeps the privilege until they log out:\n\n'
       printf '         who | grep %s\n' "$who"
-      printf '         sudo pkill -KILL -u %s      # if they should not be here\n\n' "$who"
-      printf '       If the membership is yours, record it:\n\n'
+      printf '         sudo pkill -KILL -u %s      # if they should not be here\n' "$who"
+      yours
       printf '         sudo %s --config %s --allow %q \\\n' "$qself" "$qconfig" "$subject"
       printf '              --reason "why this account has root" --apply\n'
       return 0 ;;
@@ -1226,9 +1262,17 @@ needs_you_for() {
           printf '       that file. Read it and find out what:\n\n'
           printf '         sudo cat -n ~%s/.ssh/authorized_keys\n\n' "$user"
           printf '         %s\n\n' "$detail"
-          printf '       If you did not put it there, treat the file as touched: check\n'
-          printf '       its mtime against when you were last in it, and check every\n'
-          printf '       OTHER key in it too.\n'
+          printf '       If you did not put it there, treat the file as touched and\n'
+          printf '       check every OTHER key in it too.\n'
+          line=${fp#UNPARSEABLE-line}
+          home=$(getent passwd "$user" 2>/dev/null | cut -d: -f6)
+          [ -n "$home" ] || home="~$user"
+          not_yours
+          printf '         sudo cp -a %q %s/removed/\n' "$home/.ssh/authorized_keys" "$state_dir"
+          printf "         sudo sed -i '%sd' %q\\n" "$line" "$home/.ssh/authorized_keys"
+          printf '       And if %s is not an account the packet names, lock it too\n' "$user"
+          printf '       (locked, not deleted - the account is evidence):\n'
+          printf '         sudo usermod -L -e 1 -s /usr/sbin/nologin %s\n' "$user"
           return 0 ;;
       esac
       if [ -r "$blessed" ]; then
@@ -1247,10 +1291,11 @@ needs_you_for() {
       printf '       of the key YOUR session used:\n\n'
       printf '         sudo journalctl -u ssh | grep "Accepted publickey" | tail -1\n\n'
       printf '       If that fingerprint is NOT the one above, the one above is not\n'
-      printf '       yours and you can remove it. Naming it by fingerprint, so you\n'
-      printf '       cannot delete a different line than the one you read:\n\n'
-      printf '         sudo %s --config %s --remove-key %s --apply\n\n' "$qself" "$qconfig" "$fp"
-      printf '       If it IS yours, record it so it stops being reported:\n\n'
+      printf '       yours. The removal names it by fingerprint, so it cannot delete a\n'
+      printf '       different line, and it refuses the key your own session used.\n'
+      not_yours
+      printf '         sudo %s --config %s --remove-key %s --apply\n' "$qself" "$qconfig" "$fp"
+      yours
       printf '         sudo %s --config %s --allow %s \\\n' "$qself" "$qconfig" "$fp"
       printf '              --reason "my own key, added after bless" --apply\n' ;;
 
@@ -1264,10 +1309,13 @@ needs_you_for() {
       printf '       lock themselves out of a scored box mid-event. sshd.sh makes\n'
       printf '       the change, validates it with sshd -t first, and arms a\n'
       printf '       rollback timer before it reloads anything:\n\n'
-      printf '         sudo %q/sshd.sh --config %s\n\n' "$SCRIPT_DIR" "$qconfig"
-      printf '       First find out WHERE the setting comes from, because it may be\n'
-      printf '       in a drop-in you have not looked at:\n\n'
-      printf '         sudo grep -rn %q /etc/ssh/sshd_config /etc/ssh/sshd_config.d/\n' "$subject" ;;
+      printf '       First find out WHERE it comes from - often a drop-in:\n\n'
+      printf '         sudo grep -rin %q /etc/ssh/sshd_config /etc/ssh/sshd_config.d/\n' "$subject"
+      not_yours
+      printf '         sudo cp -a FILE_FROM_ABOVE %s/removed/ && sudo rm FILE_FROM_ABOVE   # if it is a drop-in they added\n' "$state_dir"
+      printf '         sudo %q/sshd.sh --config %s --apply\n' "$SCRIPT_DIR" "$qconfig"
+      printf '       then, from a NEW ssh connection, within the rollback window:\n'
+      printf '         sudo %q/sshd.sh --config %s --confirm\n' "$SCRIPT_DIR" "$qconfig" ;;
 
     listener)
       printf '       A listening socket that is not in the blessed baseline.\n\n'
@@ -1276,13 +1324,14 @@ needs_you_for() {
       printf '       a listener, and the fastest way to lose uptime is to close the\n'
       printf '       port the scorer is checking.\n\n'
       printf '       Find out what holds it and whether that process is explained:\n\n'
-      printf '         sudo ss -tulnp | grep %q\n\n' "${subject#*/}"
-      printf '       If the owning process appears elsewhere on this screen as an\n'
-      printf '       unexplained procexe, deal with it there - that finding knows how\n'
-      printf '       to capture the process before killing it. If it is a scored\n'
-      printf '       service, add the port to CCDC_ALLOWED_TCP_PORTS in your config -\n'
-      printf '       and then make the running sentry read it, which editing the file\n'
-      printf '       does not do on its own:\n\n'
+      printf '         sudo ss -tulnp | grep %q      # the pid= is the process\n' "${subject#*/}"
+      not_yours
+      printf '         sudo %s/preserve.sh --config %s --pid PID --freeze --apply\n' "$qkit" "$qconfig"
+      printf '         sudo kill -9 PID\n'
+      printf '       (evidence first: the socket and its parent vanish with the kill)\n'
+      yours
+      printf '       Add the port to CCDC_ALLOWED_TCP_PORTS in your config, then make\n'
+      printf '       the running sentry read it - editing the file alone does not:\n'
       printf '         sudo %s/sentry.sh --config %s --reload-config --apply\n' "$qkit" "$qconfig"
       printf '       why: playbooks/packet-to-config.md\n' ;;
 
@@ -1296,7 +1345,11 @@ needs_you_for() {
       printf '         sudo lsmod | grep %q\n\n' "$subject"
       printf '       A module with no description, no signature and a used-by count\n'
       printf '       of 0 is worth taking seriously. One that arrived with a driver\n'
-      printf '       you installed is not.\n' ;;
+      printf '       you installed is not.\n'
+      not_yours
+      printf '         sudo modprobe -r %q      # refuses if something still uses it\n' "$subject"
+      yours
+      printf '         sudo %s --config %s --allow %q --reason "why it is loaded" --apply\n' "$qself" "$qconfig" "$subject" ;;
 
     sudoers|pam)
       printf '       A %s file that nothing explains.\n\n' "$kind"
@@ -1307,10 +1360,20 @@ needs_you_for() {
       printf '       and sudoers syntax errors disable sudo entirely.\n\n'
       printf '       Read it first:\n\n'
       printf '         sudo cat %q\n\n' "$subject"
-      printf '       If it grants access you did not grant, remove it with visudo,\n'
-      printf '       which refuses to save a file that would break sudo:\n\n'
-      printf '         sudo visudo -f %q\n\n' "$subject"
-      printf '       Keep a root shell open in a second terminal while you do it.\n' ;;
+      printf '       Keep a root shell open in a second terminal while you do this.\n'
+      not_yours
+      printf '         sudo cp -a %q %s/removed/\n' "$subject" "$state_dir"
+      if [ "$kind" = sudoers ]; then
+        case "$subject" in
+          /etc/sudoers.d/*) printf '         sudo rm %q && sudo visudo -c      # MUST say parsed OK\n' "$subject" ;;
+          *) printf '         sudo visudo -f %q     # remove the lines you did not grant\n' "$subject" ;;
+        esac
+      else
+        printf '         dpkg -S %q || sudo rm %q     # a file no package owns goes; a package file is restored:\n' "$subject" "$subject"
+        printf '         sudo apt-get install --reinstall "$(dpkg -S %q | cut -d: -f1)"\n' "$subject"
+      fi
+      yours
+      printf '         sudo %s --config %s --allow %q --reason "why" --apply\n' "$qself" "$qconfig" "$subject" ;;
 
     *) return 1 ;;
   esac
@@ -2262,6 +2325,16 @@ case "$mode" in
     rm -f -- "$verify"
     trap - EXIT
     chmod 600 "$blessed"
+    # Keep a copy of every shell startup file exactly as blessed, so drift is
+    # shown as a real diff and undone by putting this copy back. Found live:
+    # the planted hook was on line 1 of /root/.bashrc and the report showed
+    # its last five lines.
+    rm -rf -- "$baseline_dir/files"
+    if mkdir -p "$baseline_dir/files" && chmod 700 "$baseline_dir/files"; then
+      grep '^usershell|' "$blessed" | cut -d'|' -f2 | while IFS= read -r f; do
+        [ -f "$f" ] && cp -p -- "$f" "$(blessed_copy "$f")" 2>/dev/null || true
+      done
+    fi
     ccdc_append_log "$baseline_dir/bless.log" \
       "BLESS items=$(grep -c . "$blessed") by=$(id -un)"
     printf 'blessed %s item(s) as known-good.\n' "$(grep -c . "$blessed")"

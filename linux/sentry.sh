@@ -791,7 +791,8 @@ card_for() {
     svcshell|admingroup)    printf 'CARD 10 - service account with a shell, or in an admin group' ;;
     rcdeep|rcfile)          printf 'CARD 11 - shell start-up file that launches something' ;;
     netprocsvc)             printf 'CARD 12 - a shell or interpreter is holding a network connection' ;;
-    sshrootlogin|sshemptypw) printf 'CARD 13 - SSH is configured to let them in' ;;
+    sshrootlogin|sshemptypw|sshaudit) printf 'CARD 13 - SSH is configured to let them in' ;;
+    rogueuser)              printf 'CARD 10 - an account the packet does not name' ;;
     *)                      printf 'playbooks/remediation-cards.md' ;;
   esac
 }
@@ -992,7 +993,22 @@ held_reason() {
       printf '         sudo %s/backup.sh --config %s --diff /etc/THE_FILE\n' "$qkit" "$qconfig"
       return 0 ;;
 
-    sshrootlogin|sshemptypw)
+    rogueuser)
+      printf '\n       An account the packet does not name, and it can still log in -\n'
+      printf '       root or not, that is a way back in.\n\n'
+      printf '       Not automated: CCDC_ALLOWED_USERS may simply be missing an account\n'
+      printf '       the scorer uses, and locking the scoring engine out is lost points.\n'
+      printf '       If the packet does not name it, lock it - locked, not deleted,\n'
+      printf '       because the account is evidence:\n\n'
+      printf '         sudo passwd -S %q; sudo last %q | head -5\n' "$subject" "$subject"
+      printf '         sudo usermod -L -e 1 -s /usr/sbin/nologin %q\n' "$subject"
+      printf '         sudo pkill -KILL -u %q\n\n' "$subject"
+      printf '       If it IS the packet'"'"'s, add it to CCDC_ALLOWED_USERS, then make the\n'
+      printf '       running sentry read the config:\n\n'
+      printf '         sudo %s/sentry.sh --config %s --reload-config --apply\n' "$qkit" "$qconfig"
+      return 0 ;;
+
+    sshrootlogin|sshemptypw|sshaudit)
       printf '\n       The SSH daemon is configured to allow a login it should not.\n\n'
       printf '       Never automated, and not because it is hard: this is the config you\n'
       printf '       are logged in THROUGH. A bad edit ends your session and the event.\n\n'

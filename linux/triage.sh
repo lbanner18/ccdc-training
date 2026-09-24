@@ -61,6 +61,7 @@ printf -v qconfig '%q' "$config"
 printf -v qself '%q' "$SCRIPT_DIR/triage.sh"
 printf -v qcard '%q' "$SCRIPT_DIR/card.sh"
 printf -v qsshd '%q' "$SCRIPT_DIR/sshd.sh"
+printf -v qsentry '%q' "$SCRIPT_DIR/sentry.sh"
 
 
 state_dir=${CCDC_EVIDENCE_DIR:-/var/tmp/ccdc-evidence}
@@ -1356,7 +1357,11 @@ else
   seen_unpackaged=''
   while read -r netid state _ _ local_addr peer rest; do
     [ -n "${rest:-}" ] || continue
-    case "$state" in ESTAB|LISTEN|UNCONN) ;; *) continue ;; esac
+    # CLOSE-WAIT and SYN-SENT too. Found live: the planted C2 shell outlived its
+    # server and held a CLOSE-WAIT socket for an hour, invisible here, because
+    # only ESTAB counted. A shell still holding a dead connection, or retrying
+    # one (SYN-SENT), is the same live implant.
+    case "$state" in ESTAB|LISTEN|UNCONN|CLOSE-WAIT|SYN-SENT) ;; *) continue ;; esac
     # A socket that only ever talks to this machine is not an exfil path and not
     # reachable from a scan. Excluding it is the same call the TCP port check
     # above documents, for the same reason.
@@ -1679,6 +1684,52 @@ else
   clean "no unapproved account is in sudo/wheel/admin"
 fi
 
+# --- 9c2. Accounts the packet does not name ------------------------------------
+# Found live 2026-09-24: plant.sh added `rtsvc` with a password and a bash shell.
+# Once its sudoers file was removed, NOTHING reported it - triage only asked
+# whether unknown accounts had root, baseline tracks keys and sudo but not
+# accounts. An account the packet does not name that can still log in is the
+# red team's way back in, root or not. Only with an allow-list, like the sudo
+# check: without one there is no way to tell theirs from the packet's.
+begin
+if [ -n "${CCDC_ALLOWED_USERS:-}" ] && [ "$(id -u)" -eq 0 ]; then
+  acct_n=0
+  today_days=$(( $(date +%s) / 86400 ))
+  while IFS=: read -r au _ auid _ _ ahome ashell; do
+    [ "$auid" -ge 1000 ] 2>/dev/null && [ "$auid" -lt 65534 ] || continue
+    ccdc_list_contains "$au" "${CCDC_ALLOWED_USERS:-}" && continue
+    case "$ashell" in */nologin|*/false|'') continue ;; esac
+    # Expired (usermod -e 1) blocks password AND key logins: it is handled.
+    aexp=$(getent shadow "$au" 2>/dev/null | cut -d: -f8)
+    if [ -n "$aexp" ] && [ "$aexp" -le "$today_days" ] 2>/dev/null; then continue; fi
+    apw=$(passwd -S "$au" 2>/dev/null | awk '{print $2}')
+    akeys=0; [ -s "$ahome/.ssh/authorized_keys" ] && akeys=1
+    [ "$apw" = P ] || [ "$apw" = NP ] || [ "$akeys" -eq 1 ] || continue
+    acct_n=$((acct_n + 1))
+    how=''; [ "$apw" = P ] && how="a password"; [ "$apw" = NP ] && how="NO password"
+    [ "$akeys" -eq 1 ] && how="${how:+$how and }an SSH key"
+    printf -v qau '%q' "$au"
+    # One finding, one fix block, whichever severity: RED when the account's
+    # home appeared after the box was built, AMBER when it may be the packet's.
+    if [ -e "$ahome" ] && newer_than_box "$ahome"; then
+      asev=RED; aage="created after this box was built"
+    else
+      asev=AMBER; aage="older than the box - maybe the packet's, maybe not"
+    fi
+    if [ "$asev" = RED ]; then red "account $au can log in, and the packet does not name it   [CARD 10]"; else amber "account $au can log in, and the packet does not name it   [CARD 10]"; fi
+    emit "$asev" rogueuser "$au" "account not in CCDC_ALLOWED_USERS can log in ($aage)"
+    detail "It has $how and the shell $ashell; $aage."
+    fixhdr
+    fix "sudo passwd -S $qau; sudo last $qau | head -5          # evidence first"
+    fix "sudo usermod -L -e 1 -s /usr/sbin/nologin $qau     # locked, not deleted: it is evidence"
+    fix "sudo pkill -KILL -u $qau                            # ends any session it has open"
+    detail "yours? add $au to CCDC_ALLOWED_USERS, then: sudo $qsentry --config $qconfig --reload-config --apply"
+  done < <(getent passwd 2>/dev/null || cat /etc/passwd)
+  [ "$acct_n" -gt 0 ] || clean "every account that can log in is one the packet names"
+else
+  clean "unnamed-account check skipped (needs sudo and CCDC_ALLOWED_USERS)"
+fi
+
 # --- 9d. Shell start-up files ------------------------------------------------
 # .bashrc, .profile and /etc/profile.d run every time anyone gets a shell -
 # including you, the next time you `sudo -i`. A hook here is persistence that
@@ -1914,9 +1965,11 @@ if [ "$(id -u)" -eq 0 ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
       fix "sudo grep -rn PermitRootLogin /etc/ssh/sshd_config /etc/ssh/sshd_config.d/"
       fix "# remove the offending line, then:"
       fix "sudo sshd -t && sudo systemctl reload ssh"
-    else
-      clean "sshd does not permit direct root login (effective: ${rootlogin:-unset})"
+    elif [ "$rootlogin" = no ]; then
+      clean "sshd does not permit direct root login (effective: no)"
     fi
+    # prohibit-password / without-password still lets root in with a key; the
+    # SSH audit below reports it. Saying "ok" here contradicted that audit.
     if [ "$emptypw_ssh" = yes ]; then
       red "SSH accepts EMPTY PASSWORDS   [CARD 2]"
       emit RED sshemptypw "permitemptypasswords" "sshd permits empty passwords"
@@ -1928,6 +1981,45 @@ if [ "$(id -u)" -eq 0 ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
   fi
 else
   clean "SSH policy check skipped (needs sudo and sshd; run ./linux/sshd.sh for the full audit)"
+fi
+
+# --- 9f. The full SSH audit, folded in ----------------------------------------
+# sshd.sh used to be a separate place to look, and a drop-in re-enabling root
+# login (99-rt-tuning.conf in the live 2026-09-24 run) was reported ONLY there -
+# not by triage, so not by sentry, so no alert. Asked for by the operator: one
+# place to look. The SSH audit is run here, read-only, and each RED/AMBER it
+# raises becomes a triage finding carrying sshd.sh's own explanation and fix.
+# sshd.sh stays the tool that CHANGES SSH, because that needs its rollback.
+begin
+if [ "$(id -u)" -eq 0 ] && [ -x "$SCRIPT_DIR/sshd.sh" ] && { ccdc_have sshd || [ -x /usr/sbin/sshd ]; }; then
+  ssh_audit=$(timeout 30 "$SCRIPT_DIR/sshd.sh" --config "$config" --audit 2>/dev/null </dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g')
+  ssh_head=''; ssh_sev=''; ssh_body=''; ssh_n=0
+  ssh_flush() {
+    [ -n "$ssh_head" ] || return 0
+    # Already reported above with its own finding: do not say it twice.
+    if [ "${rootlogin:-}" = yes ] && printf '%s' "$ssh_head" | grep -qi '^permitrootlogin'; then
+      ssh_head=''; ssh_body=''; return 0
+    fi
+    ssh_n=$((ssh_n + 1))
+    if [ "$ssh_sev" = RED ]; then red "SSH: $ssh_head   [CARD 13]"; else amber "SSH: $ssh_head   [CARD 13]"; fi
+    printf '%s' "$ssh_body"
+    emit "$ssh_sev" sshaudit "$(printf '%s' "$ssh_head" | tr -c 'A-Za-z0-9' '-' | cut -c1-60)" "$ssh_head"
+    ssh_head=''; ssh_body=''
+  }
+  while IFS= read -r ssh_line; do
+    case "$ssh_line" in
+      '  RED    '*)  ssh_flush; ssh_sev=RED;   ssh_head=${ssh_line#  RED    } ;;
+      '  AMBER  '*)  ssh_flush; ssh_sev=AMBER; ssh_head=${ssh_line#  AMBER  } ;;
+      '  ok '*|'  '[0-9]*' SSH finding'*|'  Work the RED'*|'  hand '*|'  read every'*)
+        ssh_flush ;;
+      *) [ -n "$ssh_head" ] && ssh_body="$ssh_body$ssh_line"$'\n' ;;
+    esac
+  done <<<"$ssh_audit"
+  ssh_flush
+  [ "$ssh_n" -gt 0 ] || clean "the full SSH audit (sshd.sh) found nothing"
+else
+  clean "full SSH audit skipped (needs sudo, sshd, and linux/sshd.sh)"
 fi
 
 # --- 10. Very recently modified /etc ------------------------------------------

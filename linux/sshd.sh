@@ -521,7 +521,12 @@ do_audit() {
         [ -f "$dropin" ] || continue
         printf '\n'
         detail "$dropin"
-        if prov=$(file_provenance "$dropin"); then
+        # Our own drop-in is accounted for: sshd.sh --apply wrote it, with the
+        # marker below. Found live: it was named "the one here you have no
+        # account for" right after the operator applied it.
+        if [ "$dropin" = "$dropin_file" ] && head -1 "$dropin" 2>/dev/null | grep -q '^# Managed by ccdc sshd.sh'; then
+          prov="written by sshd.sh --apply (this kit) - yours"
+        elif prov=$(file_provenance "$dropin"); then
           late_dropins="$late_dropins $dropin"
         fi
         printf '%s\n' "$prov" | sed 's/^/            /'
@@ -587,6 +592,17 @@ do_audit() {
     [ -n "$started" ] || started=$(systemctl show -p ActiveEnterTimestamp --value sshd.service 2>/dev/null)
     if [ -n "$started" ]; then
       started=$(date -d "$started" +%s 2>/dev/null || printf '')
+      # A reload applies the config without moving the start time. Found live:
+      # after sshd.sh --apply reloaded, this AMBER stayed up permanently,
+      # pointing at the file sshd.sh itself had just made live. Take the
+      # latest of: unit start, our own recorded reload, a SIGHUP in the journal.
+      if [ -n "$started" ]; then
+        last_reload=$(stat -c '%Y' "$state_dir/sshd.reloaded" 2>/dev/null || printf 0)
+        [ "$last_reload" -gt "$started" ] 2>/dev/null && started=$last_reload
+        hup=$(journalctl -u ssh.service -u sshd.service -o short-unix --no-pager 2>/dev/null \
+          | grep -E 'Received SIGHUP' | tail -1 | cut -d' ' -f1 | cut -d. -f1)
+        [ -n "$hup" ] && [ "$hup" -gt "$started" ] 2>/dev/null && started=$hup
+      fi
       conf_mtime=$(stat -c '%Y' "$sshd_config_file" 2>/dev/null || printf '')
       for dropin in "$dropin_dir"/*.conf; do
         [ -f "$dropin" ] || continue
@@ -931,6 +947,10 @@ SCRIPT
   rollback_armed || { restore_snapshot; rm -f "$pid_file"; ccdc_die "the rollback did not arm; SSH config restored"; }
 
   reload=$(restart_cmd)
+  # Remember when WE reloaded: a reload does not move the unit's start time,
+  # so the "changed after sshd started" check needs this to know the config
+  # written here is live. See check 6.
+  mkdir -p "$state_dir" 2>/dev/null && touch "$state_dir/sshd.reloaded" 2>/dev/null || true
   if ! eval "$reload" >/dev/null 2>&1; then
     ccdc_warn "reload command failed: $reload"
     ccdc_warn "the rollback is armed and will restore the previous config"
@@ -998,6 +1018,7 @@ case "$mode" in
     cancel_pending_rollback
     restore_snapshot || ccdc_die "rollback failed; restore from $snapshot_dir by hand from the console"
     if "$(sshd_bin)" -t 2>/dev/null; then
+      touch "$state_dir/sshd.reloaded" 2>/dev/null || true
       eval "$(restart_cmd)" >/dev/null 2>&1 || ccdc_warn "restored the config but could not reload sshd"
     else
       ccdc_warn "restored config does not pass sshd -t; NOT reloading"

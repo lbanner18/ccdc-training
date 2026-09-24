@@ -1366,5 +1366,26 @@ else
   no "live-rehearsal regressions are back:${bad_ausearch:+ ausearch without --input-logs: $bad_ausearch}"
 fi
 
+# Found in the live Linux attack run, 2026-09-24.
+bl="$ROOT/linux/baseline.sh"; tr_="$ROOT/linux/triage.sh"
+# 1. Every NEEDS YOU kind ends in a marked "NOT YOURS: run this" block.
+ny_missing=$(awk '/^needs_you_for\(\) \{/{f=1} f && /^    [a-z|]+\)$/{k=$1; seen[k]=0} f && /not_yours$/{seen[k]=1} f && /^}$/{exit} END{for (k in seen) if (!seen[k]) printf " %s", k}' "$bl")
+if [ -z "$ny_missing" ] &&
+   grep -q 'diff -u -- "$bc" "$subject"' "$bl" &&
+   grep -q 'cp -p -- "$f" "$(blessed_copy "$f")"' "$bl" &&
+   grep -q 'inet_diag|tcp_diag|udp_diag|raw_diag|unix_diag|netlink_diag|af_packet_diag' "$bl"; then
+  ok 'baseline: every NEEDS YOU item says what to run; rc files are diffed against a frozen copy; kit-loaded *_diag modules are explained'
+else
+  no "baseline NEEDS YOU guidance regressed (kinds without a NOT YOURS block:${ny_missing:- none})"
+fi
+# 2. triage reports usable unnamed accounts, folds in the SSH audit, and sees dead C2 sockets.
+if grep -q 'emit "$asev" rogueuser' "$tr_" &&
+   grep -q '"$SCRIPT_DIR/sshd.sh" --config "$config" --audit' "$tr_" &&
+   grep -q 'ESTAB|LISTEN|UNCONN|CLOSE-WAIT|SYN-SENT' "$tr_"; then
+  ok 'triage: unnamed accounts that can log in, the full SSH audit, and CLOSE-WAIT/SYN-SENT shells are all findings'
+else
+  no 'triage lost the rogue-account check, the folded SSH audit, or the dead-socket states'
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -573,7 +573,25 @@ an account being added. Go to CARD 1.
 
 ## CARD 10 — service account with a shell, or in an admin group
 
-`RED  service account(s) with a login shell` / `RED  system account(s) in an admin group`
+`RED  service account(s) with a login shell` / `RED  system account(s) in an admin group` /
+`RED|AMBER  account NAME can log in, and the packet does not name it`
+
+### An account the packet does not name
+
+Added users are the red team's most common way back in, and they need no root
+to be useful. `triage.sh` reports every account outside `CCDC_ALLOWED_USERS`
+that can still log in (a real shell, plus a password or an SSH key). If the
+packet does not name it, lock it — locked, not deleted, because the account
+is evidence:
+
+```bash
+sudo passwd -S NAME; sudo last NAME | head -5
+sudo usermod -L -e 1 -s /usr/sbin/nologin NAME
+sudo pkill -KILL -u NAME
+```
+
+If it IS the packet's, add it to `CCDC_ALLOWED_USERS` and run
+`sudo ./linux/sentry.sh --config "$CFG" --reload-config --apply`.
 
 ### Find it yourself
 
