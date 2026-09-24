@@ -29,7 +29,11 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 umask 077
 
 config=''
-mode=loop
+# Bare `sentry.sh --config FILE` shows the queue. It used to START THE LOOP in
+# the operator's terminal - a second, competing sentry - when every other kit
+# tool run bare is read-only. Found live 2026-09-24. The systemd units written
+# by sentry.sh --install and guardian.sh both pass --loop explicitly.
+mode=status
 mute_check=''
 mute_subject=''
 mute_reason=''
