@@ -45,7 +45,7 @@
 .EXAMPLE
     .\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Explain 4
 .EXAMPLE
-    .\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Allow 'service:MyApp' -Reason 'our web app, added minute 40' -Apply
+    .\baseline.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Allow 'services:MyApp' -Reason 'our web app, added minute 40' -Apply
 #>
 [CmdletBinding()]
 param(

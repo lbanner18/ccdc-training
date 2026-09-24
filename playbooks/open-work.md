@@ -203,7 +203,7 @@ share only (2026-09-22).
       reports WHO read a decoy. Hashing cannot answer that question.
 - [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 114 assertions against planted fixtures
+- [x] `redteam/windows-self-test.ps1` — 115 assertions against planted fixtures
       and the read-only Windows tools' static safety contracts.
 - [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
       survived rather than assuming (Defender eats some fixtures in real time).
@@ -353,7 +353,7 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 563 assertions
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 564 assertions
 bash redteam/self-test.sh                             # 448, skips the Windows suite
 ```
 

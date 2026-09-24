@@ -218,7 +218,8 @@ function Get-ItemProperty {
     }
     if ($p -match 'CurrentVersion\\Run$') {
         return [pscustomobject]@{ OneDrive='C:\Program Files\OneDrive\OneDrive.exe /background'
-                                  Updater='powershell -w hidden -enc SQBFAFgA' }   # PLANT
+                                  Updater='powershell -w hidden -enc SQBFAFgA'      # PLANT
+                                  Helper='C:\RT_bin\helper.exe /quiet' }                # PLANT: plain path, odd folder
     }
     if ($p -match 'ScriptBlockLogging') { throw 'missing' }
     if ($p -match 'sethc') { return [pscustomobject]@{ Debugger='C:\Windows\System32\cmd.exe' } }   # PLANT
@@ -286,6 +287,7 @@ if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $findingsFile))
     Want 'RED'   'winlogon'      '*Userinit*'     'a modified Winlogon Userinit is RED'
     Want 'RED'   'runkey'        '*Updater*'      'an encoded-command Run key is RED'
     WantNot      'runkey'        '*OneDrive*'     'an ordinary Run key is not reported as a payload'
+    Want 'AMBER' 'runkey'        '*Helper*'       'a Run key starting a program outside Windows/Program Files is at least AMBER'
     Want 'RED'   'defenderoff'   'RealTimeProtection' 'Defender real-time protection off is RED'
     Want 'RED'   'defenderexcl'  '*Public\Downloads' 'a Defender exclusion is RED'
     Want 'RED'   'fwoff'         'Public'         'a firewall profile that is off is RED'

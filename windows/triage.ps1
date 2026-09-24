@@ -444,6 +444,14 @@ if (@($tasks).Count -gt 0) {
 # =============================================================================
 
 Begin-Check 'autorun'
+# The program a Run value starts: the quoted path, or everything up to .exe.
+function Get-RunKeyExe {
+    param([string]$Command)
+    $c = $Command.Trim()
+    if ($c -match '^"([^"]+)"') { return [Environment]::ExpandEnvironmentVariables($Matches[1]) }
+    if ($c -match '^(.+?\.exe)\b') { return [Environment]::ExpandEnvironmentVariables($Matches[1]) }
+    return ''
+}
 $runKeys = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run',
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce',
@@ -464,6 +472,26 @@ foreach ($k in $runKeys) {
                     -Description 'autostart entry whose command looks like a payload' `
                     -Detail @(('  runs: {0}' -f $val), 'This executes at logon, every logon.') `
                     -Fix @(("Get-ItemProperty -Path {0} -Name {1}" -f (Q $k), (Q $p.Name)),
+                           ("Remove-ItemProperty -Path {0} -Name {1}" -f (Q $k), (Q $p.Name))) `
+                    -Card 'CARD W4'
+            } elseif (($exe = Get-RunKeyExe -Command $val) -and
+                      $exe -notmatch '(?i)^[A-Z]:\\(Windows|Program Files|Program Files \(x86\))\\') {
+                # A plain path can still be the payload. Found live: a Run value
+                # pointing at C:\RT_LAB_PLANT_bin\svc.exe was only a NOTE here,
+                # and only the baseline diff showed it. Installers put programs
+                # under Windows or Program Files; anything else gets a look, and
+                # a binary created after the box was built is RED.
+                $created = $null
+                try { if ([System.IO.File]::Exists($exe)) { $created = [System.IO.File]::GetCreationTime($exe) } } catch { }
+                $isNew = ($null -ne $created -and $facts['BoxBuilt'] -and $created -gt $facts['BoxBuilt'].AddHours(2))
+                $sev = if ($isNew) { 'RED' } else { 'AMBER' }
+                $why = if ($isNew) { ('the program was created {0}, after this box was built' -f $created.ToString('yyyy-MM-dd HH:mm')) }
+                       else { 'installers put programs under C:\Windows or C:\Program Files, not here' }
+                Report -Severity $sev -Check 'runkey' -Subject ('{0}\{1}' -f $k, $p.Name) `
+                    -Description 'autostart entry runs a program from outside Windows and Program Files' `
+                    -Detail @(('  runs: {0}' -f $val), ('  {0}' -f $why), 'This executes at logon, every logon.') `
+                    -Fix @(("Get-FileHash -LiteralPath {0}" -f (Q $exe)),
+                           ("Get-ItemProperty -Path {0} -Name {1}" -f (Q $k), (Q $p.Name)),
                            ("Remove-ItemProperty -Path {0} -Name {1}" -f (Q $k), (Q $p.Name))) `
                     -Card 'CARD W4'
             } else {
