@@ -618,6 +618,14 @@ if ($precedenceBad.Count -eq 0) {
     ok 'no printed command is split or dropped by comma precedence (array + string, surplus -f arguments)'
 } else { nope ('comma precedence splits or drops a printed command: ' + ($precedenceBad -join ', ')) }
 
+# Found live: -RotateAll with only packet accounts enabled printed nothing,
+# which read as done while the admin password was untouched.
+$usersTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\users.ps1'))
+if ($usersTxt -match 'nothing to rotate' -and $usersTxt -match 'NOT rotated, because the packet names them' -and
+    $usersTxt -match '\$heldBack \+= \$u\.Name') {
+    ok 'users.ps1 -RotateAll says which packet accounts it left alone, instead of printing nothing'
+} else { nope 'users.ps1 -RotateAll can skip every account silently' }
+
 # The webroot signature must tell a webshell from the scored site. Reading a
 # form field is ordinary ASP.NET; running a process is not.
 $triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))

@@ -209,12 +209,30 @@ if ($CreateAdmin) {
 
 # --- 4. passwords ------------------------------------------------------------
 $targets = @()
+$heldBack = @()
 if ($RotateAll) {
     foreach ($u in $users) {
         if (-not $u.Enabled) { continue }
         if ($u.Name -match '^(DefaultAccount|WDAGUtilityAccount|Guest)$') { continue }
-        if ((Test-CcdcListContains -Needle $u.Name -List $allowed) -and -not $IncludeScoredUsers) { continue }
+        if ((Test-CcdcListContains -Needle $u.Name -List $allowed) -and -not $IncludeScoredUsers) { $heldBack += $u.Name; continue }
         $targets += $u.Name
+    }
+    # Say what was NOT rotated. A silent -RotateAll on a box where every
+    # enabled account is in the packet list looked like success and left the
+    # administrator password - the red team's first guess - exactly as it was.
+    if (@($targets).Count -eq 0) {
+        Write-Host '  PASSWORD ROTATION: nothing to rotate. Every enabled account is in'
+        Write-Host '  CCDC_ALLOWED_USERS, and -RotateAll leaves those alone.'
+        Write-Host ''
+    }
+    if (@($heldBack).Count -gt 0) {
+        Write-Host ('  NOT rotated, because the packet names them: {0}' -f ($heldBack -join ', ')) -ForegroundColor Yellow
+        Write-Host  '  Your OWN admin password is the red team''s first guess - change it on purpose,'
+        Write-Host  '  after -CreateAdmin, and write the new one down. For each account here:'
+        Write-Host  '    the one YOU log in with:        net user NAME *     (you type the new password)'
+        Write-Host ('    one the packet says to change:  .\windows\users.ps1 -Config {0} -Rotate NAME -IncludeScoredUsers -Apply' -f $Config)
+        Write-Host  '    one the scoring engine uses:    leave it unless the packet says otherwise'
+        Write-Host ''
     }
 } elseif ($Rotate) {
     foreach ($n in $Rotate) {
