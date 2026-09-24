@@ -53,6 +53,10 @@ case "$mode" in
   unit)
     printf 'RED|unit|/etc/systemd/system/evil.service|test unit\n' >"$out"
     ;;
+  unitheld)
+    printf 'RED|unit|/etc/systemd/system/evil.service|test unit\n' >"$out"
+    printf 'RED|rogueuser|rtsvc|account not in CCDC_ALLOWED_USERS can log in\n' >>"$out"
+    ;;
   reviewed_one)
     printf 'RED|cron|/etc/cron.d/reviewed-old|reviewed item\n' >"$out"
     ;;
@@ -182,7 +186,25 @@ write_config ssh
 "$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
 has '^RED[|]unit[|]/etc/systemd/system/evil.service$' "$state/sentry.queue" \
   'unprotected current unit queued'
-"$suite/sentry.sh" --config "$config" --status >/dev/null
+# The default screen is the short one: the item, what approving it does, and
+# the commands - not the 270-line report that hid its only RED on line 19.
+printf 'unitheld\n' >"$test_root/mode"
+"$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
+"$suite/sentry.sh" --config "$config" --status --full >"$test_root/status-full.out"
+"$suite/sentry.sh" --config "$config" --status >"$test_root/status-brief.out"
+if grep -qE '^  \[1\] RED +unit +/etc/systemd/system/evil.service$' "$test_root/status-brief.out" \
+   && grep -q 'will: ' "$test_root/status-brief.out" \
+   && grep -q -- '--approve --apply' "$test_root/status-brief.out" \
+   && grep -qE '^  RED +rogueuser +rtsvc$' "$test_root/status-brief.out" \
+   && grep -qF 'fix:  sudo usermod -L -e 1 -s /usr/sbin/nologin rtsvc' "$test_root/status-brief.out" \
+   && ! grep -q 'more:  playbooks' "$test_root/status-brief.out" \
+   && grep -q 'more:  playbooks' "$test_root/status-full.out" \
+   && [ "$(wc -l <"$test_root/status-brief.out")" -lt "$(wc -l <"$test_root/status-full.out")" ]; then
+  ok 'status is one line per item by default; --full keeps every explanation'
+else
+  bad 'status is one line per item by default; --full keeps every explanation'
+fi
+printf 'unit\n' >"$test_root/mode"
 write_config 'ssh evil.service'
 if "$suite/sentry.sh" --config "$config" --approve --apply >"$test_root/stale.out"; then
   ok 'approval refresh accepted changed protection config'

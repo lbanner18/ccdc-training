@@ -44,6 +44,7 @@ watch_timeout=''
 apply=0
 item=''
 bell=1
+full=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --config) config=${2:?missing config path}; shift 2 ;;
@@ -52,6 +53,7 @@ while [ "$#" -gt 0 ]; do
     --triage-timeout) triage_timeout=${2:?missing triage timeout}; shift 2 ;;
     --watch-timeout) watch_timeout=${2:?missing watch timeout}; shift 2 ;;
     --status) mode=status; shift ;;
+    --full) full=1; shift ;;
     --approve) mode=approve; shift
       case "${1:-}" in ''|-*) ;; *) item=$1; shift ;; esac ;;
     # Named, never numbered. A held finding has no row number to give, and a
@@ -77,7 +79,7 @@ while [ "$#" -gt 0 ]; do
     --dry-run) apply=0; shift ;;
     --no-bell) bell=0; shift ;;
     -h|--help)
-      printf 'usage: %s --config FILE [--status|--approve [N]|--ack|--once|--loop]\n' "$0"
+      printf 'usage: %s --config FILE [--status [--full]|--approve [N]|--ack|--once|--loop]\n' "$0"
       printf '       [--install|--uninstall|--reload-config|--revert] [--apply|--dry-run]\n'
       printf '       [--mute CHECK SUBJECT --reason TEXT|--unmute CHECK SUBJECT|--muted]\n'
       printf '       [--interval N] [--watch-interval N] [--triage-timeout N] [--watch-timeout N] [--no-bell]\n'
@@ -90,6 +92,7 @@ while [ "$#" -gt 0 ]; do
       printf '  leaves your one terminal free:\n'
       printf '      sudo ./sentry.sh --config FILE --install --apply\n'
       printf '      sudo ./sentry.sh --config FILE --status      # what is queued now\n'
+      printf '      sudo ./sentry.sh --config FILE --status --full   # ...with every explanation\n'
       printf '      sudo ./sentry.sh --config FILE --approve N --apply\n'
       printf '\n'
       printf '  When a finding turns out to be yours:\n'
@@ -1394,6 +1397,132 @@ write_alerts() {
   mv -f -- "$tmp" "$alerts" || { rm -f -- "$tmp"; return 1; }
 }
 
+# The one command for a finding sentry will not act on, for the short screen.
+# "fix:" changes the box; "look:" is where the decision gets made. The reasoning
+# behind each is in held_reason, which --status --full still prints.
+brief_fix() {
+  local check=$1 subject=$2 q file
+  printf -v q '%q' "$subject"
+  file=${subject#*::}
+  case "$check" in
+    rogueuser)
+      printf 'fix:  sudo usermod -L -e 1 -s /usr/sbin/nologin %s; sudo pkill -KILL -u %s' "$q" "$q" ;;
+    sshkey)
+      printf 'look: sudo cat %s   (--full prints a delete command per key)' "$q" ;;
+    nopasswd)
+      printf 'fix:  sudo visudo -f %s; sudo visudo -c   (visudo refuses a broken file)' "$q" ;;
+    sshaudit|sshrootlogin|sshemptypw)
+      printf 'look: sudo %s/sshd.sh --config %s   (then --apply, then --confirm from a 2nd login)' "$qkit" "$qconfig" ;;
+    etcchange)
+      printf 'look: sudo %s/baseline.sh --config %s' "$qkit" "$qconfig" ;;
+    crondeep)
+      printf 'look: sudo cat %q; sudo crontab -l -u %s' "$file" "$(basename -- "${subject%%::*}")" ;;
+    rcdeep|rcfile)
+      printf 'look: sudo tail -20 %q' "$file" ;;
+    unit|unittmp|unitdeep|rogueunit)
+      printf 'look: sudo systemctl cat %s' "$(basename -- "${subject%%::*}")" ;;
+    tmpproc|netproc|netprocsvc|netunpackaged|port|udpport)
+      printf 'look: sudo %s/surface.sh --config %s' "$qkit" "$qconfig" ;;
+    suidunpackaged|suid)
+      printf 'fix:  sudo chmod -s %s' "$q" ;;
+    *)
+      printf 'look: sudo %s/sentry.sh --config %s --status --full' "$qkit" "$qconfig" ;;
+  esac
+}
+
+# What --status prints unless --full is given: one line per thing, then the
+# commands. Asked for live, over a 270-line screen whose one actionable item
+# was line 19: "Why is it soooo wordy? I can't find what I actually need to see
+# here." Every explanation still exists - in ALERTS, and under --full.
+# Numbers come from the reviewed snapshot, so they are the ones --approve binds.
+print_brief() {
+  local n=0 red=0 amber=0 watch_count=0 sev check subject desc i=0 drift nd muted_count held=0 last want
+  [ -f "$reviewed" ] && n=$(grep -c . "$reviewed" 2>/dev/null || true)
+  [ -n "$n" ] || n=0
+  if [ -f "$findings" ]; then
+    while IFS='|' read -r sev check subject desc; do
+      queue_has "$check" "$subject" && continue
+      case "$sev" in RED) red=$((red + 1)) ;; AMBER) amber=$((amber + 1)) ;; esac
+    done <"$findings"
+  fi
+  [ -f "$watch_pending" ] && watch_count=$(grep -c '^===== watch event ' "$watch_pending" 2>/dev/null || true)
+  [ -n "$watch_count" ] || watch_count=0
+
+  printf 'SENTRY %s   to approve: %s   yours to do: %s RED, %s AMBER   new events: %s\n' \
+    "$(date -u '+%H:%M:%SZ')" "$n" "$red" "$amber" "$watch_count"
+
+  drift=$(ccdc_tree_drift "$SCRIPT_DIR" "$install_dir" 2>/dev/null)
+  if [ -n "$drift" ]; then
+    nd=$(printf '%s\n' "$drift" | grep -c .)
+    printf '\n!! The running sentry is OLDER than your kit (%s file(s)). Update it:\n' "$nd"
+    if guardian_is_armed; then
+      printf '     sudo %s/guardian.sh --config %s --uninstall --apply\n' "$qkit" "$qconfig"
+      printf '     sudo %s/sentry.sh   --config %s --install   --apply\n' "$qkit" "$qconfig"
+      printf '     sudo %s/guardian.sh --config %s --install   --apply\n' "$qkit" "$qconfig"
+    else
+      printf '     sudo %s/sentry.sh --config %s --install --apply\n' "$qkit" "$qconfig"
+    fi
+  fi
+  if [ -s "$triage_health" ] || [ -s "$watch_health" ]; then
+    printf '\n!! MONITOR HEALTH PROBLEM - detection is not current:\n'
+    { [ ! -s "$triage_health" ] || head -2 "$triage_health"
+      [ ! -s "$watch_health" ] || head -2 "$watch_health"; } | sed 's/^/     /'
+  fi
+  muted_count=$(ccdc_mute_count)
+  [ "$muted_count" -gt 0 ] \
+    && printf '\n   (%s finding(s) muted by you - list: sudo %s/sentry.sh --config %s --muted)\n' \
+      "$muted_count" "$qkit" "$qconfig"
+
+  if [ "$n" -gt 0 ]; then
+    printf '\nAPPROVE - sentry does these for you:\n'
+    while IFS='|' read -r sev check subject; do
+      [ -n "${sev:-}" ] || continue
+      i=$((i + 1))
+      printf '  [%s] %-5s %-12s %s\n' "$i" "$sev" "$check" "$subject"
+      printf '        will: %s\n' "$(render_action "$check" "$subject")"
+      [ "$sev" = RED ] || printf '        (AMBER: approve-all skips it - use its number)\n'
+    done <"$reviewed"
+  fi
+
+  if [ $((red + amber)) -gt 0 ]; then
+    printf '\nYOURS - sentry will not touch these (RED first):\n'
+    for want in RED AMBER; do
+      while IFS='|' read -r sev check subject desc; do
+        [ "${sev:-}" = "$want" ] || continue
+        queue_has "$check" "$subject" && continue
+        held=$((held + 1))
+        # sshaudit subjects are a slug of the message; the message reads better.
+        case "$check" in sshaudit) subject=$desc ;; esac
+        printf '  %-5s %-12s %s\n' "$sev" "$check" "$subject"
+        printf '        %s\n' "$(brief_fix "$check" "${subject}")"
+      done <"$findings"
+    done
+  fi
+  [ "$n" -gt 0 ] || [ "$held" -gt 0 ] || printf '\nNothing to approve and nothing held.\n'
+
+  if [ "$watch_count" -gt 0 ]; then
+    # The newest event's verdict line, and the items it listed. The history
+    # behind it is diffs of files that may already be gone - that is --full.
+    last=$(awk '/^===== watch event /{buf=""} {buf=buf $0 "\n"} END{printf "%s", buf}' "$watch_pending")
+    printf '\nEVENTS - %s since your last --ack. Newest:\n' "$watch_count"
+    printf '%s\n' "$last" \
+      | grep -E '^(\*\*\* )?[0-9]{2}:[0-9]{2}:[0-9]{2}Z  |^ +\[[0-9]+\] (RED|AMBER) ' \
+      | grep -v 'BOX CHANGED' | sed 's/^\*\*\* //; s/^ */  /'
+  fi
+
+  printf '\n==== WHAT TO RUN NOW ============================================\n'
+  [ "$n" -gt 0 ] && {
+    printf '  approve every RED:   sudo %s/sentry.sh --config %s --approve --apply\n' "$qkit" "$qconfig"
+    printf '  approve one:         sudo %s/sentry.sh --config %s --approve N --apply\n' "$qkit" "$qconfig"
+  }
+  [ "$held" -gt 0 ] && printf '  YOURS: paste the fix:/look: line under each one above\n'
+  printf '  what CHANGED:        sudo %s/baseline.sh --config %s\n' "$qkit" "$qconfig"
+  [ "$watch_count" -gt 0 ] && \
+    printf '  clear the events:    sudo %s/sentry.sh --config %s --ack\n' "$qkit" "$qconfig"
+  printf '  why, for each item:  sudo %s/sentry.sh --config %s --status --full\n' "$qkit" "$qconfig"
+  printf '=================================================================\n'
+}
+
 run_triage() {
   local rc=0 now fresh=no
   rm -f -- "$findings"
@@ -2165,7 +2294,12 @@ do_status() {
           "$age" "$stale_after" "$unit_name"
       fi
     fi
-    cat "$alerts" 2>/dev/null || ccdc_die "cannot read $alerts (run status with sudo)"
+    if [ "$full" -eq 1 ]; then
+      cat "$alerts" 2>/dev/null || ccdc_die "cannot read $alerts (run status with sudo)"
+    else
+      [ -r "$alerts" ] || ccdc_die "cannot read $alerts (run status with sudo)"
+      print_brief
+    fi
     if [ -s "$reviewed" ]; then
       printf '\nReviewed approval snapshot frozen. Item numbers above now remain stable until the next --status.\n'
     fi
