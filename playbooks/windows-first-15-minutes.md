@@ -54,9 +54,13 @@ that persists, so it is not a finding for the next person.
 **The same file the Linux box uses.** One format, both boxes.
 
 ```powershell
+mkdir C:\ProgramData\CCDC -Force | Out-Null
 copy config\example.env C:\ProgramData\CCDC\ccdc.env
 notepad C:\ProgramData\CCDC\ccdc.env
 ```
+
+The `mkdir` line matters on a fresh box: the folder does not exist yet, and
+without it the copy fails with "Could not find a part of the path".
 
 Start with these five lines. Replace the examples with values from the packet:
 
