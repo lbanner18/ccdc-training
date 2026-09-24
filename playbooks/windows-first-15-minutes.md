@@ -20,17 +20,23 @@ something:
 
 ```powershell
 cd C:\
-git clone https://github.com/YOURUSER/ccdc-training.git
+git clone https://github.com/lbanner18/ccdc-training.git
 cd ccdc-training
 ```
 
-No git? Download the ZIP and expand it:
+No git (the usual case on Windows)? Download the ZIP and expand it. Three
+short lines, short enough to type on a console that will not paste:
 
 ```powershell
-Invoke-WebRequest -Uri 'https://github.com/YOURUSER/ccdc-training/archive/refs/heads/main.zip' -OutFile C:\kit.zip
-Expand-Archive C:\kit.zip -DestinationPath C:\ -Force
-cd C:\ccdc-training-main
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; $ProgressPreference = 'SilentlyContinue'
+iwr -UseBasicParsing https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.zip -OutFile C:\kit.zip
+Expand-Archive C:\kit.zip C:\ -Force; cd C:\ccdc-training-main
 ```
+
+Each part of line 1 is there for a reason. PowerShell 5.1 on Server
+2016/2012 R2 offers TLS 1.0, which GitHub refuses ("Could not create SSL/TLS
+secure channel"). The progress bar slows 5.1's download many times over.
+`-UseBasicParsing` stops iwr failing on a box where Internet Explorer never ran.
 
 If PowerShell refuses to run the scripts:
 
