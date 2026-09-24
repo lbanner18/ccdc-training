@@ -234,6 +234,10 @@ if ($CreateAdmin) {
             Write-Host ('    [done]  created {0} and added it to Administrators' -f $CreateAdmin) -ForegroundColor Green
             Write-Host ('            password written to {0}' -f $secretFile)
             Write-Host  '            WRITE IT ON PAPER NOW. That file is on the box being attacked.' -ForegroundColor Yellow
+            # Proven on ccdc-win: valid password, WinRM still refuses it.
+            Write-Host  '            Use it at the console or over RDP. Remote PowerShell (WinRM) refuses local'
+            Write-Host  '            admins other than Administrator by design (Remote UAC) - that is not a broken'
+            Write-Host  '            account, and turning it off re-enables pass-the-hash. Leave it on.'
             Write-CcdcLog "created backup admin $CreateAdmin"
             Register-CcdcBackupAdmin -Name $CreateAdmin
         } catch {
