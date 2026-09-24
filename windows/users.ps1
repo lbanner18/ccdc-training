@@ -170,6 +170,39 @@ Write-Host '  That is the column to read. Each one is either yours and missing f
 Write-Host '  your config, or it is not yours.'
 Write-Host ''
 
+# The backup admin has to be in the packet list, or every other tool reads it
+# as an intruder: triage reports it RED rogueadmin, -RotateAll changes its
+# password (so the one on paper stops working), and sentry offers to demote it.
+# Found live on ccdc-win. Edits the LAST single-line definition, which is the
+# one the loader keeps; anything else is left for the operator, and said so.
+function Register-CcdcBackupAdmin {
+    param([Parameter(Mandatory)][string]$Name)
+    if (Test-CcdcListContains -Needle $Name -List @(Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_USERS')) {
+        Write-Host ('            {0} is already in CCDC_ALLOWED_USERS' -f $Name)
+        return
+    }
+    $done = $false
+    try {
+        $lines = [System.IO.File]::ReadAllLines($Config)
+        $at = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i] -match '^\s*CCDC_ALLOWED_USERS=') { $at = $i }
+        }
+        if ($at -ge 0 -and $lines[$at] -match '^\s*CCDC_ALLOWED_USERS="([^"]*)"\s*$') {
+            $lines[$at] = 'CCDC_ALLOWED_USERS="{0}"' -f (($Matches[1].Trim() + ' ' + $Name).Trim())
+            [System.IO.File]::WriteAllLines($Config, $lines)
+            $done = $true
+        }
+    } catch { }
+    if ($done) {
+        Write-Host ('            added {0} to CCDC_ALLOWED_USERS in {1}, so triage and -RotateAll treat it as yours' -f $Name, $Config) -ForegroundColor Green
+        Write-CcdcLog "added backup admin $Name to CCDC_ALLOWED_USERS"
+    } else {
+        Write-Host ('            ADD {0} TO CCDC_ALLOWED_USERS in {1} BY HAND.' -f $Name, $Config) -ForegroundColor Yellow
+        Write-Host  '            Until you do, triage calls it a rogue admin and -RotateAll changes its password.' -ForegroundColor Yellow
+    }
+}
+
 # --- 3. a second way in ------------------------------------------------------
 if ($CreateAdmin) {
     Write-Host ('  BACKUP ADMINISTRATOR: {0}' -f $CreateAdmin)
@@ -186,9 +219,11 @@ if ($CreateAdmin) {
         Write-Host ('    [would] create local account {0}, add it to Administrators,' -f $CreateAdmin)
         Write-Host  '            set a random 20-character password and write it to'
         Write-Host ('            {0}' -f $secretFile)
+        Write-Host ('            and add {0} to CCDC_ALLOWED_USERS in {1}' -f $CreateAdmin, $Config)
     } elseif ($exists) {
         Write-Host ('    {0} already exists - not recreating it. Rotate it instead if you want a new password:' -f $CreateAdmin)
-        Write-Host ('      .\windows\users.ps1 -Config {0} -Rotate {1} -Apply' -f $Config, $CreateAdmin)
+        Write-Host ('      .\windows\users.ps1 -Config {0} -Rotate {1} -IncludeScoredUsers -Apply' -f $Config, $CreateAdmin)
+        Register-CcdcBackupAdmin -Name $CreateAdmin
     } else {
         Record-Password -User $CreateAdmin -Password $pw
         $sec = ConvertTo-SecureString $pw -AsPlainText -Force
@@ -200,6 +235,7 @@ if ($CreateAdmin) {
             Write-Host ('            password written to {0}' -f $secretFile)
             Write-Host  '            WRITE IT ON PAPER NOW. That file is on the box being attacked.' -ForegroundColor Yellow
             Write-CcdcLog "created backup admin $CreateAdmin"
+            Register-CcdcBackupAdmin -Name $CreateAdmin
         } catch {
             Write-Host ('    [FAIL]  {0}' -f $_.Exception.Message) -ForegroundColor Red
         }

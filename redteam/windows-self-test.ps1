@@ -626,6 +626,13 @@ if ($usersTxt -match 'nothing to rotate' -and $usersTxt -match 'NOT rotated, bec
     ok 'users.ps1 -RotateAll says which packet accounts it left alone, instead of printing nothing'
 } else { nope 'users.ps1 -RotateAll can skip every account silently' }
 
+# Found live: the backup admin was not in the packet list, so triage called it
+# a rogue admin and -RotateAll changed the password written on paper.
+if ($usersTxt -match '(?s)Write-CcdcLog "created backup admin \$CreateAdmin"\s*Register-CcdcBackupAdmin' -and
+    $usersTxt -match '(?s)already exists - not recreating it.*?Register-CcdcBackupAdmin') {
+    ok 'users.ps1 -CreateAdmin registers the backup admin in CCDC_ALLOWED_USERS'
+} else { nope 'users.ps1 -CreateAdmin leaves the backup admin looking like an intruder' }
+
 # The webroot signature must tell a webshell from the scored site. Reading a
 # form field is ordinary ASP.NET; running a process is not.
 $triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))
