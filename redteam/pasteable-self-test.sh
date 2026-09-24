@@ -1328,5 +1328,18 @@ else
   no "a mutating tool answers --help with barely a usage line:$thinhelp"
 fi
 
+# users.sh --create-admin: the backup admin must be able to sudo and must be in
+# the packet list. It once created an account that could do neither - proven
+# live on ubuntu-target 2026-09-23, where sudo -l -U now reports (ALL : ALL).
+ua="$ROOT/linux/users.sh"
+if grep -q 'usermod -aG "$admin_group" "$admin_user"' "$ua" &&
+   grep -q 'for g in sudo wheel' "$ua" &&
+   grep -q "sudo -l -U \"\$admin_user\"" "$ua" &&
+   grep -q '^    register_backup_admin$' "$ua"; then
+  ok 'users.sh --create-admin grants sudo/wheel, proves it, and registers the account'
+else
+  no 'users.sh --create-admin leaves the backup admin without sudo or outside CCDC_ALLOWED_USERS'
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

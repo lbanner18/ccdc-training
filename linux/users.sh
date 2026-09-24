@@ -75,11 +75,42 @@ for user in ${CCDC_MANAGED_USERS:-}; do
   fi
 done
 
+# The backup admin must (1) actually be able to sudo and (2) be in the packet
+# list. Found 2026-09-23 while proving the Windows twin live: this created the
+# account and set its password but granted nothing, so the "second way in"
+# could not administer anything - and, not being in CCDC_ALLOWED_USERS, triage
+# would have reported it as an unapproved admin the moment it could.
+register_backup_admin() {
+  local line last
+  [ -n "$config" ] || { ccdc_warn "no --config: add $admin_user to CCDC_ALLOWED_USERS by hand"; return 0; }
+  if ccdc_list_contains "$admin_user" "${CCDC_ALLOWED_USERS:-}"; then
+    printf '%s is already in CCDC_ALLOWED_USERS\n' "$admin_user"
+    return 0
+  fi
+  # Edit only the LAST definition (the one sourcing keeps), and only when it is
+  # a plain one-line quoted value. Anything cleverer is left to the operator.
+  last=$(grep -n '^[[:space:]]*CCDC_ALLOWED_USERS=' "$config" | tail -1 | cut -d: -f1)
+  line=$(grep -n '^[[:space:]]*CCDC_ALLOWED_USERS="[^"]*"[[:space:]]*$' "$config" | tail -1 | cut -d: -f1)
+  if [ -n "$last" ] && [ "$last" = "$line" ] &&
+     sed -i "${line}s/^\([[:space:]]*CCDC_ALLOWED_USERS=\"\)\([^\"]*\)\"/\1\2 $admin_user\"/" "$config"; then
+    printf 'added %s to CCDC_ALLOWED_USERS in %s, so triage treats it as yours\n' "$admin_user" "$config"
+    ccdc_append_log "$evidence/actions.log" "backup_admin_registered user=$admin_user config=$config"
+  else
+    ccdc_warn "ADD $admin_user TO CCDC_ALLOWED_USERS in $config BY HAND - until then triage reports it as an unapproved admin"
+  fi
+}
+
 if [ -n "$admin_user" ]; then
   case "$admin_user" in *[!a-zA-Z0-9._-]*|'') ccdc_die "admin username must contain only letters, digits, dot, underscore, or dash" ;; esac
   if id "$admin_user" >/dev/null 2>&1; then
     ccdc_die "admin user already exists: $admin_user"
   fi
+  # Debian/Ubuntu grant root through `sudo`, the Red Hat family through `wheel`.
+  admin_group=''
+  for g in sudo wheel; do
+    if getent group "$g" >/dev/null 2>&1; then admin_group=$g; break; fi
+  done
+  [ -n "$admin_group" ] || ccdc_die "neither a sudo nor a wheel group exists on this box; grant $admin_user in /etc/sudoers.d by hand (visudo -f)"
   if [ "$apply" -eq 1 ]; then
     useradd --create-home --shell "$(command -v bash 2>/dev/null || printf /bin/sh)" "$admin_user"
     printf 'Set a password for backup admin %s now. Do not paste it into chat or commit it.\n' "$admin_user" >&2
@@ -87,9 +118,18 @@ if [ -n "$admin_user" ]; then
       passwd -l "$admin_user" >/dev/null 2>&1 || true
       ccdc_die "password setup failed; $admin_user was created but left locked"
     fi
-    ccdc_append_log "$evidence/actions.log" "backup_admin_created user=$admin_user"
+    usermod -aG "$admin_group" "$admin_user" || ccdc_die "could not add $admin_user to $admin_group; it exists but cannot sudo"
+    ccdc_append_log "$evidence/actions.log" "backup_admin_created user=$admin_user group=$admin_group"
+    # Prove it rather than assume the group is wired to sudoers on this box.
+    if sudo -l -U "$admin_user" 2>/dev/null | grep -q '(ALL'; then
+      printf 'backup admin %s created, in %s, and sudo confirms it may run commands as root\n' "$admin_user" "$admin_group"
+    else
+      ccdc_warn "$admin_user is in $admin_group but sudo does not grant it root here; check /etc/sudoers for %$admin_group"
+    fi
+    register_backup_admin
   else
-    printf '[dry-run] would create backup admin %s; password would be entered interactively\n' "$admin_user"
+    printf '[dry-run] would create backup admin %s, add it to %s, and add it to CCDC_ALLOWED_USERS in %s; password entered interactively\n' \
+      "$admin_user" "$admin_group" "${config:-(no --config given)}"
   fi
 fi
 

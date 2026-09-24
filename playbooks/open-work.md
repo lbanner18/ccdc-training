@@ -353,7 +353,7 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 565 assertions
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 566 assertions
 bash redteam/self-test.sh                             # 448, skips the Windows suite
 ```
 
