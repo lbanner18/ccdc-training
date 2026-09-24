@@ -16,37 +16,107 @@ list that stops you losing points while you work out the rest.
 ## Windows at a glance
 
 The whole flow on one screen, in the order it was rehearsed on the lab box.
-Every step has a detailed section further down.
+Every command is complete: copy it as it stands. Each step has a detailed
+section further down.
 
-**A. Once, at the start** (elevated PowerShell, in the kit folder)
+### A. Once, at the start — elevated PowerShell
 
-| # | run | why |
-|---|---|---|
-| 1 | the three download lines in *Minute 0* | get the kit |
-| 2 | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force` | let this window run the kit |
-| 3 | `mkdir C:\ProgramData\CCDC -Force` · `copy config\example.env C:\ProgramData\CCDC\ccdc.env` · `notepad C:\ProgramData\CCDC\ccdc.env` | the packet, written down: users, scored services, ports |
-| 4 | `.\windows\recon.ps1` | the "before" picture, read-only |
-| 5 | `.\windows\triage.ps1` | what is wrong now. `scoreduser` / `scoredservice` first |
-| 6 | `.\windows\harden.ps1` then `.\windows\harden.ps1 -Apply` | firewall, logging, Defender, policy. Firewall default-deny only ever through here |
-| 7 | `.\windows\users.ps1 -CreateAdmin ops2 -Apply` · password on paper · `net user Administrator *` | a second way in, then your own password |
-| 8 | `.\windows\triage.ps1` · `.\windows\sentry.ps1 -Status` · `.\windows\sentry.ps1 -Approve all -Apply` · `-Approve N -Apply` | down to 0 RED |
-| 9 | `.\windows\arm.ps1 -Apply` | canaries and the self-repairing tasks |
-| 10 | `.\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply` | freeze the clean box |
-| 11 | **second window:** `.\windows\sentry.ps1 -Watch` | popup when anything new appears |
+**1. Get the kit** (the box needs internet; see *Minute 0* if it has none)
+```powershell
+[Net.ServicePointManager]::SecurityProtocol = 'Tls12'; $ProgressPreference = 'SilentlyContinue'
+iwr -UseBasicParsing https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.zip -OutFile C:\kit.zip
+Expand-Archive C:\kit.zip C:\ -Force; cd C:\ccdc-training-main
+```
 
-**B. When the popup fires** — the loop
+**2. Let this window run the kit**
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+```
 
-| # | run | why |
-|---|---|---|
-| 1 | `.\windows\baseline.ps1 -Status` | the complete numbered list of what changed |
-| 2 | `.\windows\baseline.ps1 -Explain N` for each | "if this is NOT yours": run those lines. Yours: the `-Allow ... -Reason` line |
-| 3 | `.\windows\triage.ps1` · `.\windows\sentry.ps1 -Status` / `-Approve N -Apply` | anything dangerous left, with its fix |
-| 4 | `.\windows\baseline.ps1 -Status` until it says **Nothing has changed** | every change removed, or allowed with a reason |
+**3. Write the packet into the config**
+```powershell
+mkdir C:\ProgramData\CCDC -Force | Out-Null
+copy config\example.env C:\ProgramData\CCDC\ccdc.env
+notepad C:\ProgramData\CCDC\ccdc.env
+```
+Ctrl+F each of these and fill it in from the packet, then Ctrl+S:
+`CCDC_ALLOWED_USERS` · `CCDC_WINDOWS_SERVICES` · `CCDC_ALLOWED_TCP_PORTS` · `CCDC_TCP_CHECKS`
 
-**C. Traps that cost time on the lab box**
+**4. The "before" picture** (read-only)
+```powershell
+.\windows\recon.ps1
+```
+
+**5. What is wrong right now** (read-only) — fix `scoreduser` / `scoredservice` first
+```powershell
+.\windows\triage.ps1
+```
+
+**6. The hardening checklist** — read the dry run, then apply. Firewall default-deny only ever through here.
+```powershell
+.\windows\harden.ps1
+.\windows\harden.ps1 -Apply
+```
+
+**7. A second admin, then your own password** — both on paper
+```powershell
+.\windows\users.ps1 -CreateAdmin ops2 -Apply
+net user Administrator *
+```
+
+**8. Down to 0 RED**
+```powershell
+.\windows\triage.ps1
+.\windows\sentry.ps1 -Status
+.\windows\sentry.ps1 -Approve all -Apply
+```
+Then each LOOK item you have read: `.\windows\sentry.ps1 -Approve N -Apply` (N from `-Status`).
+
+**9. Canaries and the self-repairing tasks**
+```powershell
+.\windows\arm.ps1 -Apply
+```
+
+**10. Freeze the clean box**
+```powershell
+.\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply
+```
+
+**11. In a SECOND elevated window — the lookout**
+```powershell
+cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
+.\windows\sentry.ps1 -Watch
+```
+
+### B. When the popup fires — the loop
+
+**1. Everything that changed, numbered**
+```powershell
+.\windows\baseline.ps1 -Status
+```
+
+**2. For each number** — run its "if this is NOT yours" lines, or allow it:
+```powershell
+.\windows\baseline.ps1 -Explain N
+.\windows\baseline.ps1 -Allow 'SECTION:KEY' -Reason 'why this is mine' -Apply
+```
+`-Explain` prints the exact `-Allow` line for that item.
+
+**3. Anything dangerous left, with its fix**
+```powershell
+.\windows\triage.ps1
+.\windows\sentry.ps1 -Status
+```
+
+**4. Until it says "Nothing has changed"**
+```powershell
+.\windows\baseline.ps1 -Status
+```
+
+### C. Traps that cost time on the lab box
 
 - A tool looks stuck: the title bar says **Select** — press **Esc**. Do not click inside a running window.
-- A Defender popup is a red-team sighting: **Windows Security → Protection history**.
+- A Defender popup is a red-team sighting: **Windows Security → Protection history**, or `Get-MpThreatDetection`.
 - Never paste a `Block 3389` or a default-deny line by hand; RDP may be how you and the scorer get in.
 - Passwords go on paper, never into chat or a file you keep.
 
