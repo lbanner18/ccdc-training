@@ -41,6 +41,10 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
 $sourceRoot = Split-Path -Parent $PSScriptRoot
 $store = Get-CcdcPath 'backup\kit-recovery'
 $archive = Join-Path $store 'ccdc-kit-latest.zip'

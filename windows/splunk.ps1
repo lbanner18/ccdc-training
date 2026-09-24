@@ -48,7 +48,11 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
-$configPath = $cfg['_ConfigPath']
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
+$configPath = $Config
 $logName = 'splunk.log'
 function L { param([string]$Message) Write-CcdcLog -Message $Message -LogName $logName }
 
@@ -93,14 +97,14 @@ $configuredHome = Get-CcdcValue -Config $cfg -Name 'CCDC_SPLUNK_HOME'
 $homeBad = $false
 $splunkHome = ''
 # A configured path is used only if it is really there. Taking it on trust made
-# a typo look like a working install that was merely "not running".
-if ($configuredHome) {
-    if ([System.IO.Directory]::Exists($configuredHome)) {
-        $splunkHome = $configuredHome
-    } else {
-        $homeBad = $true
-    }
+# a typo look like a working install that was merely "not running". A bad path
+# is reported AND the search carries on: stopping there made a mistyped config
+# on a box with a real forwarder print "NOTHING on this box forwards", a
+# confident false statement. Both facts are true; say both.
+if ($configuredHome -and [System.IO.Directory]::Exists($configuredHome)) {
+    $splunkHome = $configuredHome
 } else {
+    if ($configuredHome) { $homeBad = $true }
     $splunkHome = Get-HomeFromService -Service $service
     if (-not $splunkHome) {
         foreach ($candidate in @('C:\Program Files\SplunkUniversalForwarder', 'C:\Program Files\Splunk')) {

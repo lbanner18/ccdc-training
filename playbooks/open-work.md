@@ -203,7 +203,7 @@ share only (2026-09-22).
       reports WHO read a decoy. Hashing cannot answer that question.
 - [x] `playbooks/windows-cards.md` — 13 cards, asserted to exist.
 - [x] `playbooks/windows-first-15-minutes.md`
-- [x] `redteam/windows-self-test.ps1` — 99 assertions against planted fixtures
+- [x] `redteam/windows-self-test.ps1` — 105 assertions against planted fixtures
       and the read-only Windows tools' static safety contracts.
 - [x] `redteam/windows-plant.ps1` — LAB ONLY, two interlocks, verifies what
       survived rather than assuming (Defender eats some fixtures in real time).
@@ -353,7 +353,7 @@ at the console — use `shutdown /s /f` over WinRM.
 ## How to verify anything you change
 
 ```bash
-CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 548 assertions
+CCDC_PWSH=/path/to/pwsh bash redteam/self-test.sh     # 554 assertions
 bash redteam/self-test.sh                             # 448, skips the Windows suite
 ```
 
@@ -579,7 +579,7 @@ not solve the Administrator threat model.
       Administrators group and ignores the user profile entirely; Defender's
       `RealTimeProtectionEnabled` being false IS the finding, not something to
       quietly fix.
-      `windows/` now has thirteen tools, all 58 triage checks have run on the
+      `windows/` now has seventeen tools, all 58 triage checks have run on the
       Server 2022 lab target over WinRM, and `redteam/windows-self-test.ps1`
       passes **99 passed, 0 failed** natively on Windows Server 2022.
       `redteam/windows-plant.ps1` verified: all 10 adversary fixtures planted,

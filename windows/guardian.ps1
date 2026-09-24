@@ -39,6 +39,11 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
+$configPath = [string]$cfg['_ConfigPath']
 $TaskName = if ([string]::IsNullOrWhiteSpace($TaskName)) {
     Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_GUARDIAN_TASK' -Default 'Maintenance-Check'
 } else {
@@ -269,7 +274,6 @@ if ($Install) {
     Assert-CcdcAdmin
     Assert-CcdcPacketEntered -Config $cfg
     Assert-NoLegacyTaskPair
-    $configPath = (Resolve-Path -LiteralPath $Config).Path
     if (-not $Apply) {
         Write-Host ''
         Write-Host ('  would copy Guardian, watchdog, canary, and integrity files under {0}' -f $privateDir)
@@ -290,7 +294,7 @@ if ($Install) {
         Write-CcdcInfo "installed '$TaskName' as SYSTEM; it repairs '$WatchdogTaskName' and keeps '$IntegrityTaskName' present every $IntervalSeconds seconds"
         Write-Host ''
         Write-Host '  This is redundancy, not tamper-proofing. An Administrator can remove all three tasks.' -ForegroundColor Yellow
-        Write-Host ('  status: .\windows\guardian.ps1 -Config {0} -Status' -f $Config)
+        Write-Host ('  status: .\windows\guardian.ps1 -Config {0} -Status' -f $configPath)
         Write-Host ''
     } catch { Write-CcdcDie "could not install guardian: $($_.Exception.Message)" }
     exit 0
@@ -345,7 +349,6 @@ if ($Run) {
     # Internal task mode. It is intentionally not armed by -Apply: this is the
     # installed SYSTEM task doing the repair the operator explicitly installed.
     Assert-CcdcAdmin
-    $configPath = (Resolve-Path -LiteralPath $Config).Path
     G "guardian started interval=${IntervalSeconds}s watchdog-task=$WatchdogTaskName"
     while ($true) {
         Ensure-Watchdog -ConfigPath $configPath
@@ -357,6 +360,6 @@ if ($Run) {
 Write-Host ''
 Write-Host '  guardian.ps1 needs one of: -Install, -Status, -Uninstall'
 Write-Host ''
-Write-Host ('    .\windows\guardian.ps1 -Config {0} -Install -Apply' -f $Config)
+Write-Host ('    .\windows\guardian.ps1 -Config {0} -Install -Apply' -f $configPath)
 Write-Host ''
 exit 1

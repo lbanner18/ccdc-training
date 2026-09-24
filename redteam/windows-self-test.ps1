@@ -57,6 +57,19 @@ CCDC_ALLOWED_UDP_PORTS="53"
 CCDC_TCP_CHECKS="127.0.0.1:80"
 CCDC_HTTP_CHECKS="http://127.0.0.1/"
 '@ | Set-Content -LiteralPath $cfgPath -Encoding UTF8
+# The default config path is the usability promise behind the bare commands in
+# the Windows playbook. Exercise the resolver itself, not only callers that
+# happen to pass an explicit -Config value.
+Copy-Item -LiteralPath $cfgPath -Destination (Join-Path $work 'ccdc.env') -Force
+. (Join-Path $root 'windows\lib\Common.ps1')
+$env:CCDC_CONFIG = ''
+$defaultCfg = Import-CcdcConfig -Path ''
+if ($defaultCfg['_ConfigPath'] -eq (Resolve-Path -LiteralPath (Join-Path $work 'ccdc.env')).Path) {
+    ok 'Import-CcdcConfig discovers the CCDC-root default config and records its resolved path'
+} else {
+    nope 'Import-CcdcConfig did not resolve the default ccdc.env path'
+}
+
 
 # =============================================================================
 # THE FIXTURES - one planted thing per detector, and a decoy for each that must
@@ -543,6 +556,71 @@ if (-not (Test-Path -LiteralPath $armPath)) {
 }
 
 # =============================================================================
+# Regression guards for convenience and safety paths that do not show up in a
+# normal fixture scan.
+# =============================================================================
+$autoConfigTools = @('arm.ps1','audit.ps1','watchdog.ps1','guardian.ps1','integrity.ps1')
+$autoConfigBad = @()
+foreach ($tool in $autoConfigTools) {
+    $text = Get-Content -LiteralPath (Join-Path $root ('windows\' + $tool)) -Raw
+    if ($text -notmatch '\$configPath = \[string\]\$cfg\[''_ConfigPath''\]' -or
+        $text -match 'Resolve-Path -LiteralPath \$Config') { $autoConfigBad += $tool }
+}
+if ($autoConfigBad.Count -eq 0) {
+    ok 'tools that install or repair tasks use Import-CcdcConfig''s resolved default path'
+} else {
+    nope ('optional-config tools can still resolve an empty -Config argument: ' + ($autoConfigBad -join ', '))
+}
+
+# Every printed command carries -Config. Without this reassignment a bare run
+# prints "-Config  -Apply", which PowerShell rejects, and watchdog's child
+# canary call loses its argument entirely (5.1 drops empty native args).
+$configReuseBad = @()
+foreach ($tf in [System.IO.Directory]::GetFiles((Join-Path $root 'windows'), '*.ps1')) {
+    $tt = [System.IO.File]::ReadAllText($tf)
+    if ($tt -match '(?m)^\$cfg = Import-CcdcConfig -Path \$Config' -and
+        $tt -notmatch '\$Config = \[string\]\$cfg\[''_ConfigPath''\]') { $configReuseBad += [System.IO.Path]::GetFileName($tf) }
+}
+if ($configReuseBad.Count -eq 0) {
+    ok 'every tool that auto-finds its config reuses that path for printed commands and child calls'
+} else {
+    nope ('a bare run prints or passes an empty -Config: ' + ($configReuseBad -join ', '))
+}
+
+# The webroot signature must tell a webshell from the scored site. Reading a
+# form field is ordinary ASP.NET; running a process is not.
+$triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))
+$sigLine = [regex]::Match($triageTxt, "\`$webshellSig = '([^']+)'")
+if ($sigLine.Success) {
+    $sig = $sigLine.Groups[1].Value
+    $benign = '<%@ Page Language="C#" %><% var name = Request.Form["name"]; var id = Request.QueryString["id"]; Response.Write(Request["q"]); %>'
+    $shell = '<%@ Page Language="C#" %><% var p = new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c " + Request["c"]); %>'
+    if ($benign -notmatch $sig -and $shell -match $sig) {
+        ok 'triage webshell signature flags process execution, not an ordinary form handler'
+    } else { nope 'triage webshell signature misses a shell or flags an ordinary ASP.NET page RED' }
+} else { nope 'could not find $webshellSig in triage.ps1' }
+
+$hardenTxt = Get-Content -LiteralPath (Join-Path $root 'windows\harden.ps1') -Raw
+if ($hardenTxt -match 'CCDC_ACK_NETWORK_NAME_RESOLUTION_HARDENING' -and
+    $hardenTxt -match '\$networkNameHardening' -and
+    $hardenTxt -match 'Network-name-resolution controls were not changed') {
+    ok 'network-name-resolution and domain-adjacent hardening requires explicit packet opt-in'
+} else {
+    nope 'network-name-resolution hardening can run without a packet-confirmed opt-in'
+}
+
+$triageTxt = Get-Content -LiteralPath (Join-Path $root 'windows\triage.ps1') -Raw
+$webStart = $triageTxt.IndexOf("Begin-Check 'webroot'")
+$webPart = if ($webStart -ge 0) { $triageTxt.Substring($webStart) } else { '' }
+if ($webPart -match '\$webScriptExtensions' -and $webPart -match '\$webMaxBytes = 2MB' -and
+    $webPart -match 'Get-Content -LiteralPath \{0\} -TotalCount 80' -and
+    $webPart -notmatch 'Remove-Item' -and
+    $triageTxt -match "Report -Severity 'AMBER' -Check 'startupfile'") {
+    ok 'web-root and Startup findings are bounded and evidence-first, not blind deletion'
+} else {
+    nope 'web-root or Startup findings can still read unbounded files or jump straight to deletion'
+}
+
 # baseline.ps1 - the drift tool
 # =============================================================================
 $blPath = Join-Path $root 'windows\baseline.ps1'
@@ -908,9 +986,14 @@ CCDC_BOX_NAME="win-target"
 CCDC_SPLUNK_HOME="$(Join-Path $work 'no-such-forwarder')"
 "@ | Set-Content -LiteralPath $goneCfg -Encoding UTF8
 $sGone = (& $splunkTool -Config $goneCfg *>&1 | Out-String -Width 4096)
-if ($sGone -match 'CCDC_SPLUNK_HOME is set to a path that does not exist' -and $sGone -match 'NOTHING on this box forwards') {
-    ok 'splunk.ps1: a mistyped home is a finding, and no forwarder is never "just not running"'
-} else { nope 'splunk.ps1 trusted a configured home that does not exist' }
+# Where the suite runs decides the second half. On a host with a real forwarder
+# at a default path (the lab VM), the mistyped home must not hide it; on a host
+# with none, the tool must say nothing forwards rather than "not running".
+$realUf = [System.IO.Directory]::Exists('C:\Program Files\SplunkUniversalForwarder') -or [System.IO.Directory]::Exists('C:\Program Files\Splunk')
+$secondHalf = if ($realUf) { $sGone -match 'forwarder found at' -and $sGone -notmatch 'NOTHING on this box forwards' } else { $sGone -match 'NOTHING on this box forwards' }
+if ($sGone -match 'CCDC_SPLUNK_HOME is set to a path that does not exist' -and $secondHalf) {
+    ok 'splunk.ps1: a mistyped home is a finding, and neither hides a real forwarder nor calls a missing one "not running"'
+} else { nope 'splunk.ps1 trusted a mistyped home, or let it decide whether a forwarder exists' }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''

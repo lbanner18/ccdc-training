@@ -243,7 +243,7 @@ The task ran something. Find that file, preserve it, remove it — and find what
 
 ### `webshell` — web root backdoors (IIS / W3SVC)
 
-When IIS is running, an attacker can drop an `.aspx`, `.ashx`, or `.php` file in `C:\inetpub\wwwroot` that executes system commands over HTTP without authentication.
+When IIS is running, an attacker can drop an `.aspx`, `.ashx`, or `.php` file in `C:\inetpub\wwwroot` that executes system commands over HTTP without authentication. A filename or one suspicious-looking line is a lead, not permission to delete a real application handler: preserve and read it first.
 
 Find and remove:
 ```powershell
@@ -254,8 +254,14 @@ Get-ChildItem -Path C:\inetpub\wwwroot -Recurse -File |
 # Search for execution patterns (cmd.exe, powershell, eval, ProcessStartInfo)
 Select-String -Path C:\inetpub\wwwroot\* -Pattern 'eval\(|ProcessStartInfo|cmd\.exe|powershell'
 
-# Delete the webshell
-Remove-Item -LiteralPath 'C:\inetpub\wwwroot\cmd.aspx' -Force
+# Preserve the suspected file before making a removal decision
+$suspect = 'C:\inetpub\wwwroot\cmd.aspx'
+Get-FileHash -Algorithm SHA256 -LiteralPath $suspect
+Copy-Item -LiteralPath $suspect -Destination C:\ProgramData\CCDC\evidence\ -Force
+Get-Content -LiteralPath $suspect -TotalCount 80
+
+# Only after the packet/application owner confirms it is not needed:
+# Remove-Item -LiteralPath $suspect -Force
 ```
 
 ---

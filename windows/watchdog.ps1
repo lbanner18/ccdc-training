@@ -50,6 +50,11 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
+$configPath = [string]$cfg['_ConfigPath']
 Initialize-CcdcRoot
 $TaskName = if ([string]::IsNullOrWhiteSpace($TaskName)) {
     Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_WATCHDOG_TASK' -Default 'Operations-Monitor'
@@ -68,7 +73,7 @@ if ($Install) {
     Assert-CcdcPacketEntered -Config $cfg
     $me = $MyInvocation.MyCommand.Path
     $argline = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -Config "{1}" -IntervalSeconds {2}' -f `
-               $me, (Resolve-Path -LiteralPath $Config).Path, $IntervalSeconds
+               $me, $configPath, $IntervalSeconds
     $action  = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $argline
     # At startup AND now: at startup so it survives a reboot, now so you do not
     # have to reboot to get the protection you just asked for.

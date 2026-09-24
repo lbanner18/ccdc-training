@@ -40,6 +40,10 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
 Initialize-CcdcRoot
 Clear-CcdcFindings
 
@@ -479,12 +483,14 @@ foreach ($k in $runKeys) {
             $sFiles = @(Get-ChildItem -LiteralPath $sd -File -Force -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -notmatch '(?i)^desktop\.ini$' })
             foreach ($sf in $sFiles) {
-                Report -Severity 'RED' -Check 'startupfile' -Subject $sf.FullName `
+                Report -Severity 'AMBER' -Check 'startupfile' -Subject $sf.FullName `
                     -Description ('file in Startup folder executes at logon: {0}' -f $sf.Name) `
                     -Detail @(('  path: {0} ({1} bytes)' -f $sf.FullName, $sf.Length),
                               ('  last write: {0}' -f $sf.LastWriteTime),
                               'Files in this folder execute automatically when a user logs on.') `
-                    -Fix @(("Remove-Item -LiteralPath {0} -Force" -f (Q $sf.FullName))) `
+                    -Fix @(("Get-Item -LiteralPath {0} | Format-List FullName,Length,CreationTime,LastWriteTime" -f (Q $sf.FullName)),
+                           ("Get-FileHash -Algorithm SHA256 -LiteralPath {0}" -f (Q $sf.FullName)),
+                           '# Preserve and identify the file before you decide whether the packet needs it.') `
                     -Card 'CARD W4'
             }
         } catch { }
@@ -1203,9 +1209,16 @@ if ($customWeb -and (Test-Path -LiteralPath $customWeb) -and ($webRoots -notcont
     $webRoots += $customWeb
 }
 if ($webRoots.Count -gt 0) {
-    $suspExt = '(?i)\.(aspx?|ashx|asmx|php|ps1|bat|cmd|exe|dll|vbs)$'
-    $webshellSig = '(?i)(eval\s*\(|cmd\.exe|powershell(\.exe)?|ProcessStartInfo|System\.Diagnostics\.Process|Request\[|Request\.Form|Request\.QueryString|base64_decode|shell_exec|passthru|exec\s*\()'
+    # Inspect only scripts that a web server might execute. Do not read arbitrary
+    # binaries or enormous uploads into memory during a triage pass.
+    $webScriptExtensions = @('.asp','.aspx','.ashx','.asmx','.php','.jsp','.jspx','.cgi','.pl','.py','.rb','.ps1','.bat','.cmd','.vbs')
+    $webMaxBytes = 2MB
+    # Execution primitives only. Reading Request.Form or Request[...] is what
+    # every ordinary ASP.NET page does; flagging it RED sends the operator to
+    # delete the scored site. A webshell must run something, so match that.
+    $webshellSig = '(?i)(eval\s*\(|cmd\.exe|powershell(\.exe)?|ProcessStartInfo|System\.Diagnostics\.Process|base64_decode|shell_exec|passthru|exec\s*\()'
     $webFilesChecked = 0
+    $webFilesSkippedLarge = 0
     foreach ($root in $webRoots) {
         $files = @()
         try {
@@ -1213,9 +1226,10 @@ if ($webRoots.Count -gt 0) {
         } catch { }
         foreach ($f in $files) {
             $webFilesChecked++
-            # Skip known canaries
+            # Skip known canaries.
             if ($f.Name -match '(?i)^web\.config\.bak$') { continue }
-            if ($f.Extension -match $suspExt) {
+            if ($webScriptExtensions -contains $f.Extension.ToLowerInvariant()) {
+                if ($f.Length -gt $webMaxBytes) { $webFilesSkippedLarge++; continue }
                 $isMalicious = $false
                 $matchedSnippet = ''
                 try {
@@ -1232,20 +1246,29 @@ if ($webRoots.Count -gt 0) {
                         -Detail @(('  file: {0} ({1} bytes)' -f $f.FullName, $f.Length),
                                   ('  matched pattern: {0}' -f $matchedSnippet),
                                   'Webshells in wwwroot provide remote unauthenticated command execution.') `
-                        -Fix @(("Remove-Item -LiteralPath {0} -Force" -f (Q $f.FullName))) `
+                        -Fix @(("Get-FileHash -Algorithm SHA256 -LiteralPath {0}" -f (Q $f.FullName)),
+                               ("Get-Content -LiteralPath {0} -TotalCount 80" -f (Q $f.FullName)),
+                               '# Preserve the file and confirm it is not a legitimate application handler before removal.') `
                         -Card 'CARD W3'
                 } elseif ($facts['BoxBuilt'] -and $f.LastWriteTimeUtc -gt $facts['BoxBuilt'].AddHours(2)) {
                     Report -Severity 'AMBER' -Check 'newwebfile' -Subject $f.FullName `
                         -Description ('executable web script placed in web root after box installation: {0}' -f $f.Name) `
                         -Detail @(('  file: {0} ({1} bytes)' -f $f.FullName, $f.Length),
                                   ('  last write time: {0}' -f $f.LastWriteTime)) `
-                        -Fix @(("Remove-Item -LiteralPath {0} -Force" -f (Q $f.FullName))) `
+                        -Fix @(("Get-FileHash -Algorithm SHA256 -LiteralPath {0}" -f (Q $f.FullName)),
+                               ("Get-Content -LiteralPath {0} -TotalCount 80" -f (Q $f.FullName)),
+                               '# This is a date-based lead, not proof. Preserve and review it before removal.') `
                         -Card 'CARD W3'
                 }
             }
         }
     }
-    Clean ("web root reviewed ({0} file(s) checked)" -f $webFilesChecked)
+    if ($webFilesSkippedLarge -gt 0) {
+        Report -Severity 'NOTE' -Check 'webroot' -Subject ($webFilesSkippedLarge.ToString() + ' oversized scripts') `
+            -Description 'web scripts larger than 2 MiB were not read during triage' `
+            -Detail @('This limit avoids loading unbounded content. Review these files manually if the packet makes them important.')
+    }
+    Clean ("web root reviewed ({0} file(s) checked; scripts are capped at 2 MiB)" -f $webFilesChecked)
 }
 
 # =============================================================================

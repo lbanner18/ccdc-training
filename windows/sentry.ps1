@@ -62,6 +62,10 @@ $ErrorActionPreference = 'Continue'
 
 Initialize-CcdcRoot
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
 
 $script:findingsFile = Get-CcdcPath 'state\findings.txt'
 $script:reviewedFile = Get-CcdcPath 'state\reviewed.txt'

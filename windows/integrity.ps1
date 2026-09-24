@@ -37,6 +37,11 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
+$configPath = [string]$cfg['_ConfigPath']
 $TaskName = if ([string]::IsNullOrWhiteSpace($TaskName)) {
     Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_INTEGRITY_TASK' -Default 'Continuity-Audit'
 } else {
@@ -112,7 +117,6 @@ if ($IntervalSeconds -lt 15) { Write-CcdcDie '-IntervalSeconds must be at least 
 if ($Install) {
     Assert-CcdcAdmin
     Assert-CcdcPacketEntered -Config $cfg
-    $configPath = (Resolve-Path -LiteralPath $Config).Path
     if (-not $Apply) {
         Write-Host ('  would install SYSTEM task {0}; it checks Guardian task {1}' -f $TaskName, $GuardianTaskName)
         Write-Host '  DRY RUN. Add -Apply.' -ForegroundColor Yellow

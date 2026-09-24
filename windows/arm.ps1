@@ -44,7 +44,14 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
-$configPath = (Resolve-Path -LiteralPath $Config).Path
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
+# Import-CcdcConfig may have found the default file for us. The parameter is
+# still empty in that case, so use the resolved path it records rather than
+# resolving the original argument again.
+$configPath = [string]$cfg['_ConfigPath']
 $guardianTask = Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_GUARDIAN_TASK' -Default 'Maintenance-Check'
 $watchdogTask = Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_WATCHDOG_TASK' -Default 'Operations-Monitor'
 $integrityTask = Get-CcdcTaskName -Config $cfg -Name 'CCDC_WINDOWS_INTEGRITY_TASK' -Default 'Continuity-Audit'

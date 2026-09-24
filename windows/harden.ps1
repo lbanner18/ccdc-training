@@ -59,6 +59,10 @@ $ErrorActionPreference = 'Continue'
 . "$PSScriptRoot\lib\Common.ps1"
 
 $cfg = Import-CcdcConfig -Path $Config
+# From here on -Config is the file actually loaded. When it was omitted and
+# the default was found, every printed command and child call would
+# otherwise carry an empty -Config, which PowerShell refuses.
+$Config = [string]$cfg['_ConfigPath']
 Assert-CcdcAdmin
 Initialize-CcdcRoot
 $facts = Get-CcdcBoxFacts
@@ -415,23 +419,25 @@ if ($steps -contains 'RemoteAccess') {
         Set-ItemProperty -Path $lsa -Name 'EveryoneIncludesAnonymous' -Value 0
     } 'CARD W10'
 
-    # Windows DNS Server hardening (Canvas cheat sheet: limit attack surface against WPAD/ISATAP spoofing)
-    $dnsCmd = Get-Command -Name 'Set-DnsServerGlobalQueryBlockList' -ErrorAction SilentlyContinue
-    if ($null -ne $dnsCmd) {
-        $dnsSvc = Get-Service -Name 'DNS' -ErrorAction SilentlyContinue
-        if ($null -ne $dnsSvc -and $dnsSvc.Status -eq 'Running') {
-            Do-Change 'block WPAD and ISATAP queries on DNS server (mitigates proxy auto-discovery spoofing)' {
-                Set-DnsServerGlobalQueryBlockList -List 'wpad','isatap' -ErrorAction SilentlyContinue
-            } 'CARD W10'
+    # These controls can change name resolution, RDP authentication behaviour,
+    # and cached domain sign-ins. They are useful only when the packet confirms
+    # they fit this box, so a broad hardening pass must not guess.
+    $networkNameHardening = (Get-CcdcValue -Config $cfg -Name 'CCDC_ACK_NETWORK_NAME_RESOLUTION_HARDENING' -Default '0') -eq '1'
+    if ($networkNameHardening) {
+        # Windows DNS Server hardening.
+        $dnsCmd = Get-Command -Name 'Set-DnsServerGlobalQueryBlockList' -ErrorAction SilentlyContinue
+        if ($null -ne $dnsCmd) {
+            $dnsSvc = Get-Service -Name 'DNS' -ErrorAction SilentlyContinue
+            if ($null -ne $dnsSvc -and $dnsSvc.Status -eq 'Running') {
+                Do-Change 'block WPAD and ISATAP queries on this DNS server' {
+                    Set-DnsServerGlobalQueryBlockList -List 'wpad','isatap' -ErrorAction SilentlyContinue
+                } 'CARD W10'
+            }
         }
     }
 
     Do-Change 'enable LSA Protection (RunAsPPL) to prevent LSASS credential dumping' {
         Set-ItemProperty -Path $lsa -Name 'RunAsPPL' -Value 1 -Type DWord
-    } 'CARD W10'
-
-    Do-Change 'enable Restricted Admin mode for RDP to prevent credential caching' {
-        Set-ItemProperty -Path $lsa -Name 'DisableRestrictedAdmin' -Value 0 -Type DWord
     } 'CARD W10'
 
     $wdigest = 'HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'
@@ -440,23 +446,31 @@ if ($steps -contains 'RemoteAccess') {
         Set-ItemProperty -Path $wdigest -Name 'UseLogonCredential' -Value 0 -Type DWord
     } 'CARD W10'
 
-    $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
-    Do-Change 'limit cached domain credentials to 1 to hinder offline cracking' {
-        Set-ItemProperty -Path $winlogon -Name 'CachedLogonsCount' -Value '1'
-    } 'CARD W10'
+    if ($networkNameHardening) {
+        Do-Change 'allow Restricted Admin mode for incoming RDP sessions' {
+            Set-ItemProperty -Path $lsa -Name 'DisableRestrictedAdmin' -Value 0 -Type DWord
+        } 'CARD W10'
 
-    $dnsClient = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
-    Do-Change 'disable LLMNR to prevent Responder NTLMv2 hash poisoning' {
-        if (-not (Test-Path -LiteralPath $dnsClient)) { New-Item -Path $dnsClient -Force | Out-Null }
-        Set-ItemProperty -Path $dnsClient -Name 'EnableMulticast' -Value 0 -Type DWord
-    } 'CARD W10'
+        $winlogon = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon'
+        Do-Change 'limit cached domain credentials to 1' {
+            Set-ItemProperty -Path $winlogon -Name 'CachedLogonsCount' -Value '1'
+        } 'CARD W10'
 
-    Do-Change 'disable NetBIOS over TCP/IP on active network adapters (mitigates NBT-NS spoofing)' {
-        Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
-            ForEach-Object {
-                try { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = [uint32]2 } | Out-Null } catch { }
-            }
-    } 'CARD W10'
+        $dnsClient = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\DNSClient'
+        Do-Change 'disable LLMNR' {
+            if (-not (Test-Path -LiteralPath $dnsClient)) { New-Item -Path $dnsClient -Force | Out-Null }
+            Set-ItemProperty -Path $dnsClient -Name 'EnableMulticast' -Value 0 -Type DWord
+        } 'CARD W10'
+
+        Do-Change 'disable NetBIOS over TCP/IP on active network adapters' {
+            Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -ErrorAction SilentlyContinue |
+                ForEach-Object {
+                    try { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = [uint32]2 } | Out-Null } catch { }
+                }
+        } 'CARD W10'
+    } else {
+        Note 'Network-name-resolution controls were not changed. Set CCDC_ACK_NETWORK_NAME_RESOLUTION_HARDENING="1" only after the packet confirms they fit this box.'
+    }
 
     if (-not $IHaveConsoleAccess) {
         Note 'Not touching whether RDP is ENABLED. If you are working over RDP, turning it'
