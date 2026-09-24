@@ -5,7 +5,7 @@ two questions: **is the scored service up**, and **can I prove what changed**.
 
 - **Linux** — 26 tools: recon, hunt, harden, triage, baseline/drift, tripwires,
   and a supervised approval queue that applies fixes only when you say so.
-- **Windows** — 17 tools, 58 checks: triage, a checklist-driven harden, account
+- **Windows** — 17 tools, 66 checks: triage, a checklist-driven harden, account
   and password handling, a scored-service/canary watchdog, the same approval queue,
   configuration drift against a frozen baseline, and tripwires that report who
   read them.

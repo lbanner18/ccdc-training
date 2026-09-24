@@ -171,7 +171,7 @@ share only (2026-09-22).
       that be disbelieved. Knows that most of Windows is CATALOG signed, so an
       unsigned file under a system root is reported as a catalog question, not
       as a bad binary.
-- [x] `triage.ps1` — 58 checks, RED/AMBER/NOTE, every finding printing the
+- [x] `triage.ps1` — 66 checks, RED/AMBER/NOTE, every finding printing the
       command that fixes it and a card reference.
 - [x] `harden.ps1` — the checklist in order, `-Apply` gated, scored re-check
       after every step, and the firewall step writes your own access rules
@@ -187,7 +187,7 @@ share only (2026-09-22).
       Security, System, PowerShell, Task Scheduler, and Defender records into
       CSV and Markdown. Proven on `ccdc-win` 2026-09-21: a quiet log is zero
       events, not a fake collection gap; files are hash-manifested.
-- [x] `sentry.ps1` — the approval queue. 25 of the 58 checks are automatable;
+- [x] `sentry.ps1` — the approval queue. 25 of the 66 checks are automatable;
       `-Status` freezes a numbered snapshot, `-Approve` re-verifies identity
       against a fresh scan, a sweep takes SWEEP-tier only.
 - [x] `baseline.ps1` — configuration drift. Scoped to config plus the
@@ -282,7 +282,7 @@ share only (2026-09-22).
       monitors, LSA providers, drivers, and vendor-specific hooks remain a
       stated gap. Proven read-only on `ccdc-win` 2026-09-18; SSH stayed closed
       and WinRM stayed up.
-- [ ] **`sentry.ps1` acts on 25 of 58 checks.** The rest print a command because
+- [ ] **`sentry.ps1` acts on 25 of 66 checks.** The rest print a command because
       their fix needs judgement. Four are deliberately never automatable and the
       suite asserts it: `fwinbound`, `lsappl`, `svcpath`, `svcdiracl`.
 - [ ] **The baseline does not cover files nothing wires to run.** By design.
