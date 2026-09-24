@@ -221,9 +221,10 @@ if (@($localUsers).Count -gt 0) {
         if ($u.PSObject.Properties.Name -contains 'PasswordRequired' -and -not $u.PasswordRequired) {
             Report -Severity 'RED' -Check 'nopassword' -Subject $short `
                 -Description 'enabled account that does not require a password' `
-                -Detail @('Anyone at the console, and anyone who can reach a network logon,',
-                          'is this account.') `
-                -Fix @(("net user {0} *        # you will be prompted; it is not echoed" -f $short)) `
+                -Detail @('It may have no password at all, and even if it has one, anyone who can',
+                          'reset it can make it blank. New-LocalUser leaves this flag off by default.') `
+                -Fix @(("net user {0} /passwordreq:yes" -f $short),
+                       ("# if it has no password yet, also:  net user {0} *   (prompted, not echoed)" -f $short)) `
                 -Card 'CARD W1'
         }
     }

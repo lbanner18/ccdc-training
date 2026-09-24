@@ -633,6 +633,13 @@ if ($usersTxt -match '(?s)Write-CcdcLog "created backup admin \$CreateAdmin"\s*R
     ok 'users.ps1 -CreateAdmin registers the backup admin in CCDC_ALLOWED_USERS'
 } else { nope 'users.ps1 -CreateAdmin leaves the backup admin looking like an intruder' }
 
+# Found live: New-LocalUser leaves PasswordRequired off, so our own backup
+# admin was RED nopassword - and triage's fix (net user X *) never cleared it.
+$triageNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))
+if ($usersTxt -match 'net\.exe user \$CreateAdmin /passwordreq:yes' -and $triageNow -match "net user \{0\} /passwordreq:yes") {
+    ok 'the backup admin requires a password, and the nopassword fix actually clears the finding'
+} else { nope 'New-LocalUser accounts stay PasswordRequired=False, or the nopassword fix does not set it' }
+
 # The webroot signature must tell a webshell from the scored site. Reading a
 # form field is ordinary ASP.NET; running a process is not.
 $triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))

@@ -224,6 +224,7 @@ if ($CreateAdmin) {
         Write-Host ('    {0} already exists - not recreating it. Rotate it instead if you want a new password:' -f $CreateAdmin)
         Write-Host ('      .\windows\users.ps1 -Config {0} -Rotate {1} -IncludeScoredUsers -Apply' -f $Config, $CreateAdmin)
         Register-CcdcBackupAdmin -Name $CreateAdmin
+        & net.exe user $CreateAdmin /passwordreq:yes | Out-Null
     } else {
         Record-Password -User $CreateAdmin -Password $pw
         $sec = ConvertTo-SecureString $pw -AsPlainText -Force
@@ -231,6 +232,9 @@ if ($CreateAdmin) {
             New-LocalUser -Name $CreateAdmin -Password $sec -FullName 'CCDC backup admin' `
                 -Description 'second administrator - incident response' -PasswordNeverExpires -ErrorAction Stop | Out-Null
             Add-LocalGroupMember -Group 'Administrators' -Member $CreateAdmin -ErrorAction Stop
+            # New-LocalUser leaves "password required" off even when given a
+            # password, so triage rightly called our own admin RED nopassword.
+            & net.exe user $CreateAdmin /passwordreq:yes | Out-Null
             Write-Host ('    [done]  created {0} and added it to Administrators' -f $CreateAdmin) -ForegroundColor Green
             Write-Host ('            password written to {0}' -f $secretFile)
             Write-Host  '            WRITE IT ON PAPER NOW. That file is on the box being attacked.' -ForegroundColor Yellow
