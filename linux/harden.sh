@@ -629,7 +629,7 @@ run_undo() {
 # --- cutting one thing -------------------------------------------------------
 do_cut() {
   local kind=$2 key=$3 members=$4 pkgs=$5
-  local undo='' removed='' purged=0 u _p _d
+  local undo='' removed='' purged=0 said_no_cache=0 u _p _d
 
   case "$kind" in
     units|pkg)
@@ -647,9 +647,18 @@ do_cut() {
             ccdc_warn "no .deb could be cached for $pkgs; purging anyway because
   --accept-no-undo was given. Putting this back will need a working mirror."
             ccdc_action apt-get -y purge $pkgs >/dev/null 2>&1 && purged=1
+          elif [ "$kind" = 'pkg' ]; then
+            # One true sentence. This used to say "DISABLED AND MASKED" and,
+            # two lines later, "nothing was changed" - both printed for the
+            # same package on the lab box. For a package with no unit, the
+            # second is what happened.
+            ccdc_warn "could not save a copy of $pkgs for the undo (usually: no internet), so
+  NOTHING was removed. Leaving it is safe; to remove it with no way back, re-run
+  this cut with --accept-no-undo."
+            said_no_cache=1
           else
-            ccdc_warn "could not cache a .deb for $pkgs, so it was DISABLED AND
-  MASKED instead of purged - an undo with no network has to come from
+            ccdc_warn "could not cache a .deb for $pkgs, so its units are disabled and
+  masked instead of purged - an undo with no network has to come from
   somewhere. Fix the mirror and re-run, or pass --accept-no-undo to
   purge one way."
           fi
@@ -679,7 +688,7 @@ do_cut() {
         printf '    masked, so it cannot be started again by name\n'
         undo="systemctl unmask $members; systemctl enable --now $members"
       else
-        ccdc_warn "$key is still installed and nothing was changed. It is a
+        [ "$said_no_cache" -eq 1 ] || ccdc_warn "$key is still installed and nothing was changed. It is a
   package with no unit to disable, so purging is the only way to cut it."
         return 1
       fi ;;
