@@ -428,6 +428,32 @@ settings you need for an incident report are still usable:
 
 ---
 
+## Leave a lookout running — so you can work another box
+
+Nothing above tells you when something NEW appears: the Guardian tasks keep the
+kit and the scored service alive, and that is all. Once the box is frozen, open
+a **second** elevated PowerShell on it and leave this running:
+
+```powershell
+cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
+.\windows\sentry.ps1 -Watch
+```
+
+Every two minutes it re-runs triage, the baseline comparison, the canary check
+and Defender's detection list, and shouts only about what is **new** since the
+last pass: a red banner, two beeps, and a popup in every session on the box —
+including your RDP window while you are typing in another one.
+
+- First pass lists what is already open, without a popup. Those are yours to
+  work through with `sentry.ps1 -Status`.
+- A grey `quiet` line each pass means it is alive and nothing changed.
+- Green `resolved` lines appear as you fix things.
+- It changes nothing. Fixing is still `sentry.ps1 -Status` / `-Approve`.
+- **Do not click inside that window.** A click starts a selection and freezes
+  the loop until you press Esc; the title bar then begins with "Select".
+
+`-IntervalSeconds 60` checks more often; `-NoPopup` keeps it to the window.
+
 ## The tripwires are already laid
 
 `arm.ps1` laid them before it installed Watchdog, so Watchdog can check them
@@ -510,6 +536,7 @@ nc -z -v WINDOWS_IP 3389
 | what changed since | `.\windows\baseline.ps1 -Config CONFIG -Status` |
 | lay tripwires | `.\windows\canary.ps1 -Config CONFIG -Deploy -Apply` |
 | has anything been touched | `.\windows\canary.ps1 -Config CONFIG -Check` |
+| tell me when something new appears | `.\windows\sentry.ps1 -Watch` (second window) |
 | record the box, read-only | `.\windows\recon.ps1 -Config CONFIG` |
 | accounts and passwords | `.\windows\users.ps1 -Config CONFIG` |
 | the whole hardening checklist | `.\windows\harden.ps1 -Config CONFIG` |

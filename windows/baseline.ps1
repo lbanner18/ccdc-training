@@ -585,6 +585,9 @@ no baseline to compare against.
     Write-Host ('  frozen {0}, compared {1}' -f $old.meta.taken, (Get-Date).ToUniversalTime().ToString('u'))
 
     if (@($shown).Count -eq 0) {
+        # A clean comparison clears the drift record; a stale one read later
+        # (by sentry -Watch, or a person) would report changes long undone.
+        if (Test-Path -LiteralPath $script:driftFile) { Remove-Item -LiteralPath $script:driftFile -Force -ErrorAction SilentlyContinue }
         Write-Host ''
         Write-Host '  Nothing has changed.' -ForegroundColor Green
         if ($allowedCount -gt 0) { Write-Host ('  ({0} change(s) hidden by your allowlist; -All shows them)' -f $allowedCount) }

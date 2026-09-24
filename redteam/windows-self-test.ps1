@@ -640,6 +640,24 @@ if ($usersTxt -match 'net\.exe user \$CreateAdmin /passwordreq:yes' -and $triage
     ok 'the backup admin requires a password, and the nopassword fix actually clears the finding'
 } else { nope 'New-LocalUser accounts stay PasswordRequired=False, or the nopassword fix does not set it' }
 
+# sentry -Watch: the unattended loop. It must never change the box, and each
+# check must run as a child process so a check's `exit` cannot end the loop.
+$sentryTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\sentry.ps1'))
+$watchBlock = [regex]::Match($sentryTxt, '(?s)# WATCH - the loop.*?# STATUS').Value
+if ($watchBlock -and
+    $watchBlock -notmatch '(?m)\b(Set|Remove|New|Disable|Enable|Stop|Add|Clear|Rename)-[A-Z]\w+' -and
+    $watchBlock -notmatch '(?i)Remove-Item|Remove-Mp|Invoke-Action' -and
+    $watchBlock -match "& powershell\.exe -NoProfile -ExecutionPolicy Bypass -File \`$path" -and
+    $watchBlock -match "'triage\.ps1' -Arguments @\('-Quiet', '-NoEvidence'\)" -and
+    $watchBlock -match "'baseline\.ps1'" -and $watchBlock -match "'canary\.ps1'" -and
+    $watchBlock -match 'Get-MpThreatDetection') {
+    ok 'sentry -Watch runs triage, baseline, canary and Defender as read-only child checks'
+} else { nope 'sentry -Watch changes the box, runs a check in-process, or skips one of the four checks' }
+$baselineTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\baseline.ps1'))
+if ($baselineTxt -match "(?s)if \(@\(\`$shown\)\.Count -eq 0\) \{\s*#[^\n]*\n\s*#[^\n]*\n\s*if \(Test-Path -LiteralPath \`$script:driftFile\) \{ Remove-Item") {
+    ok 'a clean baseline comparison clears the drift record the watcher reads'
+} else { nope 'baseline -Status leaves a stale drift.txt after a clean comparison' }
+
 # The webroot signature must tell a webshell from the scored site. Reading a
 # form field is ordinary ASP.NET; running a process is not.
 $triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))

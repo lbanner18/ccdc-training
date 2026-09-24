@@ -42,6 +42,13 @@
 
 .EXAMPLE
     .\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Approve 7 -Apply
+
+.EXAMPLE
+    .\sentry.ps1 -Watch
+    Leave running in a second window. Every -IntervalSeconds (default 120) it
+    re-runs triage, the baseline comparison, the canary check and Defender's
+    detection list, and shouts - banner, beep, popup in every session - only
+    about what is NEW since the last pass. Read-only: it never fixes anything.
 #>
 [CmdletBinding()]
 param(
@@ -53,7 +60,11 @@ param(
     [string]$Unmute,
     [switch]$Muted,
     [switch]$Undo,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$Watch,
+    [ValidateRange(30,3600)][int]$IntervalSeconds = 120,
+    [switch]$NoPopup,
+    [ValidateRange(0,100000)][int]$Passes = 0
 )
 
 Set-StrictMode -Version 2.0
@@ -506,6 +517,126 @@ function Format-Item {
     if ($Item.Tier -ne 'RED') {
         Write-Host '        -Approve all will NOT take this. Approve it by number.'
     }
+}
+
+# =============================================================================
+# WATCH - the loop you leave running in a second window
+# =============================================================================
+# Windows has no always-on detector: the Guardian tasks keep the kit and the
+# scored service alive, but nothing noticed a planted admin account until the
+# operator ran triage by hand. Found live on ccdc-win. This re-runs the
+# read-only checks on a timer and reports only what is NEW, so a solo operator
+# working another box sees one popup instead of re-reading thirty findings.
+# Each check runs as a child process: their `exit` codes must not end the loop.
+
+function Invoke-WatchChild {
+    param([Parameter(Mandatory)][string]$Script, [string[]]$Arguments = @())
+    $path = Join-Path $PSScriptRoot $Script
+    $out = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $path -Config $Config @Arguments 2>&1 | Out-String
+    return @{ Code = $LASTEXITCODE; Text = $out }
+}
+
+function Get-WatchSnapshot {
+    # One key per thing worth telling the operator about, with the words to show.
+    $snap = [ordered]@{}
+    $muted = @(Get-MuteKeys)
+    $triaged = $false
+    if (Lock-Sentry) {
+        try { [void](Invoke-WatchChild -Script 'triage.ps1' -Arguments @('-Quiet', '-NoEvidence')); $triaged = $true }
+        finally { Unlock-Sentry }
+    }
+    if ($triaged -and (Test-Path -LiteralPath $script:findingsFile)) {
+        foreach ($line in [System.IO.File]::ReadAllLines($script:findingsFile)) {
+            $f = $line -split '\|', 4
+            if ($f.Count -lt 4 -or $f[0] -notin @('RED', 'AMBER')) { continue }
+            if ($muted -contains ('{0}|{1}' -f $f[1], $f[2])) { continue }
+            $snap[('triage|{0}|{1}|{2}' -f $f[0], $f[1], $f[2])] = ('{0,-5} {1,-13} {2} - {3}' -f $f[0], $f[1], $f[2], $f[3])
+        }
+    }
+    if (Test-Path -LiteralPath (Get-CcdcPath 'state\baseline.json')) {
+        $b = Invoke-WatchChild -Script 'baseline.ps1' -Arguments @('-Status')
+        if ($b.Text -notmatch 'Nothing has changed') {
+            $drift = Get-CcdcPath 'state\drift.txt'
+            if (Test-Path -LiteralPath $drift) {
+                foreach ($line in [System.IO.File]::ReadAllLines($drift)) {
+                    $f = $line -split '\|', 4
+                    if ($f.Count -lt 3) { continue }
+                    $snap[('drift|{0}|{1}|{2}' -f $f[0], $f[1], $f[2])] = ('DRIFT {0,-7} {1,-9} {2}' -f $f[0], $f[1], $f[2])
+                }
+            }
+        }
+    }
+    $c = Invoke-WatchChild -Script 'canary.ps1' -Arguments @('-Check')
+    if ($c.Code -eq 2) {
+        # Key on the report itself, so a new trip is new and the same one is not.
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        $h = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($c.Text))).Replace('-', '').Substring(0, 12)
+        $snap[('canary|' + $h)] = 'CANARY tripwire touched, modified or deleted - run: .\windows\canary.ps1 -Check'
+    }
+    try {
+        foreach ($d in @(Get-MpThreatDetection -ErrorAction Stop)) {
+            $name = [string]$d.ThreatID
+            try { $name = [string](Get-MpThreat -ThreatID $d.ThreatID -ErrorAction Stop).ThreatName } catch { }
+            $when = ''
+            try { $when = $d.InitialDetectionTime.ToString('MM-dd HH:mm') } catch { }
+            # Defender records one behaviour detection as several rows (the
+            # process, then the thing it touched); one line per threat-minute.
+            $key = 'defender|{0}|{1}' -f $name, $when
+            $proc = [string]$d.ProcessName
+            if ($snap.Contains($key) -and ($proc -eq '' -or $proc -eq 'Unknown')) { continue }
+            $snap[$key] = ('DEFENDER caught {0} at {1} (process: {2})' -f $name, $when, $proc)
+        }
+    } catch { }
+    return $snap
+}
+
+if ($Watch) {
+    Assert-CcdcAdmin
+    $host.UI.RawUI.WindowTitle = 'sentry watch - ' + $env:COMPUTERNAME
+    Write-Host ''
+    Write-Host ('  sentry watch on {0}: triage, baseline drift, canaries and Defender every {1}s.' -f $env:COMPUTERNAME, $IntervalSeconds)
+    Write-Host  '  Read-only. It alerts on what is NEW; fixing is still sentry -Status / -Approve.'
+    Write-Host  '  Do not click inside this window: a selection freezes it. Ctrl+C stops it.'
+    Write-Host ''
+    S "watch started interval=$IntervalSeconds"
+    $seen = @{}
+    $pass = 0
+    while ($true) {
+        $pass++
+        $snap = Get-WatchSnapshot
+        $stamp = (Get-Date).ToString('HH:mm:ss')
+        $new = @($snap.Keys | Where-Object { -not $seen.ContainsKey($_) })
+        $gone = @($seen.Keys | Where-Object { -not $snap.Contains($_) })
+        $red = @($snap.Keys | Where-Object { $_ -like 'triage|RED|*' }).Count
+        $drifts = @($snap.Keys | Where-Object { $_ -like 'drift|*' }).Count
+        if ($pass -eq 1) {
+            Write-Host ('  {0}  first look: {1} open item(s) - {2} RED, {3} baseline change(s)' -f $stamp, $snap.Count, $red, $drifts)
+            foreach ($k in $snap.Keys) { Write-Host ('      {0}' -f $snap[$k]) -ForegroundColor Yellow }
+            if ($snap.Count -gt 0) { Write-Host '      (already there at start - these do not pop up; fix them with sentry -Status)' }
+        } elseif ($new.Count -gt 0) {
+            Write-Host ''
+            Write-Host ('  ==== {0}  {1} NEW ====================================================' -f $stamp, $new.Count) -ForegroundColor Red
+            foreach ($k in $new) { Write-Host ('      {0}' -f $snap[$k]) -ForegroundColor Red }
+            Write-Host  '      next: .\windows\baseline.ps1 -Status   then   .\windows\sentry.ps1 -Status' -ForegroundColor Red
+            Write-Host ''
+            S ('watch NEW ' + (($new | ForEach-Object { $snap[$_] }) -join ' ;; '))
+            try { [Console]::Beep(880, 300); [Console]::Beep(660, 300) } catch { }
+            if (-not $NoPopup) {
+                $first = $snap[$new[0]]
+                if ($first.Length -gt 120) { $first = $first.Substring(0, 120) }
+                $msg = ('CCDC {0}: {1} new finding(s) at {2}. First: {3}' -f $env:COMPUTERNAME, $new.Count, $stamp, $first)
+                try { & msg.exe * /TIME:300 $msg 2>&1 | Out-Null } catch { }
+            }
+        } else {
+            Write-Host ('  {0}  quiet: nothing new ({1} RED, {2} baseline change(s) still open)' -f $stamp, $red, $drifts) -ForegroundColor DarkGray
+        }
+        foreach ($k in $gone) { Write-Host ('  {0}  resolved: {1}' -f $stamp, $seen[$k]) -ForegroundColor Green }
+        $seen = @{}
+        foreach ($k in $snap.Keys) { $seen[$k] = $snap[$k] }
+        if ($Passes -gt 0 -and $pass -ge $Passes) { break }
+        Start-Sleep -Seconds $IntervalSeconds
+    }
+    exit 0
 }
 
 # =============================================================================
