@@ -13,6 +13,45 @@ list that stops you losing points while you work out the rest.
 
 ---
 
+## Windows at a glance
+
+The whole flow on one screen, in the order it was rehearsed on the lab box.
+Every step has a detailed section further down.
+
+**A. Once, at the start** (elevated PowerShell, in the kit folder)
+
+| # | run | why |
+|---|---|---|
+| 1 | the three download lines in *Minute 0* | get the kit |
+| 2 | `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force` | let this window run the kit |
+| 3 | `mkdir C:\ProgramData\CCDC -Force` · `copy config\example.env C:\ProgramData\CCDC\ccdc.env` · `notepad C:\ProgramData\CCDC\ccdc.env` | the packet, written down: users, scored services, ports |
+| 4 | `.\windows\recon.ps1` | the "before" picture, read-only |
+| 5 | `.\windows\triage.ps1` | what is wrong now. `scoreduser` / `scoredservice` first |
+| 6 | `.\windows\harden.ps1` then `.\windows\harden.ps1 -Apply` | firewall, logging, Defender, policy. Firewall default-deny only ever through here |
+| 7 | `.\windows\users.ps1 -CreateAdmin ops2 -Apply` · password on paper · `net user Administrator *` | a second way in, then your own password |
+| 8 | `.\windows\triage.ps1` · `.\windows\sentry.ps1 -Status` · `.\windows\sentry.ps1 -Approve all -Apply` · `-Approve N -Apply` | down to 0 RED |
+| 9 | `.\windows\arm.ps1 -Apply` | canaries and the self-repairing tasks |
+| 10 | `.\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply` | freeze the clean box |
+| 11 | **second window:** `.\windows\sentry.ps1 -Watch` | popup when anything new appears |
+
+**B. When the popup fires** — the loop
+
+| # | run | why |
+|---|---|---|
+| 1 | `.\windows\baseline.ps1 -Status` | the complete numbered list of what changed |
+| 2 | `.\windows\baseline.ps1 -Explain N` for each | "if this is NOT yours": run those lines. Yours: the `-Allow ... -Reason` line |
+| 3 | `.\windows\triage.ps1` · `.\windows\sentry.ps1 -Status` / `-Approve N -Apply` | anything dangerous left, with its fix |
+| 4 | `.\windows\baseline.ps1 -Status` until it says **Nothing has changed** | every change removed, or allowed with a reason |
+
+**C. Traps that cost time on the lab box**
+
+- A tool looks stuck: the title bar says **Select** — press **Esc**. Do not click inside a running window.
+- A Defender popup is a red-team sighting: **Windows Security → Protection history**.
+- Never paste a `Block 3389` or a default-deny line by hand; RDP may be how you and the scorer get in.
+- Passwords go on paper, never into chat or a file you keep.
+
+---
+
 ## Minute 0 — get the kit onto the box
 
 You have GitHub access. That is the fastest path and it survives you breaking
