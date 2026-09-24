@@ -1376,6 +1376,20 @@ write_alerts() {
     fi
     printf '\n  Full ranked detail: sudo '"$qkit"'/triage.sh --config '"$qconfig"'\n'
     printf '  Verify scored services FROM OFF THE BOX; an on-box probe cannot see scorer reachability.\n'
+    # The commands, LAST, where the eye lands after a long scroll. Asked for in
+    # the live run: "where do I see the approve-all on this massive output?"
+    printf '\n  ==== WHAT TO RUN NOW ===========================================\n'
+    if [ "$n" -gt 0 ]; then
+      printf '  every RED above, at once:  sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve --apply\n'
+      printf '  one numbered item:         sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --approve N --apply\n'
+    else
+      printf '  nothing numbered to approve here.\n'
+    fi
+    [ "$watch_count" -gt 0 ] && \
+      printf '  events read (clears them): sudo '"$qkit"'/sentry.sh --config '"$qconfig"' --ack\n'
+    printf '  then what CHANGED:         sudo '"$qkit"'/baseline.sh --config '"$qconfig"'\n'
+    printf '                             (each item there ends in "NOT YOURS: run this")\n'
+    printf '  ================================================================\n'
   } >"$tmp" || { rm -f -- "$tmp"; return 1; }
   mv -f -- "$tmp" "$alerts" || { rm -f -- "$tmp"; return 1; }
 }

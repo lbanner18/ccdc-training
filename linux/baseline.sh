@@ -1951,11 +1951,6 @@ report() {
     done
   fi
 
-  if [ "${#auto[@]}" -gt 1 ]; then
-    printf '  Several at once:   sudo %s --config %s --approve 1,3,4 --apply\n' "$qself" "$qconfig"
-    printf '  Everything safe:   sudo %s --config %s --approve all-green --apply\n' "$qself" "$qconfig"
-    printf '                     (all-green refuses to touch anything in NEEDS YOU)\n\n'
-  fi
   if [ "$predating" -gt 0 ] || [ "$suppressed" -gt 0 ]; then
     printf '  Held back from this screen:\n'
     [ "$predating" -gt 0 ] && \
@@ -1969,6 +1964,19 @@ report() {
     fi
   fi
   print_exceptions
+  # The commands, LAST, where the eye lands after a long scroll. They used to
+  # sit above "Held back from this screen", scrolled past. Asked for live.
+  if [ "${#auto[@]}" -gt 0 ] || [ "${#manual[@]}" -gt 0 ]; then
+    printf '\n  ==== WHAT TO RUN NOW ===========================================\n'
+    if [ "${#auto[@]}" -gt 0 ]; then
+      printf '  everything marked safe:  sudo %s --config %s --approve all-green --apply\n' "$qself" "$qconfig"
+      printf '  just some of them:       sudo %s --config %s --approve 1,3,4 --apply\n' "$qself" "$qconfig"
+    fi
+    [ "${#manual[@]}" -gt 0 ] && \
+      printf '  NEEDS YOU items:         run the "NOT YOURS: run this" lines under each\n'
+    printf '  then check again:        sudo %s --config %s --status\n' "$qself" "$qconfig"
+    printf '  ================================================================\n'
+  fi
 
 }
 
