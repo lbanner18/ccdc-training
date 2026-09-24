@@ -622,9 +622,13 @@ if ($Watch) {
             S ('watch NEW ' + (($new | ForEach-Object { $snap[$_] }) -join ' ;; '))
             try { [Console]::Beep(880, 300); [Console]::Beep(660, 300) } catch { }
             if (-not $NoPopup) {
-                $first = $snap[$new[0]]
-                if ($first.Length -gt 120) { $first = $first.Substring(0, 120) }
-                $msg = ('CCDC {0}: {1} new finding(s) at {2}. First: {3}' -f $env:COMPUTERNAME, $new.Count, $stamp, $first)
+                # msg.exe caps a message at 255 characters: keep the finding
+                # short so the command to run next always fits.
+                $first = ($snap[$new[0]] -replace '\s+', ' ').Trim()
+                if ($first.Length -gt 70) { $first = $first.Substring(0, 70) + '...' }
+                $kit = Split-Path -Parent $PSScriptRoot
+                $msg = ('CCDC {0} {1}: {2} NEW. First: {3} -- For more, in {4} run: .\windows\baseline.ps1 -Status  then  .\windows\sentry.ps1 -Status' -f $env:COMPUTERNAME, $stamp, $new.Count, $first, $kit)
+                if ($msg.Length -gt 255) { $msg = $msg.Substring(0, 255) }
                 try { & msg.exe * /TIME:300 $msg 2>&1 | Out-Null } catch { }
             }
         } else {
