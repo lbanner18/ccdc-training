@@ -178,6 +178,10 @@ fi
 # Now prove the check goes quiet again. A detector that cannot clear is a
 # detector you stop believing, so the same pass has to come back clean once the
 # processes are gone.
+# The shell's CHILDREN too: they inherited the socket. Triage now counts a
+# CLOSE-WAIT socket (the live 2026-09-24 C2 outlived its server that way), so
+# a child left holding the dead connection is - correctly - still a finding.
+pkill -9 -P "$shell_pid" 2>/dev/null || true
 kill -9 "$shell_pid" 2>/dev/null || true
 kill -9 "$listener_pid" 2>/dev/null || true
 # Reap them, or the shell prints its own "Killed" job notice into the middle of
@@ -188,7 +192,7 @@ shell_pid=''
 listener_pid=''
 gone=0
 for _ in $(seq 1 50); do
-  ss -tnH "dport = :$port" 2>/dev/null | grep -q ESTAB || { gone=1; break; }
+  ss -tnpH "dport = :$port" 2>/dev/null | grep -q 'pid=' || { gone=1; break; }
   sleep 0.1
 done
 [ "$gone" -eq 1 ] || printf '  ...   connection still draining; the clear check may be flaky here\n'
