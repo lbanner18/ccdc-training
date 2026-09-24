@@ -603,6 +603,20 @@ if ($sigLine.Success) {
 } else { nope 'could not find $webshellSig in triage.ps1' }
 
 $hardenTxt = Get-Content -LiteralPath (Join-Path $root 'windows\harden.ps1') -Raw
+# Found live: harden opened inbound 22 on every Windows box, SSH or not.
+if ($hardenTxt -match 'if \(Get-Service -Name sshd [^\r\n]*\) \{ \$myPorts \+= 22 \}' -and
+    $hardenTxt -notmatch '(?m)^\s*\$myPorts \+= 22\s*$') {
+    ok 'harden opens inbound 22 only when an SSH server is installed'
+} else { nope 'harden opens inbound 22 on a box with no SSH server' }
+# Printed commands only: comment-based help (inside <# #>) may keep the placeholder.
+$placeholderBad = @()
+foreach ($tf in [System.IO.Directory]::GetFiles((Join-Path $root 'windows'), '*.ps1')) {
+    $code = [regex]::Replace([System.IO.File]::ReadAllText($tf), '(?s)<#.*?#>', '')
+    if ($code -match '-Config CONFIG') { $placeholderBad += [System.IO.Path]::GetFileName($tf) }
+}
+if ($placeholderBad.Count -eq 0) {
+    ok 'no tool prints -Config CONFIG where it knows the real path'
+} else { nope ('a printed command still says -Config CONFIG: ' + ($placeholderBad -join ', ')) }
 if ($hardenTxt -match 'CCDC_ACK_NETWORK_NAME_RESOLUTION_HARDENING' -and
     $hardenTxt -match '\$networkNameHardening' -and
     $hardenTxt -match 'Network-name-resolution controls were not changed') {

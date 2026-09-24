@@ -331,7 +331,7 @@ if ($Check) {
         Write-Host '  THE SECURITY LOG COULD NOT BE READ.' -ForegroundColor Red
         Write-Host '  Reads cannot be detected right now, so "no trips" below means only'
         Write-Host '  "no file was modified". Somebody clearing this log is itself an event:'
-        Write-Host '     .\windows\triage.ps1 -Config CONFIG      # check logcleared'
+        Write-Host ('     .\windows\triage.ps1 -Config {0}      # check logcleared' -f $Config)
     }
 
     $total = @($trips).Count + @($modified).Count + @($missing).Count

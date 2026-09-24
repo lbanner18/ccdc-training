@@ -192,7 +192,10 @@ if ($steps -contains 'Firewall') {
         # and the box is then only reachable from the console.
         $myPorts = @()
         if ((Get-CcdcValue -Config $cfg -Name 'CCDC_RDP_SCORED') -ne '0') { $myPorts += 3389 }
-        $myPorts += 22
+        # SSH only when an SSH server is actually installed. Opening 22 on a box
+        # with no sshd protects nothing and pre-opens the port for whatever the
+        # red team starts listening on it - triage then reports our own rule.
+        if (Get-Service -Name sshd -ErrorAction SilentlyContinue) { $myPorts += 22 }
         foreach ($p in $myPorts) {
             $nm = "CCDC allow $p (your way in)"
             Do-Change "allow inbound TCP $p FIRST, so hardening cannot lock you out" {
@@ -475,7 +478,7 @@ if ($steps -contains 'RemoteAccess') {
     if (-not $IHaveConsoleAccess) {
         Note 'Not touching whether RDP is ENABLED. If you are working over RDP, turning it'
         Note 'off ends your session and the box is console-only after that. Decide deliberately:'
-        Note '    .\harden.ps1 -Config CONFIG -Only RemoteAccess -Apply -IHaveConsoleAccess'
+        Note ('    .\harden.ps1 -Config {0} -Only RemoteAccess -Apply -IHaveConsoleAccess' -f $Config)
     } elseif ((Get-CcdcValue -Config $cfg -Name 'CCDC_RDP_SCORED') -eq '0') {
         Do-Change 'DISABLE RDP entirely (your config says it is not scored, and you said you have console access)' {
             Set-ItemProperty -Path $tsRoot -Name 'fDenyTSConnections' -Value 1
@@ -516,7 +519,7 @@ if ($steps -contains 'Persistence') {
     if ($found -eq 0) {
         Write-Host '    nothing on the two highest-signal registry persistence paths.'
     }
-    Note 'That is two checks, not thirteen. For the full sweep run:  .\windows\triage.ps1 -Config CONFIG'
+    Note ('That is two checks, not thirteen. For the full sweep run:  .\windows\triage.ps1 -Config {0}' -f $Config)
 }
 
 # =============================================================================

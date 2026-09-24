@@ -872,7 +872,7 @@ if ($null -ne $wdigest -and [int]$wdigest -eq 1) {
                   'plaintext passwords out of LSASS. Treat every password used on this',
                   'box since as known to them.') `
         -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\SecurityProviders\WDigest'' -Name UseLogonCredential -Value 0',
-               '# then rotate: .\windows\users.ps1 -Config CONFIG -RotateAll -Apply') `
+               ('# then rotate: .\windows\users.ps1 -Config {0} -RotateAll -Apply' -f $Config)) `
         -Card 'CARD W13'
 } else {
     Clean 'WDigest is not caching cleartext credentials'
