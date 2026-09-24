@@ -1430,6 +1430,130 @@ brief_fix() {
   esac
 }
 
+# One held finding on the short screen: what it is, the evidence that decides
+# it, and a pasteable command for each answer. The first cut of the short
+# screen printed "look: sudo cat FILE" for an SSH key and "visudo -f FILE" for
+# sudoers - and the operator, given an editor and no instruction, broke the
+# line he was editing. Every "not yours:" below changes nothing but the one
+# thing, keeps a copy in the evidence directory, and needs no editor.
+kit_owned_path() {
+  case "$(basename -- "$1")" in
+    "${CCDC_SENTRY_NAME:-node-observer}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*|99-ccdc-hardening.conf) return 0 ;;
+  esac
+  grep -q '^# Managed by ccdc' -- "$1" 2>/dev/null
+}
+
+brief_mute() {
+  printf '        yours:     sudo %s/sentry.sh --config %s --mute %s %q --reason "WHY" --apply\n' \
+    "$qkit" "$qconfig" "$1" "$(mute_subject_of "$2")"
+}
+
+brief_item() {
+  local sev=$1 check=$2 subject=$3 desc=$4 q owner line n fp comment seen_fps f lines flag kit=0 kittime='' shown=0
+  printf -v q '%q' "$subject"
+  case "$check" in
+    rogueuser)
+      printf '  %-5s %-12s %s\n' "$sev" "$check" "$subject"
+      printf '        %s\n' "$desc"
+      printf '        not yours: sudo usermod -L -e 1 -s /usr/sbin/nologin %s; sudo pkill -KILL -u %s\n' "$q" "$q"
+      printf '        yours:     add it to CCDC_ALLOWED_USERS in %s, then\n' "$qconfig"
+      printf '                   sudo %s/sentry.sh --config %s --reload-config --apply\n' "$qkit" "$qconfig" ;;
+
+    sshkey)
+      owner=$(stat -c '%U' -- "$subject" 2>/dev/null) || owner='?'
+      printf '  %-5s %-12s %s  (account: %s)\n' "$sev" "$check" "$subject" "$owner"
+      seen_fps=$(journalctl -u ssh -u sshd --no-pager 2>/dev/null \
+        | grep 'Accepted publickey' | grep -oE 'SHA256:[A-Za-z0-9+/=]+' | sort -u)
+      n=0
+      while IFS= read -r line; do
+        n=$((n + 1))
+        case "$line" in ''|'#'*) continue ;; esac
+        fp=$(printf '%s\n' "$line" | ssh-keygen -lf - 2>/dev/null | awk '{print $2}')
+        comment=$(printf '%s' "$line" | awk '{print $NF}')
+        if [ -z "$fp" ]; then
+          printf '          line %s: not a valid key (%s) - nobody can log in with it as written\n' "$n" "$comment"
+        elif printf '%s\n' "$seen_fps" | grep -qxF -- "$fp"; then
+          printf '          %s  %s   <- has logged in here: likely YOURS, keep it\n' "$fp" "$comment"
+        else
+          printf '          %s  %s\n' "$fp" "$comment"
+          printf '            not yours: sudo %s/baseline.sh --config %s --remove-key %s --apply\n' "$qkit" "$qconfig" "$fp"
+        fi
+      done <"$subject" 2>/dev/null
+      # A whole file only for an account the packet does not name: for yours,
+      # moving it away is how you lock yourself out.
+      if [ "$owner" != root ] && [ "$owner" != '?' ] \
+         && ! ccdc_list_contains "$owner" "${CCDC_ALLOWED_USERS:-}"; then
+        printf '        not yours: sudo mv %s %q   (the whole file; %s is not in your allowed users)\n' \
+          "$q" "$state_dir/authorized_keys.$owner" "$owner"
+      fi
+      brief_mute "$check" "$subject" ;;
+
+    nopasswd)
+      printf '  %-5s %-12s %s\n' "$sev" "$check" "$subject"
+      grep -n 'NOPASSWD' -- "$subject" 2>/dev/null | grep -v '^[0-9]*:[[:space:]]*#' | head -4 \
+        | sed 's/^\([0-9]*\):/          line \1: /'
+      case "$subject" in
+        /etc/sudoers|/etc/sudoers.d/[A-Za-z0-9._-]*)
+          # Drop only the NOPASSWD tag: the rule stays and parses either way.
+          # One root shell, so a failed check puts the original straight back
+          # while sudo still works.
+          printf '        not yours: sudo sh -c '\''b=%s/sudoers.%s.$(date +%%s); cp -a %s "$b" || exit 1; sed -i "s/NOPASSWD[[:space:]]*:[[:space:]]*//g" %s; if visudo -c >/dev/null; then echo DONE; else cp -a "$b" %s; echo RESTORED; fi'\''\n' \
+            "$state_dir" "$(basename -- "$subject")" "$subject" "$subject" "$subject"
+          printf '                   (keeps the sudo rule, asks for a password - know that password first)\n' ;;
+        *)
+          printf '        look:      sudo %s/sentry.sh --config %s --status --full\n' "$qkit" "$qconfig" ;;
+      esac
+      brief_mute "$check" "$subject" ;;
+
+    sshaudit|sshrootlogin|sshemptypw)
+      printf '  %-5s %-12s %s\n' "$sev" "$check" "$desc"
+      case "$desc" in
+        *drop-in*)
+          for f in /etc/ssh/sshd_config.d/*.conf; do
+            [ -f "$f" ] || continue
+            if kit_owned_path "$f"; then
+              printf '          %-28s (the kit'\''s own - sshd.sh wrote it)\n' "$(basename -- "$f")"
+              continue
+            fi
+            lines=$(grep -vE '^[[:space:]]*(#|$)' -- "$f" 2>/dev/null | head -4 | paste -sd ';' - | sed 's/;/; /g')
+            flag=''
+            grep -qiE '^[[:space:]]*(PermitRootLogin[[:space:]]+yes|PasswordAuthentication[[:space:]]+yes|PermitEmptyPasswords[[:space:]]+yes|PermitUserEnvironment[[:space:]]+yes|AuthorizedKeys(File|Command)[[:space:]])' -- "$f" \
+              && flag='   <- LOOSENS LOGIN'
+            printf '          %-28s %s%s\n' "$(basename -- "$f")" "$lines" "$flag"
+            [ -n "$flag" ] && printf '            not yours: sudo mv %s %s/ && sudo %s/sshd.sh --config %s --apply\n' \
+              "$f" "$state_dir" "$qkit" "$qconfig" && shown=1
+          done
+          [ "$shown" -eq 1 ] \
+            && printf '                       then log in from a SECOND terminal and run: sudo %s/sshd.sh --config %s --confirm\n' "$qkit" "$qconfig" ;;
+        *pending*)
+          printf '          the next ssh restart loads it. What would win:  sudo /usr/sbin/sshd -T | grep -E "permitrootlogin|passwordauth"\n'
+          printf '          fix the drop-ins above first; sshd.sh --apply then reloads it with a rollback.\n' ;;
+        *)
+          printf '        look:      sudo %s/sshd.sh --config %s\n' "$qkit" "$qconfig" ;;
+      esac
+      brief_mute "$check" "$subject" ;;
+
+    etcchange)
+      printf '  %-5s %-12s files under /etc changed in the last 30 minutes:\n' "$sev" "$check"
+      while IFS=' ' read -r line f; do
+        [ -n "${f:-}" ] || continue
+        case "$f" in *-) [ -e "${f%-}" ] && continue ;; esac
+        if kit_owned_path "$f"; then kit=$((kit + 1)); kittime=$line; continue; fi
+        shown=$((shown + 1))
+        [ "$shown" -le 6 ] && printf '          %s %s\n' "$line" "$f"
+      done < <(find /etc -xdev -type f -mmin -30 -printf '%TH:%TM %p\n' 2>/dev/null | sort)
+      [ "$shown" -gt 6 ] && printf '          ... and %s more\n' "$((shown - 6))"
+      [ "$kit" -gt 0 ] && printf '          (+%s of the kit'\''s own files, last written %s - sentry/guardian installs)\n' "$kit" "$kittime"
+      printf '        yours if you changed something then. If not: sudo %s/baseline.sh --config %s\n' "$qkit" "$qconfig" ;;
+
+    *)
+      printf '  %-5s %-12s %s\n' "$sev" "$check" "$subject"
+      printf '        %s\n' "$desc"
+      printf '        %s\n' "$(brief_fix "$check" "$subject")"
+      brief_mute "$check" "$subject" ;;
+  esac
+}
+
 # What --status prints unless --full is given: one line per thing, then the
 # commands. Asked for live, over a 270-line screen whose one actionable item
 # was line 19: "Why is it soooo wordy? I can't find what I actually need to see
@@ -1491,10 +1615,7 @@ print_brief() {
         [ "${sev:-}" = "$want" ] || continue
         queue_has "$check" "$subject" && continue
         held=$((held + 1))
-        # sshaudit subjects are a slug of the message; the message reads better.
-        case "$check" in sshaudit) subject=$desc ;; esac
-        printf '  %-5s %-12s %s\n' "$sev" "$check" "$subject"
-        printf '        %s\n' "$(brief_fix "$check" "${subject}")"
+        brief_item "$sev" "$check" "$subject" "$desc"
       done <"$findings"
     done
   fi
@@ -1515,7 +1636,7 @@ print_brief() {
     printf '  approve every RED:   sudo %s/sentry.sh --config %s --approve --apply\n' "$qkit" "$qconfig"
     printf '  approve one:         sudo %s/sentry.sh --config %s --approve N --apply\n' "$qkit" "$qconfig"
   }
-  [ "$held" -gt 0 ] && printf '  YOURS: paste the fix:/look: line under each one above\n'
+  [ "$held" -gt 0 ] && printf '  YOURS: paste the not-yours: or yours: line under each one above\n'
   printf '  what CHANGED:        sudo %s/baseline.sh --config %s\n' "$qkit" "$qconfig"
   [ "$watch_count" -gt 0 ] && \
     printf '  clear the events:    sudo %s/sentry.sh --config %s --ack\n' "$qkit" "$qconfig"
@@ -2270,6 +2391,13 @@ do_status() {
   # been interrupted after publishing queue but before publishing ALERTS; in
   # that state copying queue and displaying the old ALERTS would recreate the
   # exact item-number mismatch this snapshot is meant to prevent.
+  # Re-check before showing anything. A pass takes about a second, and without
+  # it the account the operator had just locked was still listed as RED -
+  # the list is only as new as the loop's last minute.
+  if run_triage; then
+    rebuild_queue >/dev/null
+    publish_prompt_snapshot
+  fi
   write_alerts || ccdc_die "could not refresh the status report from the current queue"
   publish_review_snapshot || ccdc_die "could not freeze the reviewed approval queue"
   release_lock

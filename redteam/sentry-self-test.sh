@@ -196,7 +196,7 @@ if grep -qE '^  \[1\] RED +unit +/etc/systemd/system/evil.service$' "$test_root/
    && grep -q 'will: ' "$test_root/status-brief.out" \
    && grep -q -- '--approve --apply' "$test_root/status-brief.out" \
    && grep -qE '^  RED +rogueuser +rtsvc$' "$test_root/status-brief.out" \
-   && grep -qF 'fix:  sudo usermod -L -e 1 -s /usr/sbin/nologin rtsvc' "$test_root/status-brief.out" \
+   && grep -qF 'not yours: sudo usermod -L -e 1 -s /usr/sbin/nologin rtsvc' "$test_root/status-brief.out" \
    && ! grep -q 'more:  playbooks' "$test_root/status-brief.out" \
    && grep -q 'more:  playbooks' "$test_root/status-full.out" \
    && [ "$(wc -l <"$test_root/status-brief.out")" -lt "$(wc -l <"$test_root/status-full.out")" ]; then
@@ -204,7 +204,16 @@ if grep -qE '^  \[1\] RED +unit +/etc/systemd/system/evil.service$' "$test_root/
 else
   bad 'status is one line per item by default; --full keeps every explanation'
 fi
+# --status re-checks before it prints. Measured live: an account locked
+# seconds earlier was still listed RED, because the list was the loop's.
 printf 'unit\n' >"$test_root/mode"
+"$suite/sentry.sh" --config "$config" --status >"$test_root/status-fresh.out"
+if ! grep -q 'rogueuser' "$test_root/status-fresh.out" \
+   && grep -qE '^  \[1\] RED +unit ' "$test_root/status-fresh.out"; then
+  ok 'status re-runs triage, so a finding fixed a second ago is already gone'
+else
+  bad 'status re-runs triage, so a finding fixed a second ago is already gone'
+fi
 write_config 'ssh evil.service'
 if "$suite/sentry.sh" --config "$config" --approve --apply >"$test_root/stale.out"; then
   ok 'approval refresh accepted changed protection config'
