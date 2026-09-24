@@ -106,8 +106,15 @@ done
 managed_services=''
 if ccdc_have systemctl; then
   for managed_service in firewalld ufw docker; do
-    systemctl is-active --quiet "$managed_service.service" 2>/dev/null \
-      && managed_services="$managed_services $managed_service"
+    systemctl is-active --quiet "$managed_service.service" 2>/dev/null || continue
+    # On Ubuntu ufw.service is "active" even when the firewall is switched off
+    # (it only runs a oneshot at boot). Found live on ubuntu-target: fw.sh
+    # refused to apply over a ufw whose own status said "inactive". Ask ufw.
+    if [ "$managed_service" = ufw ] && ccdc_have ufw &&
+       ! ufw status 2>/dev/null | grep -q '^Status: active'; then
+      continue
+    fi
+    managed_services="$managed_services $managed_service"
   done
 fi
 if [ -n "$managed_services" ]; then
@@ -211,6 +218,12 @@ if [ "$status" -eq 1 ]; then
 fi
 
 if [ "$confirm" -eq 1 ]; then
+  # Nothing pending means nothing was applied - say so. This used to print
+  # "rollback cancelled; current rules retained" after an --apply that had
+  # FAILED, which reads exactly like success. Found live on ubuntu-target.
+  if [ ! -f "$pid_file" ]; then
+    ccdc_die "nothing to confirm: no firewall change is waiting for confirmation. Did --apply succeed? Check: $0 --config <cfg> --status"
+  fi
   cancel_pending_rollback
   # Removing the snapshot disarms the rollback a second way: the scheduled
   # script exits early when the snapshot is gone, so a timer that somehow

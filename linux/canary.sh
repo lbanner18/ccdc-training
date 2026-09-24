@@ -535,9 +535,9 @@ check() {
   if ccdc_have ausearch; then
     ausearch_bounded() {
       if ccdc_have timeout; then
-        timeout "${CCDC_AUSEARCH_TIMEOUT:-20}" ausearch -k "$1" -ts recent 2>/dev/null
+        timeout "${CCDC_AUSEARCH_TIMEOUT:-20}" ausearch --input-logs -k "$1" -ts recent 2>/dev/null </dev/null
       else
-        ausearch -k "$1" -ts recent 2>/dev/null
+        ausearch --input-logs -k "$1" -ts recent 2>/dev/null </dev/null
       fi
     }
     # Capture the output first, THEN count it. `x=$(cmd | grep -c ...); rc=$?`

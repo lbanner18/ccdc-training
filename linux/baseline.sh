@@ -517,7 +517,7 @@ volatile_exec_dir() {
 }
 
 inventory_processes() {
-  local pid raw exe base subject flags arg argi cmdfile sockets pgid
+  local pid raw exe base subject flags arg argi cmdfile sockets pgid cand
   local self_pgid self_sid walk sid
   declare -A PROC_PIDS=()
   declare -A PROC_FLAGS=()
@@ -580,7 +580,18 @@ inventory_processes() {
           case "$arg" in -*) continue ;; esac
           [ "$arg" = "$exe" ] && continue
           is_interpreter "$(basename -- "$arg")" && continue
-          if [ -f "$arg" ]; then subject=$arg; flags="$flags via-$base"; break; fi
+          # A relative script path is relative to THAT process's cwd, not ours.
+          # Tested against ours, `bash ./linux/audit.sh --config /tmp/x.env`
+          # skipped the script and blamed the config file: a RED procexe for
+          # /tmp/ccdc-linux.env on every pass, found live on ubuntu-target.
+          # Resolve it here, before the /tmp test below: left relative, a script
+          # running from /tmp read as "./x.sh" and was not flagged at all.
+          cand=$arg
+          case "$arg" in /*) ;; *) cand="/proc/$pid/cwd/$arg" ;; esac
+          if [ -f "$cand" ]; then
+            case "$arg" in /*) subject=$arg ;; *) subject=$(readlink -f -- "$cand" 2>/dev/null) || subject=$arg ;; esac
+            flags="$flags via-$base"; break
+          fi
         done < <(tr '\0' '\n' <"$cmdfile" 2>/dev/null)
       fi
     fi

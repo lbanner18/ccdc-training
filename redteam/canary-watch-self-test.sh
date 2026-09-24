@@ -102,7 +102,10 @@ esac
 FAKE_AUDITCTL
 cat >"$bin/ausearch" <<'FAKE_AUSEARCH'
 #!/usr/bin/env bash
-case "${AUDIT_EVENTS:-none}:${2:-}" in
+# Find the key wherever it sits: real calls pass --input-logs before -k.
+key=''
+while [ "$#" -gt 0 ]; do [ "$1" = -k ] && key=${2:-}; shift; done
+case "${AUDIT_EVENTS:-none}:$key" in
   config:ccdc-canary)
     cat <<EOF
 ----

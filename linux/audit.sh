@@ -713,9 +713,13 @@ EOF
   fi
 
   if ccdc_have ausearch; then
-    ausearch -k ccdc-canary -ts today >"$dir/ausearch-canary.txt" 2>/dev/null || true
-    ausearch -k ccdc-sensitive -ts today >"$dir/ausearch-sensitive.txt" 2>/dev/null || true
-    ausearch -k ccdc-logtamper -ts today >"$dir/ausearch-logtamper.txt" 2>/dev/null || true
+    # --input-logs and </dev/null: when stdin is not a terminal (ssh without a
+    # tty, cron, systemd) ausearch reads audit records from STDIN, not the log,
+    # and waits forever. Found live: --capture sat 9+ minutes on ubuntu-target.
+    for key in ccdc-canary ccdc-sensitive ccdc-logtamper; do
+      timeout "${CCDC_AUSEARCH_TIMEOUT:-60}" ausearch --input-logs -k "$key" -ts today \
+        >"$dir/ausearch-${key#ccdc-}.txt" 2>/dev/null </dev/null || true
+    done
   fi
   ccdc_have aureport && aureport --summary -i >"$dir/aureport-summary.txt" 2>/dev/null || true
 

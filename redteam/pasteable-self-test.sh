@@ -1341,5 +1341,30 @@ else
   no 'users.sh --create-admin leaves the backup admin without sudo or outside CCDC_ALLOWED_USERS'
 fi
 
+# fw.sh, both found live on ubuntu-target: an inactive ufw (whose unit is still
+# "active") blocked --apply, and --confirm with nothing pending printed success.
+fwt="$ROOT/linux/fw.sh"
+if grep -q "ufw status 2>/dev/null | grep -q '^Status: active'" "$fwt" &&
+   grep -q 'nothing to confirm: no firewall change is waiting' "$fwt"; then
+  ok 'fw.sh ignores a switched-off ufw and refuses to "confirm" a change that never happened'
+else
+  no 'fw.sh treats an inactive ufw as managing the firewall, or confirms nothing as success'
+fi
+
+# Found in the live Linux rehearsal on ubuntu-target, 2026-09-23:
+#  - ausearch reads STDIN, not the log, when stdin is not a terminal: audit.sh
+#    --capture hung 9+ minutes. Every call must say --input-logs.
+#  - baseline tested `bash ./x.sh`'s script path against its OWN cwd and blamed
+#    the next file argument - /tmp/ccdc-linux.env, RED on every pass.
+#  - sentry --status straight after arm.sh died on arm's first pass's lock.
+bad_ausearch=$(grep -nE '(^|[^-])ausearch +-' "$ROOT"/linux/*.sh | grep -v -- '--input-logs' | grep -vE ':[0-9]+:\s*#|fixline|printf' || true)
+if [ -z "$bad_ausearch" ] &&
+   grep -q 'cand="/proc/$pid/cwd/$arg"' "$ROOT/linux/baseline.sh" &&
+   grep -q 'acquire_lock 60 ||' "$ROOT/linux/sentry.sh"; then
+  ok 'ausearch reads logs not stdin; relative scripts resolve in their own cwd; sentry --status waits for a pass'
+else
+  no "live-rehearsal regressions are back:${bad_ausearch:+ ausearch without --input-logs: $bad_ausearch}"
+fi
+
 printf 'pasteable self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

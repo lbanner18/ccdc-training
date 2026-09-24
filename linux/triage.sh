@@ -1952,7 +1952,7 @@ if [ -n "$recent" ]; then
   fix "sudo diff -u $(printf '%q' "${CCDC_BACKUP_DIR:-/var/backups/ccdc}")/latest\"\$F\" \"\$F\""
   fix "# and who was on the box when it happened:"
   fix "sudo last -F | head -20"
-  fix "sudo ausearch -f \"\$F\" 2>/dev/null | tail -20   # if audit.sh --apply ran"
+  fix "sudo ausearch --input-logs -f \"\$F\" 2>/dev/null | tail -20   # if audit.sh --apply ran"
 else
   clean "no /etc changes in the last 30 minutes"
 fi

@@ -200,10 +200,19 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 acquire_lock() {
+  # $1: seconds an operator command may wait for a pass already in progress.
+  # The loop passes nothing and never waits. Found live: `sentry --status`
+  # straight after arm.sh (as the card says) hit arm's first pass and died
+  # with "another sentry command is running".
+  local wait=${1:-0}
   ccdc_have flock || ccdc_die "flock is required for sentry state coordination"
   [ ! -L "$lock_file" ] || ccdc_die "refusing symlink lock file: $lock_file"
   exec 9>"$lock_file" || ccdc_die "cannot open sentry lock: $lock_file"
   if ! flock -n 9; then
+    if [ "$wait" -gt 0 ]; then
+      printf 'sentry is mid-pass; waiting up to %ss for it to finish...\n' "$wait" >&2
+      if flock -w "$wait" 9; then lock_held=1; return 0; fi
+    fi
     exec 9>&-
     return 1
   fi
@@ -2093,7 +2102,7 @@ do_status() {
   # time even if the live queue changes in between. Publish a private immutable
   # snapshot under the same lock used by the loop and approval path.
   ensure_state
-  acquire_lock || ccdc_die "another sentry command is running; retry status in a moment so the reviewed queue can be frozen"
+  acquire_lock 60 || ccdc_die "another sentry command has held the queue for over a minute; retry status so the reviewed queue can be frozen"
   # Re-render from the queue under that lock as well. A prior process may have
   # been interrupted after publishing queue but before publishing ALERTS; in
   # that state copying queue and displaying the old ALERTS would recreate the
@@ -2136,7 +2145,7 @@ do_approve() {
   ccdc_require_root
   ensure_state
   ccdc_have timeout || ccdc_die "timeout is required so a wedged detector cannot freeze approval-time triage"
-  acquire_lock || ccdc_die "another sentry command is running; retry in a moment"
+  acquire_lock 60 || ccdc_die "another sentry command has held the queue for over a minute; retry in a moment"
   [ -s "$reviewed" ] \
     || ccdc_die "no reviewed approval snapshot; run --status immediately before --approve"
   if ! run_triage; then
@@ -2215,7 +2224,7 @@ do_approve() {
 do_ack() {
   ccdc_require_root
   ensure_state
-  acquire_lock || ccdc_die "another sentry command is running; retry in a moment"
+  acquire_lock 60 || ccdc_die "another sentry command has held the queue for over a minute; retry in a moment"
   rm -f -- "$watch_pending" "$watch_pending_key"
   write_alerts
   release_lock

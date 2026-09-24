@@ -253,7 +253,7 @@ else
   record 50-auth-log.txt 'tail -n 2000 /var/log/auth.log 2>/dev/null || tail -n 2000 /var/log/secure 2>/dev/null'
   record 51-journal.txt 'journalctl -n 2000 --no-pager 2>/dev/null'
 fi
-record 52-audit-recent.txt 'ausearch -ts recent 2>/dev/null | tail -300'
+record 52-audit-recent.txt 'timeout 60 ausearch --input-logs -ts recent 2>/dev/null </dev/null | tail -300'
 
 # --- 6. the manifest ----------------------------------------------------------
 # Hash every file in the case so it can be shown later to be the same evidence.
