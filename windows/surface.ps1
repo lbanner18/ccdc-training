@@ -39,6 +39,8 @@ $Config = [string]$cfg['_ConfigPath']
 $facts = Get-CcdcBoxFacts
 $scoredServices = @(Get-CcdcList -Config $cfg -Name 'CCDC_WINDOWS_SERVICES')
 $tcpAllowed = @(Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_TCP_PORTS')
+# Same rule as triage and harden: scored RDP is accounted for unless the config says "0".
+if ((Get-CcdcValue -Config $cfg -Name 'CCDC_RDP_SCORED') -ne '0') { $tcpAllowed += '3389' }
 $udpAllowed = @(Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_UDP_PORTS')
 $surfaceGaps = New-Object System.Collections.ArrayList
 if (-not $facts['HasNetTCPIP']) {

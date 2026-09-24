@@ -50,7 +50,12 @@ Clear-CcdcFindings
 $facts     = Get-CcdcBoxFacts
 $builtTime = Get-CcdcBoxBuiltTime
 $allowedUsers    = Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_USERS'
-$allowedTcpPorts = Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_TCP_PORTS'
+$allowedTcpPorts = @(Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_TCP_PORTS')
+# Scored RDP is accounted for by CCDC_RDP_SCORED, read exactly as harden.ps1
+# reads it: only "0" means not scored. Without this, triage told the operator to
+# add a Block rule for 3389 - and a Block rule beats every Allow, so pasting it
+# took down the scored service and the operator's own session with it.
+if ((Get-CcdcValue -Config $cfg -Name 'CCDC_RDP_SCORED') -ne '0') { $allowedTcpPorts += '3389' }
 $allowedUdpPorts = Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_UDP_PORTS'
 $scoredServices  = Get-CcdcList -Config $cfg -Name 'CCDC_WINDOWS_SERVICES'
 

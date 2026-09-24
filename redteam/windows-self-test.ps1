@@ -52,7 +52,7 @@ $cfgPath = Join-Path $work 'test.env'
 CCDC_BOX_NAME="win-target"
 CCDC_ALLOWED_USERS="Administrator banneluk svc_web"
 CCDC_WINDOWS_SERVICES="W3SVC"
-CCDC_ALLOWED_TCP_PORTS="80 443 3389"
+CCDC_ALLOWED_TCP_PORTS="80 443"
 CCDC_ALLOWED_UDP_PORTS="53"
 CCDC_TCP_CHECKS="127.0.0.1:80"
 CCDC_HTTP_CHECKS="http://127.0.0.1/"
@@ -157,6 +157,7 @@ function Get-NetTCPConnection {
     @(
         [pscustomobject]@{ LocalPort=80;   OwningProcess=4;    LocalAddress='0.0.0.0' },
         [pscustomobject]@{ LocalPort=445;  OwningProcess=4;    LocalAddress='0.0.0.0' },
+        [pscustomobject]@{ LocalPort=3389; OwningProcess=4;    LocalAddress='0.0.0.0' },  # scored RDP, not in the port list
         [pscustomobject]@{ LocalPort=4444; OwningProcess=7710; LocalAddress='0.0.0.0' },  # PLANT: interpreter
         [pscustomobject]@{ LocalPort=8888; OwningProcess=7720; LocalAddress='0.0.0.0' }   # PLANT: unknown listener
     )
@@ -279,6 +280,7 @@ if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $findingsFile))
     Want 'AMBER' 'listener'      'tcp/8888'       'an unaccounted listening port is AMBER'
     WantNot      'listener'      'tcp/445'        'stock Windows ports are not reported as unexpected listeners'
     WantNot      'listener'      'tcp/80'         'a port named in the packet is not reported'
+    WantNot      'listener'      'tcp/3389'       'scored RDP (CCDC_RDP_SCORED, on unless "0") is not an unaccounted listener'
     Want 'RED'   'tmpproc'       '*Temp\rt.exe'   'a process running from Temp is RED'
     Want 'RED'   'ifeo'          'sethc.exe'      'a debugger on sethc.exe is RED'
     Want 'RED'   'winlogon'      '*Userinit*'     'a modified Winlogon Userinit is RED'
