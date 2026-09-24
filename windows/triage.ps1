@@ -837,7 +837,7 @@ try {
         -Fix @('New-Item -Path ''HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'' -Force',
                'Set-ItemProperty -Path ''HKLM:\SOFTWARE\Policies\Microsoft\Windows\PowerShell\ScriptBlockLogging'' -Name EnableScriptBlockLogging -Value 1',
                '# or let the kit do it, with the rest of the logging setup:',
-               '.\windows\harden.ps1 -Config ' + $Config + ' -Only Logging -Apply') `
+               ('.\windows\harden.ps1 -Config ' + $Config + ' -Only Logging -Apply')) `
         -Card 'CARD W8'
 }
 
@@ -1181,7 +1181,7 @@ if ($null -eq $llmnrVal -or [int]$llmnrVal -ne 0) {
         -Description 'LLMNR is enabled; susceptible to Responder NTLMv2 hash poisoning' `
         -Detail @('When DNS resolution fails, Windows broadcasts on UDP 5355.',
                   'Responder or Inveigh answers these requests on the subnet to capture NTLMv2 hashes.') `
-        -Fix @("if (-not (Test-Path -LiteralPath '{0}')) {{ New-Item -Path '{0}' -Force | Out-Null }}" -f $dnsClientKey,
+        -Fix @(("if (-not (Test-Path -LiteralPath '{0}')) {{ New-Item -Path '{0}' -Force | Out-Null }}" -f $dnsClientKey),
                ("Set-ItemProperty -Path '{0}' -Name EnableMulticast -Value 0 -Type DWord" -f $dnsClientKey)) `
         -Card 'CARD W10'
 } else { Clean 'LLMNR multicast resolution is disabled' }

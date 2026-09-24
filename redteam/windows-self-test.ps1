@@ -589,6 +589,35 @@ if ($configReuseBad.Count -eq 0) {
     nope ('a bare run prints or passes an empty -Config: ' + ($configReuseBad -join ', '))
 }
 
+# The comma binds tighter than + and -f. `'a', 'b' + $x` is a three-element
+# array, and `'{0}' -f $k, ('...')` feeds the second string to -f as an unused
+# argument. Both printed fix commands that were split in half or missing their
+# second line. Found live on ccdc-win; this walks every script's syntax tree.
+$precedenceBad = @()
+foreach ($dir in @('windows', 'windows\lib', 'redteam')) {
+    foreach ($pf in [System.IO.Directory]::GetFiles((Join-Path $root $dir), '*.ps1')) {
+        $tk = $null; $pe = $null
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($pf, [ref]$tk, [ref]$pe)
+        $hits = $ast.FindAll({ param($n)
+            if ($n -isnot [System.Management.Automation.Language.BinaryExpressionAst]) { return $false }
+            if ($n.Operator -eq 'Plus' -and $n.Left -is [System.Management.Automation.Language.ArrayLiteralAst]) {
+                return (@($n.Left.Elements | Where-Object { $_ -is [System.Management.Automation.Language.StringConstantExpressionAst] -or
+                                                            $_ -is [System.Management.Automation.Language.ExpandableStringExpressionAst] }).Count -gt 0)
+            }
+            if ($n.Operator -eq 'Format' -and $n.Right -is [System.Management.Automation.Language.ArrayLiteralAst] -and
+                $n.Left -is [System.Management.Automation.Language.StringConstantExpressionAst]) {
+                $max = 0
+                foreach ($m in [regex]::Matches($n.Left.Value, '(?<!\{)\{(\d+)')) { $max = [Math]::Max($max, [int]$m.Groups[1].Value + 1) }
+                return ($n.Right.Elements.Count -gt $max)
+            }
+            return $false }, $true)
+        foreach ($h in @($hits)) { $precedenceBad += ('{0}:{1}' -f [System.IO.Path]::GetFileName($pf), $h.Extent.StartLineNumber) }
+    }
+}
+if ($precedenceBad.Count -eq 0) {
+    ok 'no printed command is split or dropped by comma precedence (array + string, surplus -f arguments)'
+} else { nope ('comma precedence splits or drops a printed command: ' + ($precedenceBad -join ', ')) }
+
 # The webroot signature must tell a webshell from the scored site. Reading a
 # form field is ordinary ASP.NET; running a process is not.
 $triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))
