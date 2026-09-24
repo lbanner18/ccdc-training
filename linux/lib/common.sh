@@ -371,3 +371,54 @@ ccdc_mute_count() {
   case "$n" in ''|*[!0-9]*) n=0 ;; esac
   printf '%s' "$n"
 }
+
+# Was the auth log emptied? Prints "log|from|first|missing|saved" and returns 0
+# when the journal holds auth entries from BEFORE the log's first line that
+# are in neither the log nor its last rotation - entries rsyslog wrote and
+# someone then removed. Each journal entry is matched to a log line by time
+# (within two seconds) AND text, and each log line is used up once matched:
+# "session closed for user root" is printed by every sudo, so matching text
+# alone found a twin for every wiped line. What counts is the unbroken run of
+# unmatched entries right up to the file's first line - a wipe removes
+# everything before that point, while a line rsyslog never wrote is a stray
+# that the next matched line interrupts.
+# Once the lost entries are saved to the "saved" path, it stops reporting.
+ccdc_auth_log_gap() {
+  local sd=$1 log='' f first first_s from boot_s saved missing iso=0 fmt=short
+  for f in ${CCDC_AUTH_LOG:-/var/log/auth.log /var/log/secure}; do [ -f "$f" ] && { log=$f; break; }; done
+  [ -n "$log" ] || return 1
+  first=$(head -1 -- "$log" 2>/dev/null)
+  case "$first" in [0-9][0-9][0-9][0-9]-*) iso=1; fmt=short-iso ;; esac
+  first=$(printf '%s\n' "$first" | awk -v iso="$iso" '{ if (iso) print $1; else print $1" "$2" "$3 }')
+  first_s=''
+  [ -z "$first" ] || first_s=$(date -d "$first" +%s 2>/dev/null)
+  [ -n "$first_s" ] || first_s=$(date +%s)
+  boot_s=$(date -d "$(uptime -s 2>/dev/null)" +%s 2>/dev/null || printf 0)
+  from=$((boot_s + 120))
+  [ "$first_s" -gt "$from" ] || return 1
+  saved="$sd/auth-log-from-journal.$first_s.txt"
+  [ -s "$saved" ] && return 1
+  missing=$( { sed 's/^/L /' -- "$log.1" 2>/dev/null
+               journalctl -q --no-pager -o "$fmt" SYSLOG_FACILITY=4 SYSLOG_FACILITY=10 \
+                 --since "@$from" --until "@$((first_s - 1))" 2>/dev/null | sed 's/^/J /'; } \
+    | awk -v iso="$iso" '
+        function hms(t,  a) { split(t, a, ":"); return a[1] * 3600 + a[2] * 60 + int(a[3]) }
+        {
+          if (iso) { d = substr($2, 1, 10); s = hms(substr($2, 12, 8)); skip = 4 }
+          else     { d = $2 " " $3;       s = hms($4);                skip = 6 }
+          m = $0
+          for (i = 0; i < skip; i++) sub(/^[^ ]+ +/, "", m)
+          sub(/[ \t]+$/, "", m)
+          if (m == "") next
+          if ($1 == "L") { c[d, s, m]++; next }
+          hit = 0
+          for (o = 0; o <= 2 && !hit; o++) {
+            if (c[d, s - o, m] > 0) { c[d, s - o, m]--; hit = 1 }
+            else if (o && c[d, s + o, m] > 0) { c[d, s + o, m]--; hit = 1 }
+          }
+          if (hit) run = 0; else run++
+        }
+        END { printf "%d", run + 0 }')
+  [ "${missing:-0}" -gt 5 ] || return 1
+  printf '%s|%s|%s|%s|%s\n' "$log" "$from" "$first_s" "$missing" "$saved"
+}

@@ -377,7 +377,7 @@ policy_delta() {
 
 do_audit() {
   local value sources match_files match_body dropin count started conf_mtime
-  local prov late_dropins='' unknown
+  local prov late_dropins='' danger_dropins='' danger dropin_d unknown
 
   if ! have_sshd; then
     printf '  sshd is not installed on this box; nothing to audit.\n'
@@ -526,8 +526,16 @@ do_audit() {
         # account for" right after the operator applied it.
         if [ "$dropin" = "$dropin_file" ] && head -1 "$dropin" 2>/dev/null | grep -q '^# Managed by ccdc sshd.sh'; then
           prov="written by sshd.sh --apply (this kit) - yours"
-        elif prov=$(file_provenance "$dropin"); then
-          late_dropins="$late_dropins $dropin"
+        else
+          prov=$(file_provenance "$dropin") && late_dropins="$late_dropins $dropin"
+          # A drop-in that opens the door is RED on its own, even when a file
+          # that sorts earlier wins today: deleting that one - ours, say -
+          # hands the login straight back. Live run: 99-rt-tuning.conf set
+          # PermitRootLogin yes, was overridden by 99-ccdc-hardening.conf, and
+          # was only ever an AMBER line in a list of four.
+          danger=$(grep -iE '^[[:space:]]*(PermitRootLogin[[:space:]]+yes|PermitEmptyPasswords[[:space:]]+yes|PermitUserEnvironment[[:space:]]+yes|AuthorizedKeysCommand[[:space:]]+[^n])' "$dropin" 2>/dev/null \
+            | sed 's/^[[:space:]]*//' | head -1)
+          [ -z "$danger" ] || danger_dropins="$danger_dropins$dropin|$danger"$'\n'
         fi
         printf '%s\n' "$prov" | sed 's/^/            /'
         # Every directive, not only the access-granting ones. The filtered
@@ -553,6 +561,15 @@ do_audit() {
       fixline "# a file you did not write goes away whole, not line by line:"
       fixline "#   sudo cp FILE $(printf '%q' "$state_dir")/ && sudo rm FILE"
       fixline "#   sudo $qself --config $qconfig --apply"
+      while IFS='|' read -r dropin_d danger; do
+        [ -n "$dropin_d" ] || continue
+        red "SSH drop-in $dropin_d sets $danger"
+        detail "not in effect only while another file sorts ahead of it. It is a way"
+        detail "back in waiting for someone to tidy up the other file."
+        fixhdr
+        fixline "sudo mv $(printf '%q' "$dropin_d") $(printf '%q' "$state_dir")/ && sudo $qself --config $qconfig --apply"
+        fixline "# then log in from a SECOND terminal and: sudo $qself --config $qconfig --confirm"
+      done <<<"$danger_dropins"
     else
       okline "no SSH drop-in files"
     fi

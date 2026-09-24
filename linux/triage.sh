@@ -190,6 +190,7 @@ machine_triple_safe() {
   case "$1"$'\n'"$2"$'\n'"$3" in *'::'*) return 1 ;; esac
   return 0
 }
+emitted_keys=$'\n'
 emit() {
   # A standing exception the operator recorded with `sentry.sh --mute`. The
   # count is printed at the end of this run and in every ALERTS header, so a
@@ -199,6 +200,11 @@ emit() {
     muted_n=$((muted_n + 1))
     return 0
   fi
+  # One row per check and subject. A python pid that both listens and serves
+  # an inbound session was emitted twice under one subject, and sentry queued
+  # it as items 7 and 8 - the same kill, offered twice.
+  case "$emitted_keys" in *$'\n'"$2|$3"$'\n'*) return 0 ;; esac
+  emitted_keys="$emitted_keys$2|$3"$'\n'
   if machine_field_safe "$1" && machine_field_safe "$2" &&
      machine_field_safe "$3" && machine_field_safe "$4"; then
     printf '%s|%s|%s|%s\n' "$1" "$2" "$3" "$4" >>"$findings_tmp" \
@@ -1327,6 +1333,12 @@ else
       sh|bash|dash|zsh|ksh|busybox|python|python[0-9.]*|perl|ruby|php|lua|lua[0-9.]*|\
       tclsh|expect|nc|nc.openbsd|nc.traditional|ncat|netcat|socat|telnet|awk|gawk|mawk)
         printf 'it is %s - an interpreter, not a service' "$base"; return 0 ;;
+      # These never open a socket themselves, so one holding a socket was
+      # handed it by the shell that started it. Live run: the C2 shell was
+      # killed, its `sleep 3600` child kept the connection open for an hour,
+      # and nothing reported it - sleep is packaged and is not a shell.
+      sleep|cat|tail|head|tee|dd|yes|base64|xxd|od|sort|timeout|nohup|mkfifo|stdbuf)
+        printf 'it is %s, which never opens a connection itself - it inherited this one from a shell' "$base"; return 0 ;;
     esac
     return 1
   }
@@ -1507,7 +1519,7 @@ else
         entry="$entry${F}sudo tr '\\0' ' ' < /proc/$qpid/cmdline; echo"$'\n'
         entry="$entry${F}sudo ls -l /proc/$qpid/cwd /proc/$qpid/fd"$'\n'
         entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid \$(ps -o ppid= -p $qpid)   # WHO STARTED IT"$'\n'
-        entry="$entry${F}sudo kill -9 $qpid"$'\n'
+        entry="$entry${F}sudo pkill -9 -P $qpid; sudo kill -9 $qpid      # its children too: they hold the socket"$'\n'
         net_red_buf="$net_red_buf$entry"
       else
         # NEVER a kill command here, and this is not a style choice.
@@ -2020,6 +2032,116 @@ if [ "$(id -u)" -eq 0 ] && [ -x "$SCRIPT_DIR/sshd.sh" ] && { ccdc_have sshd || [
   [ "$ssh_n" -gt 0 ] || clean "the full SSH audit (sshd.sh) found nothing"
 else
   clean "full SSH audit skipped (needs sudo, sshd, and linux/sshd.sh)"
+fi
+
+# --- 9g. Files an attacker dropped and left ------------------------------------
+# Every check above finds a file because something POINTS at it: a cron line, a
+# unit, a running process, a socket. Take the pointer away and the file is
+# invisible. Live run, 2026-09-24: the cron job, timer and processes were all
+# cleaned up, and five payloads stayed on disk with nothing reporting them -
+# /usr/local/bin/rt-implant, /dev/shm/.rt, two hidden python scripts in
+# /usr/local/lib and a hidden .jsp in the web root. Any one of them is a way
+# back the moment something calls it again.
+#
+# What makes a file a finding here is WHERE it is and WHAT it is, never its
+# name: a program in /dev/shm, a hidden program anywhere under /usr/local or
+# /opt or at the top of /tmp, a hidden server-side script in a web root, or a
+# web-root file newer than the box that executes commands. A package-owned file
+# is never one, and neither is the kit.
+begin
+drop_is_program() {
+  local f=$1 magic
+  [ -x "$f" ] && return 0
+  magic=$(head -c 4 -- "$f" 2>/dev/null | tr -d '\0')
+  case "$magic" in '#!'*|$'\x7f''ELF') return 0 ;; esac
+  case "$f" in *.py|*.sh|*.pl|*.rb|*.php|*.jsp|*.jspx|*.asp|*.aspx|*.cgi|*.elf|*.so) return 0 ;; esac
+  return 1
+}
+drop_red=''; drop_amber=''
+drop_add() {  # severity path why
+  case " $drop_red $drop_amber " in *" $2 "*) return 0 ;; esac
+  emit "$1" dropfile "$2" "$3"
+  if [ "$1" = RED ]; then drop_red="$drop_red $2"; else drop_amber="$drop_amber $2"; fi
+  drop_why="$drop_why$2|$3"$'\n'
+}
+drop_why=''
+drop_skip() {
+  own_payload "$1" && return 0
+  # SUID/SGID files are check 7's, with its own fix; do not say it twice.
+  [ -u "$1" ] || [ -g "$1" ] && return 0
+  case "$1" in "$state_dir"/*|"$SCRIPT_DIR"/*) return 0 ;; esac
+  pkg_owns "$1"
+}
+while IFS= read -r -d '' df; do
+  drop_skip "$df" && continue
+  drop_is_program "$df" && drop_add RED "$df" "a program in /dev/shm - memory-backed, world-writable, nothing installs there"
+done < <(find /dev/shm -xdev -maxdepth 3 -type f -print0 2>/dev/null)
+while IFS= read -r -d '' df; do
+  drop_skip "$df" && continue
+  drop_is_program "$df" && drop_add RED "$df" "a hidden program - nothing that installs software hides it"
+done < <(find /usr/local /opt -xdev -maxdepth 3 -type f -name '.*' -print0 2>/dev/null; \
+         find /tmp /var/tmp -xdev -maxdepth 1 -type f -name '.*' -print0 2>/dev/null)
+while IFS= read -r -d '' df; do
+  drop_skip "$df" && continue
+  newer_than_box "$df" || continue
+  drop_is_program "$df" && drop_add AMBER "$df" "a program no package installed, newer than the box"
+done < <(find /usr/local/bin /usr/local/sbin -xdev -maxdepth 1 -type f -print0 2>/dev/null)
+for webroot in /var/www /srv/www /srv/http /usr/share/nginx/html; do
+  [ -d "$webroot" ] || continue
+  while IFS= read -r -d '' df; do
+    drop_skip "$df" && continue
+    case "$df" in
+      */.*.php|*/.*.jsp|*/.*.jspx|*/.*.asp|*/.*.aspx|*/.*.py|*/.*.pl|*/.*.cgi|*/.*.sh)
+        drop_add RED "$df" "a hidden server-side script in a web root" ;;
+      *.php|*.jsp|*.jspx|*.asp|*.aspx|*.py|*.pl|*.cgi|*.sh)
+        newer_than_box "$df" || continue
+        grep -qE 'shell_exec|passthru|proc_open|popen\(|system\(|exec\(|Runtime\.getRuntime|ProcessBuilder|eval\(base64_decode|assert\(\$_' -- "$df" 2>/dev/null \
+          && drop_add RED "$df" "a web-root script newer than the box that runs commands" ;;
+    esac
+  done < <(find "$webroot" -xdev -maxdepth 5 -type f -print0 2>/dev/null)
+done
+if [ -n "$drop_red$drop_amber" ]; then
+  if [ -n "$drop_red" ]; then red "dropped file(s) nothing installed and nothing accounts for   [CARD 18]"
+  else amber "program(s) nobody installed from a package   [CARD 18]"; fi
+  detail "nothing may be running them now - that is how they get left behind"
+  while IFS='|' read -r df why; do
+    [ -n "$df" ] || continue
+    detail "$(ls -l --time-style=+%m-%d_%H:%M -- "$df" 2>/dev/null | awk '{print $6, $1, $3}')  $df"
+    detail "    $why"
+  done <<<"$drop_why"
+  fixhdr
+  drop_first=$(printf '%s\n' "$drop_why" | head -1 | cut -d'|' -f1)
+  fix "sudo head -20 -- $(printf '%q' "$drop_first")      # read one first"
+  fix "# each one moved into evidence: removed, and kept"
+  while IFS='|' read -r df why; do
+    [ -n "$df" ] && fix "sudo mv -- $(printf '%q' "$df") $(printf '%q' "$state_dir")/"
+  done <<<"$drop_why"
+  fix "# or let sentry do them: sudo $qsentry --config $qconfig --status"
+else
+  clean "no dropped programs in /dev/shm, /tmp, /usr/local, /opt or the web roots"
+fi
+
+# --- 9h. The auth log was wiped -------------------------------------------------
+# The plant's last move was `: > /var/log/auth.log`. Nothing noticed, because
+# every check here reads the box as it is and an empty log is a valid state.
+# What gives it away is the journal: rsyslog writes auth.log from it, and the
+# journal still holds the auth entries the file no longer does. Entries that
+# the journal has from BEFORE the file's first line - and after its last
+# rotation - were in the file and were removed.
+begin
+if [ "$(id -u)" -ne 0 ] || ! ccdc_have journalctl; then
+  clean "auth log wipe check skipped (needs sudo and journalctl)"
+elif al_gap=$(ccdc_auth_log_gap "$state_dir"); then
+  IFS='|' read -r auth_log al_from al_first_s al_missing al_saved <<<"$al_gap"
+  red "the auth log was wiped: $auth_log starts at $(date -d "@$al_first_s" '+%m-%d %H:%M'), the journal has $al_missing earlier entries   [CARD 19]"
+  emit RED logwipe "$auth_log" "auth log truncated - the journal still holds $al_missing entries it lost"
+  detail "whoever did it wanted the logins before that time gone. The journal still has them."
+  fixhdr
+  fix "sudo sh -c 'journalctl -q --no-pager SYSLOG_FACILITY=4 SYSLOG_FACILITY=10 --since @$al_from --until @$al_first_s > $(printf '%q' "$al_saved")'"
+  fix "sudo grep -E 'Accepted|session opened|COMMAND=' $(printf '%q' "$al_saved") | tail -30   # who was in, what they ran"
+  fix "# or let sentry save it: sudo $qsentry --config $qconfig --status"
+else
+  clean "auth log is continuous with the journal"
 fi
 
 # --- 10. Very recently modified /etc ------------------------------------------

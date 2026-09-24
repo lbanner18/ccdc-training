@@ -1209,3 +1209,71 @@ sudo ./linux/baseline.sh --config /tmp/ccdc-linux.env --bless --stable-for 20 --
 Blessing records it as a standing exception. Do that only after you have
 answered both questions above — a blessed implant is invisible for the rest
 of the event.
+
+---
+
+## CARD 18 — a dropped file nothing installed
+
+**What triage said:** `dropped file(s) nothing installed and nothing accounts for`
+or `program(s) nobody installed from a package`.
+
+A payload the attacker wrote to disk and left: a program in `/dev/shm`, a
+hidden program under `/usr/local`, `/opt` or at the top of `/tmp`, a hidden
+server-side script in a web root, or a web-root script that runs commands.
+Nothing may be running it right now. That is exactly how it gets left behind:
+you remove the cron job or the unit, and the file it called stays, waiting for
+the next thing that calls it.
+
+Read it first, then move it into the evidence directory. Moving it both
+removes it and keeps it:
+
+```bash
+sudo head -20 FILE
+sudo mv FILE /var/tmp/ccdc-evidence/
+```
+
+Or let sentry do it. RED ones go with approve-all; an AMBER one (a program in
+`/usr/local/bin` that may be yours) needs its own number:
+
+```bash
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --status
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply
+```
+
+Then ask what would have run it. If it comes back after you remove it, you
+removed the payload and left the mechanism: CARD 3, CARD 4 and CARD 11.
+
+If it is yours, and only then:
+
+```bash
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --mute dropfile FILE --reason "WHY" --apply
+```
+
+---
+
+## CARD 19 — the auth log was wiped
+
+**What triage said:** `the auth log was wiped: /var/log/auth.log starts at ...`
+
+Someone emptied `/var/log/auth.log` to hide their logins. Your logs are part
+of the score, and the record of who got in is the lead to follow. rsyslog
+writes that file from the systemd journal, and **the journal still has the
+entries**. Save them before the journal rotates them out:
+
+```bash
+sudo ./linux/sentry.sh --config /tmp/ccdc-linux.env --approve --apply   # saves them for you
+# by hand: the exact journalctl line is under the finding in triage
+```
+
+Then read who was in and what they ran:
+
+```bash
+sudo sh -c "grep -hE 'Accepted|session opened|COMMAND=' /var/tmp/ccdc-evidence/auth-log-from-journal.*.txt" | tail -30
+```
+
+(`sudo sh -c "..."`, because the evidence directory is root-only: a `*` typed
+after plain `sudo` is expanded by YOUR shell first, which cannot see inside it.)
+
+Every account in there that is not yours is CARD 10. Every command that was
+run as root is something to undo. Put the time of the wipe in your incident
+report.

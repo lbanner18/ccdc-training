@@ -85,15 +85,20 @@ sudo ./linux/audit.sh --config "$CFG" --apply
 sudo ./linux/audit.sh --config "$CFG" --capture
 ```
 Changed the config after this? `sudo ./linux/sentry.sh --config "$CFG" --reload-config --apply`
+Updated the kit after this (`git pull`, a re-push)? Run `sudo ./linux/arm.sh --config "$CFG" --apply` again —
+sentry runs from its own frozen copy, so a newer kit does not reach it until you do.
 
 ### B. When something new appears — the loop
 
 A new RED is broadcast to your terminals (`wall`). Then:
 
-**1. The numbered queue**
+**1. The numbered queue** — re-checks first, so what you just fixed is already gone
 ```bash
 sudo ./linux/sentry.sh --config "$CFG" --status
+sudo ./linux/sentry.sh --config "$CFG" --approve --apply     # every numbered RED at once
 ```
+Under each item it can't do for you: a `not yours:` line (paste it to remove it) and a
+`yours:` line (paste it to stop being asked). `--status --full` explains every item.
 
 **2. Everything that changed since the freeze, with a fix for each**
 ```bash

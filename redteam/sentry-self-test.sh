@@ -74,6 +74,9 @@ case "$mode" in
   amber)
     printf 'AMBER|rogueunit|/etc/systemd/system/amber.service|reversible test unit\n' >"$out"
     ;;
+  dropfile)
+    printf 'RED|dropfile|%s/dropped/.payload|a hidden program\n' "$CCDC_TEST_ROOT" >"$out"
+    ;;
   fail)
     exit 9
     ;;
@@ -278,6 +281,22 @@ has '^RED[|]unitdropin[|]scored.service::/etc/systemd/system/scored.service.d/di
   "$state/sentry.queue" 'scored unit protection does not shield a malicious drop-in'
 has '^RED[|]unitdropindeep[|]scored.service::/etc/systemd/system/scored.service.d/deep.conf::.*deep-payload.sh$' \
   "$state/sentry.queue" 'deep drop-in remediation reaches the approval queue'
+
+# A payload left on disk after what launched it was cleaned up: approving it
+# moves it into the evidence case - gone from where it was, kept.
+mkdir -p "$test_root/dropped"
+printf '#!/bin/sh\n: RT\n' >"$test_root/dropped/.payload"
+chmod 0755 "$test_root/dropped/.payload"
+printf 'dropfile\n' >"$test_root/mode"
+"$suite/sentry.sh" --config "$config" --once --no-bell >/dev/null
+"$suite/sentry.sh" --config "$config" --status >/dev/null
+"$suite/sentry.sh" --config "$config" --approve 1 --apply >"$test_root/dropfile.out" 2>&1
+if [ ! -e "$test_root/dropped/.payload" ] \
+   && ls "$state"/removed/*dropfile*/*.payload >/dev/null 2>&1; then
+  ok 'approving a dropped file removes it and keeps it in the evidence case'
+else
+  bad 'approving a dropped file removes it and keeps it in the evidence case'
+fi
 
 # A dead supervisor must not leave an old calm-looking ALERTS file as the only
 # output of --status. Age the completion marker and require a loud warning.

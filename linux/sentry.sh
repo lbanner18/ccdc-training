@@ -592,7 +592,7 @@ protected_sudoers() {
 # accounts for, which is precisely the hand-over this tool exists to make.
 offerable_at_amber() {
   case "$1" in
-    port|udpport|rogueunit|netunpackaged|netprocsvc) return 0 ;;
+    port|udpport|rogueunit|netunpackaged|netprocsvc|dropfile) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -755,6 +755,24 @@ can_automate() {
     # can frame legitimate paths. Report them prominently, but do not race a
     # user-controlled parent or delete the referenced file automatically.
     rcdeep|rcfile) return 1 ;;
+    # A dropped payload: moved into the evidence case, which is both the copy
+    # and the removal. Everything triage asked is asked again here, because
+    # this decides a deletion and the finding can be a minute old - and only
+    # inside the places triage looks, never a path it was handed from anywhere.
+    dropfile)
+      valid_path "$subject" && [ -f "$subject" ] && [ ! -L "$subject" ] || return 1
+      case "$subject" in
+        /dev/shm/*|/tmp/*|/var/tmp/*|/usr/local/*|/opt/*|/var/www/*|/srv/*|/usr/share/nginx/html/*) ;;
+        *) return 1 ;;
+      esac
+      case "$subject" in "$state_dir"/*|"$SCRIPT_DIR"/*) return 1 ;; esac
+      protected_payload "$subject" && return 1
+      exe_is_unpackaged "$subject" || return 1
+      ;;
+    # Saving what the journal still holds changes nothing on the box.
+    logwipe)
+      ccdc_auth_log_gap "$state_dir" >/dev/null || return 1
+      ;;
     *) return 1 ;;
   esac
   return 0
@@ -800,6 +818,8 @@ card_for() {
     netprocsvc)             printf 'CARD 12 - a shell or interpreter is holding a network connection' ;;
     sshrootlogin|sshemptypw|sshaudit) printf 'CARD 13 - SSH is configured to let them in' ;;
     rogueuser)              printf 'CARD 10 - an account the packet does not name' ;;
+    dropfile)               printf 'CARD 18 - a dropped file nothing installed' ;;
+    logwipe)                printf 'CARD 19 - the auth log was wiped' ;;
     *)                      printf 'playbooks/remediation-cards.md' ;;
   esac
 }
@@ -1186,6 +1206,8 @@ render_action() {
       printf 'no systemd unit owns pid %s (%s), so it is not a scored service; capture it, kill it, then re-check every scored service. The interpreter itself is package-owned and STAYS - what the attacker put here is the script it was told to run, and that is a different finding' "${pid:-?}" "$target" ;;
     rcdeep) target=${subject#*::}; printf 'preserve and remove launched payload %q' "$target" ;;
     rcfile) printf 'preserve %q and remove only the exact lines that still match the detector' "$subject" ;;
+    dropfile) printf 'move %q into the evidence case - removed from where it was, kept as evidence' "$subject" ;;
+    logwipe) printf 'save the auth entries the journal still has, from before %s was wiped, into the evidence directory' "$subject" ;;
     *) printf 'no automatic action' ;;
   esac
 }
@@ -1425,6 +1447,10 @@ brief_fix() {
       printf 'look: sudo %s/surface.sh --config %s' "$qkit" "$qconfig" ;;
     suidunpackaged|suid)
       printf 'fix:  sudo chmod -s %s' "$q" ;;
+    dropfile)
+      printf 'look: sudo head -20 %s    not yours: sudo mv %s %q/' "$q" "$q" "$state_dir" ;;
+    logwipe)
+      printf 'look: sudo %s/triage.sh --config %s | grep -A6 "auth log was wiped"' "$qkit" "$qconfig" ;;
     *)
       printf 'look: sudo %s/sentry.sh --config %s --status --full' "$qkit" "$qconfig" ;;
   esac
@@ -1449,7 +1475,7 @@ brief_mute() {
 }
 
 brief_item() {
-  local sev=$1 check=$2 subject=$3 desc=$4 q owner line n fp comment seen_fps f lines flag kit=0 kittime='' shown=0
+  local sev=$1 check=$2 subject=$3 desc=$4 q owner line n fp comment seen_fps f lines flag kit=0 kittime='' shown=0 mine u continue_cmd=0
   printf -v q '%q' "$subject"
   case "$check" in
     rogueuser)
@@ -1492,6 +1518,22 @@ brief_item() {
       printf '  %-5s %-12s %s\n' "$sev" "$check" "$subject"
       grep -n 'NOPASSWD' -- "$subject" 2>/dev/null | grep -v '^[0-9]*:[[:space:]]*#' | head -4 \
         | sed 's/^\([0-9]*\):/          line \1: /'
+      # Whose rule is it? Live run: the operator pasted the removal for the
+      # cloud-init line that let HIS OWN account sudo, did not know that
+      # account's password, and was locked out of root on the box. A rule
+      # naming you, or an account the packet names, gets no removal command.
+      mine=''
+      for u in $(grep -E '^[^#]*NOPASSWD' -- "$subject" 2>/dev/null | awk '{print $1}' | sort -u); do
+        if [ "$u" = "${SUDO_USER:-}" ] || ccdc_list_contains "$u" "${CCDC_ALLOWED_USERS:-}"; then
+          mine="$mine $u"
+        fi
+      done
+      if [ -n "$mine" ]; then
+        printf '        this rule is for%s - an account you log in with. LEAVE IT unless you know\n' "$mine"
+        printf '        that password: without NOPASSWD, sudo asks for it, and a wrong guess is no root.\n'
+        brief_mute "$check" "$subject"
+        return 0
+      fi
       case "$subject" in
         /etc/sudoers|/etc/sudoers.d/[A-Za-z0-9._-]*)
           # Drop only the NOPASSWD tag: the rule stays and parses either way.
@@ -1511,6 +1553,8 @@ brief_item() {
         *drop-in*)
           for f in /etc/ssh/sshd_config.d/*.conf; do
             [ -f "$f" ] || continue
+            # The RED for one file is about that file alone.
+            case "$desc" in 'SSH drop-in '*) [ "$desc" = "${desc#SSH drop-in $f }" ] && continue ;; esac
             if kit_owned_path "$f"; then
               printf '          %-28s (the kit'\''s own - sshd.sh wrote it)\n' "$(basename -- "$f")"
               continue
@@ -1519,9 +1563,19 @@ brief_item() {
             flag=''
             grep -qiE '^[[:space:]]*(PermitRootLogin[[:space:]]+yes|PasswordAuthentication[[:space:]]+yes|PermitEmptyPasswords[[:space:]]+yes|PermitUserEnvironment[[:space:]]+yes|AuthorizedKeys(File|Command)[[:space:]])' -- "$f" \
               && flag='   <- LOOSENS LOGIN'
+            case "$desc" in
+              'SSH drop-in '*) ;;
+              # The list of all of them: a file with its own RED above carries
+              # its own command there, so it is not repeated here.
+              *) grep -qF "|SSH drop-in $f sets " "$findings" 2>/dev/null && flag="$flag (its own RED above)" && continue_cmd=1 ;;
+            esac
             printf '          %-28s %s%s\n' "$(basename -- "$f")" "$lines" "$flag"
-            [ -n "$flag" ] && printf '            not yours: sudo mv %s %s/ && sudo %s/sshd.sh --config %s --apply\n' \
-              "$f" "$state_dir" "$qkit" "$qconfig" && shown=1
+            if [ -n "$flag" ] && [ "${continue_cmd:-0}" -eq 0 ]; then
+              printf '            not yours: sudo mv %s %s/ && sudo %s/sshd.sh --config %s --apply\n' \
+                "$f" "$state_dir" "$qkit" "$qconfig"
+              shown=1
+            fi
+            continue_cmd=0
           done
           [ "$shown" -eq 1 ] \
             && printf '                       then log in from a SECOND terminal and run: sudo %s/sshd.sh --config %s --confirm\n' "$qkit" "$qconfig" ;;
@@ -2083,6 +2137,26 @@ action_nopasswd() {
 
 # Setuid root and owned by no package. Clear the bit first so the escalation is
 # dead even if the removal fails, then remove the file.
+action_dropfile() {
+  local path=$1
+  new_evidence_case dropfile || return 1
+  preserve_into_case "$path" || return 1
+  [ -n "$evidence_last" ] || return 1
+  rm -f -- "$path"
+}
+
+action_logwipe() {
+  local gap log from first missing saved
+  gap=$(ccdc_auth_log_gap "$state_dir") || { slog "logwipe: no gap any more"; return 1; }
+  IFS='|' read -r log from first missing saved <<<"$gap"
+  journalctl -q --no-pager SYSLOG_FACILITY=4 SYSLOG_FACILITY=10 \
+    --since "@$from" --until "@$first" >"$saved" 2>/dev/null || return 1
+  [ -s "$saved" ] || return 1
+  chmod 0600 -- "$saved" 2>/dev/null || true
+  evidence_case=$saved
+  slog "logwipe: $missing lost $log entries saved to $saved"
+}
+
 action_suidunpackaged() {
   local path=$1 saved original_mode
   new_evidence_case suidunpackaged || return 1
@@ -2133,7 +2207,7 @@ action_rogueunit() {
 # unlinked executable all cease to exist - and refuse to kill what could not be
 # captured, because a kill with no capture destroys the only evidence there was.
 action_live_process() {
-  local subject=$1 kind=$2 pid path
+  local subject=$1 kind=$2 pid path kids kid
   pid=$(subject_pid "$subject") \
     || { slog "warning: $subject is no longer running"; return 1; }
   path=$(pid_exe "$pid" 2>/dev/null)
@@ -2158,7 +2232,16 @@ action_live_process() {
       return 1
     }
   fi
+  # Its children go with it. A reverse shell's `sleep` child inherits the
+  # socket and outlives the shell - found live, holding the C2 connection an
+  # hour after the shell died. They are collected BEFORE the kill: once the
+  # parent is gone they belong to init and nothing links them to it.
+  kids=$(pgrep -P "$pid" 2>/dev/null | tr '\n' ' ')
   kill -9 "$pid" 2>/dev/null || true
+  for kid in $kids; do
+    pid_is_protected "$kid" "$(protection_mode_for "$kind")" && continue
+    kill -9 "$kid" 2>/dev/null && slog "killed child pid $kid of $pid"
+  done
   # Killing the process and deleting its executable are two different
   # decisions, and only the second one is about provenance.
   #
@@ -2367,6 +2450,8 @@ execute_action() {
     udpport) action_udpport "$subject" ;;
     rcdeep) action_rcdeep "$subject" ;;
     rcfile) action_rcfile "$subject" ;;
+    dropfile) action_dropfile "$subject" ;;
+    logwipe) action_logwipe "$subject" ;;
     *) return 1 ;;
   esac
 }

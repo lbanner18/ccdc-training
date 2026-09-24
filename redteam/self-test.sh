@@ -78,6 +78,8 @@ run_suite "$ROOT/redteam/pasteable-self-test.sh" || failed=$((failed + 1))
 
 run_suite "$ROOT/redteam/baseline-self-test.sh" || failed=$((failed + 1))
 
+printf '\n== what an attacker leaves behind ==\n'
+run_suite "$ROOT/redteam/leftovers-self-test.sh" || failed=$((failed + 1))
 printf '\n== canary and change watch ==\n'
 run_suite "$ROOT/redteam/canary-watch-self-test.sh" || failed=$((failed + 1))
 

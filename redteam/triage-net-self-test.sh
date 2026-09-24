@@ -175,6 +175,21 @@ else
   fi
 fi
 
+# The shell dies and its child does not. Live 2026-09-24: the C2 shell was
+# killed and its `sleep` kept the connection for an hour, reported by nothing -
+# sleep is packaged, not a shell. Kill ONLY the shell here; the child now owns
+# the socket alone, and must be named.
+orphans=$(pgrep -P "$shell_pid" 2>/dev/null | tr '\n' ' ')
+kill -9 "$shell_pid" 2>/dev/null || true
+wait "$shell_pid" 2>/dev/null || true
+"$ROOT/linux/triage.sh" --config "$test_root/test.env" --quiet >"$test_root/triage-orphan.out" 2>&1 || true
+if [ -n "$orphans" ] && grep -qE '^RED\|netproc\|pid[0-9]+:[^|]*/sleep\|.*inherited' "$findings"; then
+  ok "a sleep left holding the dead shell's connection is RED (inherited socket)"
+else
+  no "the orphaned child holding the shell's connection was NOT reported"
+fi
+for o in $orphans; do kill -9 "$o" 2>/dev/null || true; done
+
 # Now prove the check goes quiet again. A detector that cannot clear is a
 # detector you stop believing, so the same pass has to come back clean once the
 # processes are gone.
