@@ -394,6 +394,98 @@ function Test-Allowed {
     return $null
 }
 
+# What to run when a drift item is NOT yours. Found live on ccdc-win: after an
+# attack, -Explain said only "if this is yours, allow it", and nothing in the
+# kit printed how to remove an added service. Evidence first, then the change
+# that stops it running; disabling beats deleting wherever deleting loses what
+# the incident report needs.
+function Get-DriftRemoval {
+    param([Parameter(Mandatory)]$Item)
+    function QS { param([string]$s) "'" + ($s -replace "'", "''") + "'" }
+    $k = [string]$Item.Key
+    $out = @()
+    if ($Item.Kind -eq 'REMOVED') {
+        return @('# it was there when you froze the box. If it is scored, put it back:',
+                 '# CARD W9 (backups, and getting a service back) in playbooks\windows-cards.md')
+    }
+    switch ($Item.Section) {
+        'services' {
+            $out += ('sc.exe qc {0}' -f $k)
+            $out += ('Stop-Service -Name {0} -Force' -f (QS $k))
+            $out += ('sc.exe delete {0}' -f $k)
+            $out += '# the program it ran stays on disk: Get-FileHash it for the report'
+        }
+        'tasks' {
+            $out += ('$t = Get-ScheduledTask | Where-Object {{ ($_.TaskPath + $_.TaskName) -eq {0} }}' -f (QS $k))
+            $out += ('$t | Export-ScheduledTask | Out-File {0}' -f (QS (Get-CcdcPath 'evidence\task-removed.xml')))
+            $out += '$t | Disable-ScheduledTask'
+        }
+        'autostart' {
+            if ($k -match '^(HK(LM|CU):\\.+)\\([^\\]+)$' -and $k -notmatch '^(ifeo|winlogon|wmiconsumer|activesetup|autoruns):') {
+                $out += ('Get-ItemProperty -Path {0} -Name {1}' -f (QS $Matches[1]), (QS $Matches[3]))
+                $out += ('Remove-ItemProperty -Path {0} -Name {1}' -f (QS $Matches[1]), (QS $Matches[3]))
+            } elseif ($k -match '^ifeo:(.+)$') {
+                $out += ('Remove-ItemProperty -LiteralPath {0} -Name Debugger' -f (QS $Matches[1]))
+            } elseif ($k -match '^winlogon:(Userinit|Shell)$') {
+                $stock = if ($Matches[1] -eq 'Shell') { 'explorer.exe' } else { 'C:\Windows\system32\userinit.exe,' }
+                $out += ("Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon' -Name {0} -Value {1}" -f $Matches[1], (QS $stock))
+            } elseif ($k -match '^wmiconsumer:') {
+                $out += '# a WMI consumer: remove it with its filter and binding - see the wmi item, or CARD W11'
+            } elseif ([System.IO.File]::Exists($k)) {
+                $out += ('Get-FileHash -LiteralPath {0}' -f (QS $k))
+                $out += ('Move-Item -LiteralPath {0} -Destination {1}' -f (QS $k), (QS (Get-CcdcPath 'evidence')))
+            } else {
+                $out += '# CARD W4 (autostart, registry, and the login-screen backdoors)'
+            }
+        }
+        'accounts' {
+            if ($k -match '^user:(.+)$') {
+                $out += ('Disable-LocalUser -Name {0}     # disable, do not delete: the account is evidence' -f (QS $Matches[1]))
+            } elseif ($k -match '^group:(.+)$') {
+                $g = $Matches[1]
+                $was = @(([string]$Item.Was) -split ',\s*' | Where-Object { $_ })
+                foreach ($m in @(([string]$Item.Now) -split ',\s*' | Where-Object { $_ -and $was -notcontains $_ })) {
+                    $out += ('Remove-LocalGroupMember -Group {0} -Member {1}' -f (QS $g), (QS $m))
+                }
+                if (@($out).Count -eq 0) { $out += ('Get-LocalGroupMember -Group {0}' -f (QS $g)) }
+            }
+        }
+        'listeners' {
+            if ($k -match '^tcp/(\d+)$') {
+                $out += ('Get-NetTCPConnection -State Listen -LocalPort {0} | Select-Object OwningProcess' -f $Matches[1])
+                $out += ("New-NetFirewallRule -DisplayName 'CCDC block {0}' -Direction Inbound -LocalPort {0} -Protocol TCP -Action Block   # only if it is not scored" -f $Matches[1])
+            }
+        }
+        'firewall' {
+            if ($k -match '^rule:(.+)$') { $out += ('Disable-NetFirewallRule -DisplayName {0}' -f (QS $Matches[1])) }
+            else { $out += '.\windows\harden.ps1 -Only Firewall -Apply' }
+        }
+        'shares' {
+            if ($k -match '^share:(.+)$') {
+                $out += ('Get-SmbShareAccess -Name {0}' -f (QS $Matches[1]))
+                $out += ('Remove-SmbShare -Name {0} -Force     # the folder itself stays, as evidence' -f (QS $Matches[1]))
+            }
+        }
+        'wmi' {
+            if ($k -match '^wmi:([^\\]+)\\(.+)$') {
+                $out += ("Get-CimInstance -Namespace root/subscription -ClassName __FilterToConsumerBinding | Where-Object {{ `$_.Consumer -match {0} -or `$_.Filter -match {0} }} | Remove-CimInstance" -f (QS $Matches[2]))
+                $out += ("Get-CimInstance -Namespace root/subscription -ClassName {0} -Filter ""Name='{1}'"" | Remove-CimInstance" -f $Matches[1], $Matches[2])
+            }
+        }
+        'defender' {
+            if ($k -match '^exclusion:(path|proc|ext):(.+)$') {
+                $flag = @{ path = 'ExclusionPath'; proc = 'ExclusionProcess'; ext = 'ExclusionExtension' }[$Matches[1]]
+                $out += ('Remove-MpPreference -{0} {1}' -f $flag, (QS $Matches[2]))
+            }
+        }
+        'files' {
+            $out += ('Get-FileHash -LiteralPath {0}' -f (QS $k))
+            $out += '# remove what RUNS it first (the service, task or Run key above); the file can then stay as evidence'
+        }
+    }
+    return @($out)
+}
+
 # =============================================================================
 # BLESS
 # =============================================================================
@@ -573,6 +665,12 @@ no baseline to compare against.
             Write-Host ('    sha256:    {0}' -f $facts.Sha256)
             Write-Host ('    {0}' -f $v.Detail)
         }
+        $removal = @(Get-DriftRemoval -Item $found)
+        if ($removal.Count -gt 0) {
+            Write-Host ''
+            Write-Host '  if this is NOT yours:' -ForegroundColor Yellow
+            foreach ($line in $removal) { Write-Host ('    {0}' -f $line) }
+        }
         Write-Host ''
         Write-Host '  if this is yours:'
         Write-Host ('    .\windows\baseline.ps1 -Config {0} -Allow ''{1}:{2}'' -Reason ''why'' -Apply' -f $Config, $found.Section, $found.Key)
@@ -619,7 +717,7 @@ no baseline to compare against.
     if ($allowedCount -gt 0) { Write-Host ('  {0} more hidden by your allowlist (-All shows them).' -f $allowedCount) }
     Write-Host ''
     Write-Host ('     .\windows\baseline.ps1 -Config {0} -Explain N' -f $Config)
-    Write-Host '       everything known about item N, including what accounts for it'
+    Write-Host '       everything known about item N, and how to remove it if it is not yours'
     Write-Host ('     .\windows\baseline.ps1 -Config {0} -Allow ''section:key'' -Reason ''why'' -Apply' -f $Config)
     Write-Host '       stop reporting one you have decided is yours'
     Write-Host ''

@@ -660,6 +660,24 @@ if ($baselineTxt -match "(?s)if \(@\(\`$shown\)\.Count -eq 0\) \{\s*#[^\n]*\n\s*
     ok 'a clean baseline comparison clears the drift record the watcher reads'
 } else { nope 'baseline -Status leaves a stale drift.txt after a clean comparison' }
 
+# baseline -Explain must say how to remove what is not yours. Found live: it
+# only ever said "allow it", and nothing printed how to delete an added service.
+$blAst = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $root 'windows\baseline.ps1'), [ref]$null, [ref]$null)
+$drFn = $blAst.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-DriftRemoval' }, $true)
+if ($drFn) {
+    Invoke-Expression $drFn.Extent.Text
+    $svcFix  = @(Get-DriftRemoval -Item ([pscustomobject]@{ Kind='ADDED'; Section='services'; Key='EvilSvc'; Was=''; Now='' })) -join "`n"
+    $runFix  = @(Get-DriftRemoval -Item ([pscustomobject]@{ Kind='ADDED'; Section='autostart'; Key='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run\Evil'; Was=''; Now='' })) -join "`n"
+    $grpFix  = @(Get-DriftRemoval -Item ([pscustomobject]@{ Kind='CHANGED'; Section='accounts'; Key='group:Administrators'; Was='BOX\Administrator'; Now='BOX\Administrator, BOX\evil' })) -join "`n"
+    $shrFix  = @(Get-DriftRemoval -Item ([pscustomobject]@{ Kind='ADDED'; Section='shares'; Key='share:Drop'; Was=''; Now='' })) -join "`n"
+    if ($svcFix -match 'sc\.exe delete EvilSvc' -and
+        $runFix -match "Remove-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -Name 'Evil'" -and
+        $grpFix -match "Remove-LocalGroupMember -Group 'Administrators' -Member 'BOX\\evil'" -and $grpFix -notmatch 'Member .BOX\\Administrator' -and
+        $shrFix -match "Remove-SmbShare -Name 'Drop' -Force") {
+        ok 'baseline -Explain prints the removal for an added service, Run key, admin and share'
+    } else { nope ('baseline -Explain removal hints are wrong: ' + (($svcFix, $runFix, $grpFix, $shrFix) -join ' || ')) }
+} else { nope 'baseline.ps1 has no Get-DriftRemoval' }
+
 # The webroot signature must tell a webshell from the scored site. Reading a
 # form field is ordinary ASP.NET; running a process is not.
 $triageTxt = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))

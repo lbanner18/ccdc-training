@@ -177,6 +177,23 @@ sc.exe qc NAME
 net user THEACCOUNT
 ```
 
+### Removing a service that is not yours
+
+`baseline.ps1 -Status` lists it as `ADDED services NAME`; `-Explain N` prints
+these same lines. Record it, stop it, delete it. The program it ran stays on
+disk as evidence: hash it, and remove whatever else starts it (a Run key, a
+task) before you decide what to do with the file.
+
+```powershell
+sc.exe qc NAME                  # what it runs and as whom - for the report
+Stop-Service -Name NAME -Force
+sc.exe delete NAME
+Get-FileHash -LiteralPath 'C:\PATH\FROM\qc.exe'
+```
+
+`sentry.ps1` only restores a service's *permissions*; it never deletes one,
+because a service it cannot identify might be scored.
+
 ### What to do next
 
 If you removed a service, check that whatever installed it is gone too —
