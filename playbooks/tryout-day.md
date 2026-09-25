@@ -97,11 +97,12 @@ sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
 sudo ./linux/arm.sh --config "$CFG" --apply
 ```
 
-**Windows (lapis)** — `playbooks/windows-first-15-minutes.md`, "Windows at a
-glance", from triage on: `triage.ps1` → `harden.ps1` then `-Apply` →
-`users.ps1 -CreateAdmin ops2 -Apply` (a Domain Admin on the DC; better, a name only you know) → `arm.ps1
--Apply` → `baseline.ps1 -Bless -StableForSeconds 20 -Apply` → second window:
-`sentry.ps1 -Watch`.
+**Windows (lapis)** — `.\windows\first15.ps1 -Phase 1`, then Phase 1 on the other
+boxes, then `-Phase 2`. It walks `playbooks/windows-first-15-minutes.md`, "Windows
+at a glance", and asks before every change. By hand: `triage.ps1` → `harden.ps1`
+then `-Apply` → check **alex** is an active Domain Admin (the packet allows only
+its listed users, so no new account) → `arm.ps1 -Apply` → `baseline.ps1 -Bless
+-StableForSeconds 20 -Apply` → second window: `sentry.ps1 -Watch`.
 
 **Router** — `playbooks/firewall-appliance.md`, VyOS: read, do not filter.
 

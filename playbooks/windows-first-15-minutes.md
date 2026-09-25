@@ -19,6 +19,11 @@ The whole flow on one screen, in the order it was rehearsed on the lab box.
 Every command is complete: copy it as it stands. Each step has a detailed
 section further down.
 
+**Or let the runner walk it.** After steps 1-2 below, `.\windows\first15.ps1 -Phase 1`
+runs steps 3-7 in order and asks before every change, including which services
+Quotient scores on this box. `-Phase 2` runs steps 8-11. Do Phase 1 on every box
+before Phase 2 on any.
+
 ### A. Once, at the start — elevated PowerShell
 
 **1. Get the kit** (the box needs internet; see *Minute 0* if it has none)
@@ -67,11 +72,16 @@ Then take it off the box: run the `Compress-Archive` line recon prints, right-cl
 .\windows\harden.ps1 -Apply
 ```
 
-**7. A second admin, then your own password** — both on paper
+**7. Your backup admin is alex, then your own password** — both on paper
 ```powershell
-.\windows\users.ps1 -CreateAdmin ops2 -Apply
+net user alex
+net group "Domain Admins" /domain
 net user Administrator *
 ```
+alex is a packet administrator whose password block 1 already changed, so there
+is no new account to create. The packet says the box should have *only* its
+listed users. Check alex is active and in Domain Admins (`net localgroup
+Administrators` off a DC).
 
 **8. Down to 0 RED**
 ```powershell
@@ -290,12 +300,19 @@ The red team knows the default passwords."*
 Read the table. The column that matters is the last one — `** NO **` means
 enabled and not named in your packet list.
 
-**Make a second administrator first.** If they take your account out of
-Administrators, this is the difference between a bad ten minutes and a lost box:
+**Make sure you have a second administrator first.** If they take your account
+out of Administrators, this is the difference between a bad ten minutes and a
+lost box. For the tryout that is **alex**: it is in the packet, and the packet
+says the box should have only its listed users, so do not create a new one.
+Check it is active and still an admin:
 
 ```powershell
-.\windows\users.ps1 -CreateAdmin ops2 -Apply
+net user alex
+net group "Domain Admins" /domain       # off a DC: net localgroup Administrators
 ```
+
+(`users.ps1 -CreateAdmin NAME -Apply` exists for events whose packet allows
+extra accounts.)
 
 Then rotate everything that is not scored:
 
