@@ -121,7 +121,8 @@ if [ "$generate" -eq 1 ]; then
     printf '  Administrator (Win)    %s   net user Administrator *\n' "$admin_pw"
     printf '  your backup admin      %s   Linux: users.sh --create-admin NAME asks for this one\n' "$backup_pw"
     printf '        name (one only you know): ________________\n'
-    printf '        lapis: users.ps1 -CreateAdmin sets its OWN password and prints it. Copy it here: ____________________\n'
+    printf '        lapis: users.ps1 -CreateAdmin sets its OWN, in the file it names\n'
+    printf '        (C:\\ProgramData\\CCDC\\state\\passwords-*.txt). Copy it here: ____________________\n'
     printf '  vyos (router)          %s\n' "$vyos_pw"
     printf '        configure\n'
     printf '        set system login user vyos authentication plaintext-password '"'"'%s'"'"'\n' "$vyos_pw"
