@@ -41,6 +41,7 @@ function Step([string]$n, [string]$title) {
     Write-Host ('=' * 76) -ForegroundColor Cyan
     Write-Host ("  STEP {0}  {1}" -f $n, $title) -ForegroundColor Cyan
     Write-Host ('=' * 76) -ForegroundColor Cyan
+    Write-Host '  (looks stuck? if the title bar says "Select", press Esc - a click pauses the window)' -ForegroundColor DarkGray
 }
 
 function Ask([string]$q, [switch]$DefaultYes) {
@@ -103,6 +104,7 @@ try { $isDc = ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).DomainRo
 Write-Host ''
 Write-Host ("  first15 Phase {0} on {1}{2}" -f $Phase, $env:COMPUTERNAME, $(if ($isDc) { ' (domain controller)' } else { '' })) -ForegroundColor White
 Write-Host  '  Steps that change the box ask first. Ctrl+C stops at any point; re-running is safe.'
+Write-Host  '  Do not click inside this window: a click pauses it (title bar says "Select"). Esc resumes.' -ForegroundColor Yellow
 
 # =============================================================================
 if ($Phase -eq '1') {
