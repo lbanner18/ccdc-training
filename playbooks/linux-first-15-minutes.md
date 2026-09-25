@@ -4,107 +4,131 @@ Use the team packet to fill the bracketed values before competition day.
 
 ## Linux at a glance
 
-The whole flow on one screen, in the order rehearsed end to end on a fresh
-lab box (2026-09-23). Every command is complete; replace only `<USER>@<BOX>`.
-The checklist further down has the detail.
+The whole flow on one screen, in the order rehearsed end to end on a fresh lab
+box (2026-09-23). The runner does it for you and asks before every change; the
+commands under **By hand** are the same steps if the runner breaks. The
+checklist further down has the detail.
 
-**Or let the runner walk it.** After step 1, `sudo ./linux/first15.sh --phase 1`
-runs steps 2-6 in order and asks before every change. `--phase 2` runs steps 7-11,
-and for the firewall and sshd it has you open the second SSH session before it
-applies. Do Phase 1 on every box before Phase 2 on any.
+### Start — by hand, once
 
-### A. Once, at the start
-
-**1. Get the kit** — on YOUR workstation, not the box (no internet on the box):
+**1. Get the kit onto the box.** On YOUR workstation (works with no internet on the box):
 ```bash
 cd ~/ccdc-training
 tar czf - --exclude=.git . | ssh <USER>@<BOX> 'mkdir -p ~/ccdc-training && tar xzf - -C ~/ccdc-training && chmod +x ~/ccdc-training/linux/*.sh ~/ccdc-training/redteam/*.sh'
 ```
 The box HAS internet? On the box instead: `git clone https://github.com/lbanner18/ccdc-training ~/ccdc-training`
+(no git, like redstone: `cd ~ && curl -L https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.tar.gz | tar xz && mv ccdc-training-main ccdc-training`)
 
-**2. On the box: the config** — for the tryout it is already written from the packet
-```bash
-cd ~/ccdc-training
-CFG=/tmp/ccdc-linux.env
-cp config/tryout-linux.env "$CFG" && chmod 600 "$CFG"
-```
-(Any other event: `cp config/example.env "$CFG"` and fill `CCDC_ALLOWED_USERS` by hand.)
-Every new terminal needs `CFG=/tmp/ccdc-linux.env` again.
+**2. On the box:** `cd ~/ccdc-training`
 
-**2a. Every default password, before anything else** — the red team has the packet
-```bash
-sudo ./linux/passwords.sh --config "$CFG" --apply
-```
-Paste block 1 of the password sheet (`passwords.sh --generate`, made the night
-before), then Ctrl-D. It proves FTP and POP3 still accept each new password,
-and lists sessions opened with the old ones. Then the same block into
-Quotient's Password Change Request.
+### Phase 1 — lock the doors (every box, before Phase 2 on any)
 
-**2b. Let the box fill in its services** — ports, units, checks, web root
 ```bash
-sudo ./linux/discover.sh --config "$CFG"            # read the table against Quotient
-sudo ./linux/discover.sh --config "$CFG" --apply
+sudo ./linux/first15.sh --phase 1
 ```
+**It runs:** config → passwords (and root, and Splunk on redstone) → discover → recon/hunt → triage → harden cut → alex check.
+**You do:** paste block 1, then Ctrl-D · type root's password · change Splunk's admin on
+redstone · submit the PCR · read discover's table against Quotient · read the REDs ·
+say `y` to the cut after reading its list.
 
-**3. The "before" record** (read-only)
-```bash
-sudo ./linux/recon.sh --config "$CFG"
-sudo ./linux/hunt.sh --config "$CFG"
-```
+**By hand:**
 
-**4. What is wrong right now** (read-only)
-```bash
-sudo ./linux/triage.sh --config "$CFG"
-```
+1. **The config** — for the tryout it is already written from the packet
+   ```bash
+   CFG=/tmp/ccdc-linux.env
+   cp config/tryout-linux.env "$CFG" && chmod 600 "$CFG"
+   ```
+   Every new terminal needs `CFG=/tmp/ccdc-linux.env` again.
+   (Any other event: `cp config/example.env "$CFG"` and fill `CCDC_ALLOWED_USERS` by hand.)
 
-**5. Cut what nothing scored needs** — read the list, then cut the safe ones (about 2 minutes)
-```bash
-sudo ./linux/harden.sh --config "$CFG"
-sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
-```
+2. **Every default password** — the red team has the packet
+   ```bash
+   sudo ./linux/passwords.sh --config "$CFG" --apply
+   sudo passwd root                  # sheet section 4
+   ```
+   Paste block 1 of the password sheet (`passwords.sh --generate`, made the night
+   before), then Ctrl-D. It proves FTP and POP3 still accept each new password, and
+   lists sessions opened with the old ones. Not a bare `passwd`: that changes steve's
+   scored password away from what Quotient has. On redstone, Splunk's admin too
+   (sheet section 4):
+   `sudo /opt/splunk/bin/splunk edit user admin -password 'NEW-FROM-SHEET' -auth 'admin:PACKET-DEFAULT'`
+   Then block 1 into Quotient's Password Change Request.
 
-**6. Your backup admin is alex, then root's password** — both on paper
-```bash
-id alex; sudo passwd -S alex      # in sudo (Ubuntu) or wheel (Rocky), and not L/LK
-sudo passwd root                  # sheet section 4
-```
-alex is a packet administrator whose password block 1 already changed. The packet
-says the box should have *only* its listed users, so do not create a new one. Not a
-bare `passwd`: that changes steve's scored password away from what Quotient has.
+3. **Let the box fill in its services** — ports, units, checks, web root
+   ```bash
+   sudo ./linux/discover.sh --config "$CFG"            # read the table against Quotient
+   sudo ./linux/discover.sh --config "$CFG" --apply
+   ```
 
-**7. Firewall** — it rolls itself back in 60s unless confirmed from a NEW connection
-```bash
-sudo ./linux/fw.sh --config "$CFG" --dry-run
-sudo ./linux/fw.sh --config "$CFG" --apply
-```
-Then in a SECOND terminal: `ssh <USER>@<BOX>`, and there:
-```bash
-cd ~/ccdc-training && sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --confirm
-```
+4. **The "before" record** (read-only)
+   ```bash
+   sudo ./linux/recon.sh --config "$CFG"
+   sudo ./linux/hunt.sh --config "$CFG"
+   ```
 
-**8. sshd** — same rollback-and-confirm pattern
-```bash
-sudo ./linux/sshd.sh --config "$CFG"
-sudo ./linux/sshd.sh --config "$CFG" --apply
-```
-Then from a NEW connection: `cd ~/ccdc-training && sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --confirm`
+5. **What is wrong right now** (read-only)
+   ```bash
+   sudo ./linux/triage.sh --config "$CFG"
+   ```
 
-**9. Down to 0 RED**
-```bash
-sudo ./linux/triage.sh --config "$CFG"
-```
+6. **Cut what nothing scored needs** — read the list, then cut the safe ones (about 2 minutes)
+   ```bash
+   sudo ./linux/harden.sh --config "$CFG"
+   sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
+   ```
 
-**10. Freeze the clean box**
-```bash
-sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
-```
+7. **Your backup admin is alex**
+   ```bash
+   id alex; sudo passwd -S alex      # in sudo (Ubuntu) or wheel (Rocky), and not L/LK
+   ```
+   alex is a packet administrator whose password block 1 already changed. The packet
+   says the box should have *only* its listed users, so do not create a new one.
 
-**11. Arm everything** — backups, canaries, sentry, guardian/watchdog under systemd
+### Phase 2 — go deep (one box at a time)
+
 ```bash
-sudo ./linux/arm.sh --config "$CFG" --apply
-sudo ./linux/audit.sh --config "$CFG" --apply
-sudo ./linux/audit.sh --config "$CFG" --capture
+sudo ./linux/first15.sh --phase 2
 ```
+**It runs:** firewall → sshd → down to 0 RED → bless → arm and audit.
+**You do:** open a second SSH session when it asks, and paste the `--confirm` line
+there within 60 seconds · fix the REDs · bless only at 0 RED.
+
+**By hand:**
+
+1. **Firewall** — it rolls itself back in 60s unless confirmed from a NEW connection
+   ```bash
+   sudo ./linux/fw.sh --config "$CFG" --dry-run
+   sudo ./linux/fw.sh --config "$CFG" --apply
+   ```
+   Then in a SECOND terminal: `ssh <USER>@<BOX>`, and there:
+   ```bash
+   cd ~/ccdc-training && sudo ./linux/fw.sh --config /tmp/ccdc-linux.env --confirm
+   ```
+
+2. **sshd** — same rollback-and-confirm pattern
+   ```bash
+   sudo ./linux/sshd.sh --config "$CFG"
+   sudo ./linux/sshd.sh --config "$CFG" --apply
+   ```
+   Then from a NEW connection: `cd ~/ccdc-training && sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --confirm`
+
+3. **Down to 0 RED**
+   ```bash
+   sudo ./linux/triage.sh --config "$CFG"
+   ```
+
+4. **Freeze the clean box** — before arm, so arm's recovery bundle carries the blessing
+   ```bash
+   sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
+   ```
+
+5. **Arm everything** — backups, canaries, sentry, guardian/watchdog under systemd
+   ```bash
+   sudo ./linux/arm.sh --config "$CFG" --apply
+   sudo ./linux/audit.sh --config "$CFG" --apply
+   sudo ./linux/audit.sh --config "$CFG" --capture
+   ```
+
 Changed the config after this? `sudo ./linux/sentry.sh --config "$CFG" --reload-config --apply`
 Updated the kit after this — `git pull` where you cloned with git, or on a box
 without it (redstone) re-fetch the tarball and overwrite the directory:
@@ -112,7 +136,7 @@ without it (redstone) re-fetch the tarball and overwrite the directory:
 — then run `sudo ./linux/arm.sh --config "$CFG" --apply` again either way:
 sentry runs from its own frozen copy, so a newer kit does not reach it until you do.
 
-### B. When something new appears — the loop
+### When something new appears — the loop
 
 A new RED is broadcast to your terminals (`wall`). Then:
 
@@ -141,7 +165,7 @@ sudo ./linux/baseline.sh --config "$CFG" --allow 'WHAT' --reason 'why this is mi
 sudo ./linux/baseline.sh --config "$CFG" --status
 ```
 
-### C. Traps from the lab
+### Traps from the lab
 
 - `--confirm` from the SAME session proves nothing: that session is already in. Always a new `ssh`.
 - triage offers a delete line for every SSH key, including yours (`you@your-workstation`). Delete only keys you do not recognise.

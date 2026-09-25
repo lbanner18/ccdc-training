@@ -61,7 +61,7 @@ printf '  Ctrl-C stops at any point; re-running is safe.\n'
 # =============================================================================
 if [ "$phase" = 1 ]; then
 
-  step 2 'the config'
+  step '1 of 7' 'the config'
   if [ -f "$CFG" ] && ask "$CFG already exists (an old snapshot's?). Keep it?" y; then
     printf '  using the existing %s\n' "$CFG"
   else
@@ -69,7 +69,7 @@ if [ "$phase" = 1 ]; then
     ok "copied config/tryout-linux.env -> $CFG"
   fi
 
-  step 2a 'every default password (block 1 of the sheet)'
+  step '2 of 7' 'every default password (block 1 of the sheet)'
   if ask 'Change every default password now?' y; then
     note 'Paste block 1, then press Ctrl-D on an empty line.'
     run "$SCRIPT_DIR/passwords.sh" --config "$CFG" --apply
@@ -87,7 +87,7 @@ if [ "$phase" = 1 ]; then
     pause 'Submitted the PCR (or will right after this)'
   fi
 
-  step 2b 'let the box fill in its services'
+  step '3 of 7' 'let the box fill in its services'
   run "$SCRIPT_DIR/discover.sh" --config "$CFG"
   note "Read that table against Quotient's service list for THIS box."
   if ask 'Write what it found into the config?' y; then
@@ -96,16 +96,16 @@ if [ "$phase" = 1 ]; then
     note "skipped. Later: sudo ./linux/discover.sh --config $CFG --apply"
   fi
 
-  step 3 'the "before" record (read-only)'
+  step '4 of 7' 'the "before" record (read-only)'
   run "$SCRIPT_DIR/recon.sh" --config "$CFG"
   run "$SCRIPT_DIR/hunt.sh" --config "$CFG"
   pause 'Note where the evidence went'
 
-  step 4 'what is wrong right now (read-only)'
+  step '5 of 7' 'what is wrong right now (read-only)'
   run "$SCRIPT_DIR/triage.sh" --config "$CFG"
   pause 'Read the REDs. Fix a scored-user or scored-service RED before cutting'
 
-  step 5 'cut what nothing scored needs - read the list first'
+  step '6 of 7' 'cut what nothing scored needs - read the list first'
   run "$SCRIPT_DIR/harden.sh" --config "$CFG"
   if ask 'Cut every item marked safe?'; then
     run "$SCRIPT_DIR/harden.sh" --config "$CFG" --cut all-safe --apply
@@ -113,7 +113,7 @@ if [ "$phase" = 1 ]; then
     note "skipped. Later: sudo ./linux/harden.sh --config $CFG --cut all-safe --apply"
   fi
 
-  step 6 'backup admin: alex (in the packet - no new account)'
+  step '7 of 7' 'backup admin: alex (in the packet - no new account)'
   if id alex >/dev/null 2>&1; then
     case " $(id -nG alex) " in
       *' sudo '*|*' wheel '*|*' admin '*) ok 'alex can sudo (in sudo/wheel)' ;;
@@ -164,24 +164,24 @@ guarded() {
   run "$SCRIPT_DIR/$tool" --config "$CFG" --status
 }
 
-step 7 'firewall'
+step '1 of 5' 'firewall'
 guarded fw.sh 'firewall'
 
-step 8 'sshd'
+step '2 of 5' 'sshd'
 guarded sshd.sh 'sshd'
 
-step 9 'down to 0 RED'
+step '3 of 5' 'down to 0 RED'
 run "$SCRIPT_DIR/triage.sh" --config "$CFG"
 pause 'Fix every RED before freezing - the freeze blesses whatever is here'
 
-step 10 'freeze the clean box'
+step '4 of 5' 'freeze the clean box'
 if ask 'Bless the baseline now (0 RED, and everything left is yours)?'; then
   run "$SCRIPT_DIR/baseline.sh" --config "$CFG" --bless --stable-for 20 --apply
 else
   note "later: sudo ./linux/baseline.sh --config $CFG --bless --stable-for 20 --apply"
 fi
 
-step 11 'arm everything: backups, canaries, sentry, guardian/watchdog, audit'
+step '5 of 5' 'arm everything: backups, canaries, sentry, guardian/watchdog, audit'
 if ask 'Arm it?' y; then
   run "$SCRIPT_DIR/arm.sh" --config "$CFG" --apply
   run "$SCRIPT_DIR/audit.sh" --config "$CFG" --apply
@@ -189,7 +189,7 @@ if ask 'Arm it?' y; then
 fi
 
 printf '\n'
-ok "Phase 2 done on $(hostname). From here it is the loop in playbook section B:"
+ok "Phase 2 done on $(hostname). From here it is the playbook's loop section:"
 printf '     sudo ./linux/sentry.sh --config %s --status\n' "$CFG"
 printf '  For commands by hand in this shell:  CFG=%s\n\n' "$CFG"
 exit 0

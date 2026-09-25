@@ -83,6 +83,10 @@ them, the scorer uses the old passwords and fails.**
 
 ## Then each box: its own flow
 
+**Order: Phase 1 on lapis → iron → redstone, then Phase 2 on each.** Every box gets
+new passwords and hardening before any box gets the deep work. Phase 1 includes
+the password step; if you already did it above, answer `n` there.
+
 **Linux** — `sudo ./linux/first15.sh --phase 1` on each box, then `--phase 2`. It
 walks `playbooks/linux-first-15-minutes.md`, "Linux at a glance", and asks before
 every change. By hand, the short version:

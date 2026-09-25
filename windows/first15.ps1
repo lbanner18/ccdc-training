@@ -107,7 +107,7 @@ Write-Host  '  Steps that change the box ask first. Ctrl+C stops at any point; r
 # =============================================================================
 if ($Phase -eq '1') {
 
-    Step '3' 'the config, and what Quotient says is scored HERE'
+    Step '1 of 6' 'the config, and what Quotient says is scored HERE'
     if (-not (Test-Path -LiteralPath $cfgPath)) {
         New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
         Copy-Item -LiteralPath (Join-Path $kitRoot 'config\tryout-windows.env') -Destination $cfgPath
@@ -126,7 +126,7 @@ if ($Phase -eq '1') {
     }
     Write-Host "  Anything ELSE Quotient scores here: add its service and port to $cfgPath in notepad." -ForegroundColor Yellow
 
-    Step '3a' 'every default password (block 1 of the sheet)'
+    Step '2 of 6' 'every default password (block 1 of the sheet)'
     if (Ask 'Change every default password now?' -DefaultYes) {
         Run 'passwords' @{ Config = $cfgPath; Apply = $true }
         Write-Host ''
@@ -138,15 +138,15 @@ if ($Phase -eq '1') {
         Pause-ForRead 'Submitted the PCR (or will right after this)'
     }
 
-    Step '4' 'the "before" picture (read-only)'
+    Step '3 of 6' 'the "before" picture (read-only)'
     Run 'recon' @{ Config = $cfgPath }
     Pause-ForRead 'Copy the zip off the box with the line printed above'
 
-    Step '5' 'what is wrong right now (read-only) - scoreduser / scoredservice first'
+    Step '4 of 6' 'what is wrong right now (read-only) - scoreduser / scoredservice first'
     Run 'triage' @{ Config = $cfgPath }
     Pause-ForRead 'Read the REDs. Fix a scoreduser/scoredservice RED before hardening'
 
-    Step '6' 'the hardening checklist - dry run first'
+    Step '5 of 6' 'the hardening checklist - dry run first'
     Run 'harden' @{ Config = $cfgPath }
     if (Ask 'Apply the changes listed above?') {
         Run 'harden' @{ Config = $cfgPath; Apply = $true }
@@ -154,7 +154,7 @@ if ($Phase -eq '1') {
         Write-Host '  skipped. Later: .\windows\harden.ps1 -Apply' -ForegroundColor Yellow
     }
 
-    Step '7' 'backup admin: alex (in the packet - no new account)'
+    Step '6 of 6' 'backup admin: alex (in the packet - no new account)'
     $alexUser = (& net.exe user alex 2>&1 | Out-String)
     $group = if ($isDc) { & net.exe group 'Domain Admins' /domain 2>&1 } else { & net.exe localgroup Administrators 2>&1 }
     $inAdmins = (($group | Out-String) -match '(?im)(^|\s)alex(\s|$)')
@@ -177,7 +177,7 @@ if ($Phase -eq '1') {
 }
 
 # =============================================================================
-Step '8' 'down to 0 RED'
+Step '1 of 4' 'down to 0 RED'
 Run 'triage' @{ Config = $cfgPath }
 Run 'sentry' @{ Config = $cfgPath; Status = $true }
 if (Ask 'Apply every automatic fix (sentry -Approve all)?') {
@@ -190,12 +190,12 @@ while ($true) {
     Run 'sentry' @{ Config = $cfgPath; Approve = $n.Trim(); Apply = $true }
 }
 
-Step '9' 'canaries and the self-repairing tasks'
+Step '2 of 4' 'canaries and the self-repairing tasks'
 if (Ask 'Arm them (arm.ps1 -Apply)?' -DefaultYes) {
     Run 'arm' @{ Config = $cfgPath; Apply = $true }
 }
 
-Step '10' 'freeze the clean box'
+Step '3 of 4' 'freeze the clean box'
 Write-Host '  Only bless a box you have looked at: 0 RED, and every AMBER yours or muted.' -ForegroundColor Yellow
 if (Ask 'Bless the baseline now?') {
     Run 'baseline' @{ Config = $cfgPath; Bless = $true; StableForSeconds = 20; Apply = $true }
@@ -203,7 +203,7 @@ if (Ask 'Bless the baseline now?') {
     Write-Host '  later: .\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply' -ForegroundColor Yellow
 }
 
-Step '11' 'the lookout, in a second window'
+Step '4 of 4' 'the lookout, in a second window'
 if (Ask 'Open the sentry -Watch window now?' -DefaultYes) {
     Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
         -WorkingDirectory $kitRoot `
@@ -214,6 +214,6 @@ if (Ask 'Open the sentry -Watch window now?' -DefaultYes) {
 }
 
 Write-Host ''
-Write-Host ('  Phase 2 done on {0}. From here it is the loop in playbook section B, driven by the popups.' -f $env:COMPUTERNAME) -ForegroundColor Green
+Write-Host ('  Phase 2 done on {0}. From here it is the loop section of the playbook, driven by the popups.' -f $env:COMPUTERNAME) -ForegroundColor Green
 Write-Host ''
 exit 0
