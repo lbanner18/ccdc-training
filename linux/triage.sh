@@ -984,7 +984,7 @@ begin
 # hour ago it is worth looking at either way.
 suid_all=$(find / -xdev -perm -4000 -type f 2>/dev/null)
 suid=$(printf '%s\n' "$suid_all" \
-  | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node)$')
+  | grep -E '/(bash|sh|dash|zsh|ksh|python[0-9.]*|perl|ruby|php|awk|find|vim?|nano|less|more|tar|cp|env|node|pkexec)$')
 
 suid_unpackaged=''
 suid_twin=''
@@ -2080,7 +2080,55 @@ else
   clean "full SSH audit skipped (needs sudo, sshd, and linux/sshd.sh)"
 fi
 
-# --- 9g. Files an attacker dropped and left ------------------------------------
+# --- 9g. Scored service audits: FTP & Apache ---------------------------------
+begin
+# FTP: anonymous login check
+if ccdc_list_contains "21" "${CCDC_ALLOWED_TCP_PORTS:-}" || { ccdc_have ss && ss -tlnH 2>/dev/null | grep -q ':21 '; }; then
+  ftp_anon=''
+  for vsf in /etc/vsftpd.conf /etc/vsftpd/vsftpd.conf; do
+    [ -f "$vsf" ] || continue
+    if grep -iqE '^[[:space:]]*anonymous_enable[[:space:]]*=[[:space:]]*YES' "$vsf" 2>/dev/null; then
+      ftp_anon="$vsf"
+      break
+    fi
+  done
+  if [ -n "$ftp_anon" ]; then
+    red "FTP server allows ANONYMOUS login   [CARD 8]"
+    detail "anonymous_enable=YES is active in $ftp_anon"
+    detail "anyone on the network can access the FTP server without credentials"
+    emit RED ftpanon "anonymous_enable" "FTP server allows anonymous login"
+    fixhdr
+    fix "sudo sed -i 's/^[#[:space:]]*anonymous_enable=.*/anonymous_enable=NO/' $ftp_anon"
+    fix "sudo systemctl restart vsftpd || sudo systemctl restart pure-ftpd"
+  else
+    clean "FTP does not allow anonymous login in vsftpd configuration"
+  fi
+fi
+
+# Web: Apache directory indexing check (Options Indexes)
+if ccdc_list_contains "80" "${CCDC_ALLOWED_TCP_PORTS:-}" || ccdc_list_contains "443" "${CCDC_ALLOWED_TCP_PORTS:-}"; then
+  apache_indexes=''
+  for ap_cfg in /etc/apache2/apache2.conf /etc/httpd/conf/httpd.conf; do
+    [ -f "$ap_cfg" ] || continue
+    if grep -nE '^[[:space:]]*Options[[:space:]]+([^#]*\b)?Indexes\b' "$ap_cfg" 2>/dev/null | grep -vq '^[[:space:]]*#'; then
+      apache_indexes="$ap_cfg"
+      break
+    fi
+  done
+  if [ -n "$apache_indexes" ]; then
+    amber "Apache directory indexing (Indexes) is enabled   [CARD 8]"
+    detail "Options Indexes is active in $apache_indexes"
+    detail "browsing directories without index.html reveals full file listings to attackers"
+    emit AMBER apacheindexes "indexes" "Apache directory indexing is enabled"
+    fixhdr
+    fix "sudo sed -i 's/Options Indexes FollowSymLinks/Options FollowSymLinks/' $apache_indexes"
+    fix "sudo apache2ctl configtest && sudo systemctl reload apache2 || sudo systemctl reload httpd"
+  else
+    clean "Apache directory indexing (Indexes) is not enabled in main config"
+  fi
+fi
+
+# --- 9h. Files an attacker dropped and left ------------------------------------
 # Every check above finds a file because something POINTS at it: a cron line, a
 # unit, a running process, a socket. Take the pointer away and the file is
 # invisible. Live run, 2026-09-24: the cron job, timer and processes were all

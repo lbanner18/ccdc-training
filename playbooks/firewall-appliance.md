@@ -60,6 +60,31 @@ set system syslog host SPLUNK-IP facility all level info
 The `commit-confirm` / `confirm` pair works like `linux/fw.sh --apply` /
 `--confirm`: a change that locks you out undoes itself. Use it for every change.
 
+#### VyOS 1.4+ / 2025.11 (Circinus) Syntax
+VyOS 1.4 and newer (including 2025.11) changed to nftables-backed firewall syntax:
+```
+# Management restriction: bind SSH only to your inside/trusted IP
+set service ssh listen-address 'INSIDE-ROUTER-IP'
+delete service https                             # disable web API if present
+
+# Global forward filtering (1.4+):
+set firewall ipv4 forward filter default-action drop
+set firewall ipv4 forward filter rule 10 action accept
+set firewall ipv4 forward filter rule 10 state established enable
+set firewall ipv4 forward filter rule 10 state related enable
+
+# Allow scored services to inside servers (e.g. TCP 80, 22, 21, 110, 389)
+set firewall ipv4 forward filter rule 20 action accept
+set firewall ipv4 forward filter rule 20 destination address 'TARGET-SERVER-IP'
+set firewall ipv4 forward filter rule 20 destination port '80,22,21,110'
+set firewall ipv4 forward filter rule 20 protocol tcp
+
+commit-confirm 10
+confirm
+save
+```
+*(On legacy VyOS 1.3, use `set firewall name WAN-IN default-action drop` and `set interfaces ethernet eth0 firewall in name WAN-IN`).*
+
 ### pfSense / OPNsense (web UI)
 
 - Change the password: System → User Manager → admin.

@@ -1154,6 +1154,13 @@ if ($usersTxtNow -match '\$isDc = Test-CcdcIsDomainController' -and $usersTxtNow
     ok 'users.ps1 works on a domain controller: audit, backup Domain Admin, rotate, disable'
 } else { nope 'users.ps1 stops at a domain controller again' }
 
+$hdnNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\harden.ps1'))
+if ($hdnNow -match 'FullSecureChannelProtection' -and $hdnNow -match 'LDAPServerIntegrity' -and
+    $hdnNow -match 'ms-DS-MachineAccountQuota' -and $triNow -match "Check 'dcspooler'" -and
+    $triNow -match "Check 'dczerologon'" -and $triNow -match "Check 'dcldapsign'") {
+    ok 'harden.ps1 and triage.ps1 enforce DC protections (Zerologon, LDAP signing, Spooler, MachineAccountQuota)'
+} else { nope 'windows tools lost Domain Controller hardening checks' }
+
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host ("windows self-test: {0} passed, {1} failed" -f $pass, $fail)

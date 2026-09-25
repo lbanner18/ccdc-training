@@ -807,7 +807,7 @@ card_for() {
     suid|suidunpackaged)    printf 'CARD 5 - SUID interpreter' ;;
     tmpproc|netproc)        printf 'CARD 6 - process running from /tmp, or with a deleted executable' ;;
     nopasswd)               printf 'CARD 7 - passwordless sudo you did not configure' ;;
-    port|udpport)           printf 'CARD 8 - unexpected listening port' ;;
+    port|udpport|ftpanon|apacheindexes) printf 'CARD 8 - unexpected listening port' ;;
     # Not CARD 8. That card is about a port; this finding is about a file
     # nothing can account for, and it fires just as loudly for an OUTBOUND
     # connection, where there is no listening port to close at all.
@@ -1114,6 +1114,23 @@ held_reason() {
       printf '         diff /etc/skel/%s %q\n\n' "$(basename -- "${subject#*::}")" "${subject#*::}"
       printf '       Anything that RUNS a command rather than setting a variable - a\n'
       printf '       trap, a curl, a background job, a line ending in & - is the finding.\n'
+      return 0 ;;
+
+    ftpanon)
+      printf '\n       FTP allows ANONYMOUS login without credentials.\n\n'
+      printf '       This lets anyone read and potentially upload files without authentication.\n\n'
+      printf '       Disable anonymous access in the FTP daemon configuration:\n\n'
+      printf '         sudo sed -i "s/^[#[:space:]]*anonymous_enable=.*/anonymous_enable=NO/" /etc/vsftpd.conf\n'
+      printf '         sudo systemctl restart vsftpd || sudo systemctl restart pure-ftpd\n\n'
+      return 0 ;;
+
+    apacheindexes)
+      printf '\n       Apache directory indexing (Options Indexes) is enabled.\n\n'
+      printf '       Any directory without an index.html file exposes a complete list\n'
+      printf '       of files to anyone who requests it over HTTP.\n\n'
+      printf '       Remove Indexes from the Options directive and reload Apache:\n\n'
+      printf '         sudo sed -i "s/Options Indexes FollowSymLinks/Options FollowSymLinks/" /etc/apache2/apache2.conf\n'
+      printf '         sudo apache2ctl configtest && sudo systemctl reload apache2 || sudo systemctl reload httpd\n\n'
       return 0 ;;
   esac
   return 1

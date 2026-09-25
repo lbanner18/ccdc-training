@@ -415,6 +415,24 @@ if ($steps -contains 'Services') {
         } 'CARD W2'
         if (-not (Assert-StillUp -AfterStep "disabling $svc")) { exit 2 }
     }
+
+    if (Test-CcdcIsDomainController) {
+        # On a Domain Controller, Print Spooler is a critical target for PrintNightmare (CVE-2021-34527)
+        # and NTLM relay coercion (MS-RPRN PetitPotam / SpoolSample). DCs do not need to print.
+        if (-not (Test-CcdcListContains -Needle 'Spooler' -List $protect)) {
+            $spooler = Get-Service -Name 'Spooler' -ErrorAction SilentlyContinue
+            if ($null -ne $spooler -and $spooler.StartType -ne 'Disabled') {
+                Do-Change 'stop and disable Print Spooler on Domain Controller (PrintNightmare & MS-RPRN coercion)' {
+                    Stop-Service -Name Spooler -Force -ErrorAction SilentlyContinue
+                    Set-Service  -Name Spooler -StartupType Disabled
+                    $prnKey = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Printers'
+                    if (-not (Test-Path -LiteralPath $prnKey)) { New-Item -Path $prnKey -Force | Out-Null }
+                    Set-ItemProperty -Path $prnKey -Name 'RegisterSpoolerRemoteRpcEndPoint' -Value 2 -Type DWord
+                } 'CARD W2'
+                if (-not (Assert-StillUp -AfterStep "disabling Spooler")) { exit 2 }
+            }
+        }
+    }
 }
 
 # =============================================================================
@@ -478,6 +496,10 @@ if ($steps -contains 'RemoteAccess') {
         Set-ItemProperty -Path $wdigest -Name 'UseLogonCredential' -Value 0 -Type DWord
     } 'CARD W10'
 
+    Do-Change 'enforce NTLMv2 only, refuse LM and NTLMv1 (LmCompatibilityLevel = 5)' {
+        Set-ItemProperty -Path $lsa -Name 'LmCompatibilityLevel' -Value 5 -Type DWord
+    } 'CARD W10'
+
     if ($networkNameHardening) {
         Do-Change 'allow Restricted Admin mode for incoming RDP sessions' {
             Set-ItemProperty -Path $lsa -Name 'DisableRestrictedAdmin' -Value 0 -Type DWord
@@ -502,6 +524,48 @@ if ($steps -contains 'RemoteAccess') {
         } 'CARD W10'
     } else {
         Note 'Network-name-resolution controls were not changed. Set CCDC_ACK_NETWORK_NAME_RESOLUTION_HARDENING="1" only after the packet confirms they fit this box.'
+    }
+
+    if (Test-CcdcIsDomainController) {
+        $netlogonParams = 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'
+        if (Test-Path -LiteralPath $netlogonParams) {
+            Do-Change 'enforce secure RPC for Netlogon (Zerologon CVE-2020-1472 defense)' {
+                Set-ItemProperty -Path $netlogonParams -Name 'FullSecureChannelProtection' -Value 1 -Type DWord
+                Set-ItemProperty -Path $netlogonParams -Name 'RequireSignOrSeal' -Value 1 -Type DWord
+                Set-ItemProperty -Path $netlogonParams -Name 'RequireStrongKey' -Value 1 -Type DWord
+            } 'CARD W10'
+        }
+
+        $ntdsParams = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
+        if (Test-Path -LiteralPath $ntdsParams) {
+            Do-Change 'require LDAP server signing and channel binding (prevents NTLM relay attacks)' {
+                Set-ItemProperty -Path $ntdsParams -Name 'LDAPServerIntegrity' -Value 2 -Type DWord
+                Set-ItemProperty -Path $ntdsParams -Name 'LdapEnforceChannelBinding' -Value 2 -Type DWord
+            } 'CARD W10'
+        }
+        $ldapClientParams = 'HKLM:\SYSTEM\CurrentControlSet\Services\ldap'
+        if (-not (Test-Path -LiteralPath $ldapClientParams)) { New-Item -Path $ldapClientParams -Force | Out-Null }
+        Do-Change 'require LDAP client signing' {
+            Set-ItemProperty -Path $ldapClientParams -Name 'LDAPClientIntegrity' -Value 2 -Type DWord
+        } 'CARD W10'
+
+        # Active Directory MachineAccountQuota: default 10 allows unprivileged domain users to join computers
+        try {
+            $rootDse = [ADSI]"LDAP://RootDSE"
+            $dn = $rootDse.defaultNamingContext
+            if ($dn) {
+                $domainObj = [ADSI]"LDAP://$dn"
+                $currentQuota = $domainObj.Get('ms-DS-MachineAccountQuota')
+                if ($null -ne $currentQuota -and [int]$currentQuota -gt 0) {
+                    Do-Change ("set Active Directory MachineAccountQuota from {0} to 0 (blocks unprivileged machine joins / RBCD)" -f $currentQuota) {
+                        $domainObj.Put('ms-DS-MachineAccountQuota', 0)
+                        $domainObj.SetInfo()
+                    } 'CARD W10'
+                }
+            }
+        } catch {
+            Note "could not query Active Directory MachineAccountQuota: $($_.Exception.Message)"
+        }
     }
 
     if (-not $IHaveConsoleAccess) {
@@ -545,10 +609,29 @@ if ($steps -contains 'Persistence') {
             Write-Host ("    FOUND   Winlogon Userinit is not stock: {0}" -f $w.Userinit) -ForegroundColor Red
         }
     } catch { }
-    if ($found -eq 0) {
-        Write-Host '    nothing on the two highest-signal registry persistence paths.'
+
+    $accBins = @('sethc.exe', 'utilman.exe', 'osk.exe', 'magnify.exe')
+    $cmdPath = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\cmd.exe' } else { 'C:\Windows\System32\cmd.exe' }
+    $cmdHash = $null
+    if (Test-Path -LiteralPath $cmdPath) {
+        try { $cmdHash = (Get-FileHash -LiteralPath $cmdPath -Algorithm SHA256 -ErrorAction Stop).Hash } catch { }
     }
-    Note ('That is two checks, not thirteen. For the full sweep run:  .\windows\triage.ps1 -Config {0}' -f $Config)
+    foreach ($ab in $accBins) {
+        $abPath = if ($env:SystemRoot) { Join-Path $env:SystemRoot "System32\$ab" } else { "C:\Windows\System32\$ab" }
+        if (Test-Path -LiteralPath $abPath) {
+            try {
+                if ($cmdHash -and (Get-FileHash -LiteralPath $abPath -Algorithm SHA256 -ErrorAction Stop).Hash -eq $cmdHash) {
+                    $found++
+                    Write-Host ("    FOUND   {0} is a copy of cmd.exe! (lock-screen backdoor)" -f $ab) -ForegroundColor Red
+                }
+            } catch { }
+        }
+    }
+
+    if ($found -eq 0) {
+        Write-Host '    nothing on the primary registry persistence or accessibility paths.'
+    }
+    Note ('That is three checks, not thirteen. For the full sweep run:  .\windows\triage.ps1 -Config {0}' -f $Config)
 }
 
 # =============================================================================

@@ -212,5 +212,27 @@ else
   no 'discover.sh writes a path list on one line again'
 fi
 
+# --- box-specific architectural hardening: SUID, FTP/Apache, and DC checks ----
+if grep -q 'pkexec' "$tr_" && grep -E '/\(.*pkexec.*\)\$' "$tr_" >/dev/null; then
+  ok 'triage flags pkexec as a dangerous SUID binary (PwnKit CVE-2021-4034)'
+else
+  no 'triage lost the pkexec SUID detection'
+fi
+
+if grep -q 'ftpanon' "$tr_" && grep -q 'anonymous_enable' "$tr_" && grep -q 'apacheindexes' "$tr_"; then
+  ok 'triage audits vsftpd for anonymous login and Apache for directory indexing'
+else
+  no 'triage lost the FTP anonymous login or Apache directory indexing audit'
+fi
+
+if grep -q 'FullSecureChannelProtection' "$ROOT/windows/harden.ps1" &&
+   grep -q 'LDAPServerIntegrity' "$ROOT/windows/harden.ps1" &&
+   grep -q 'ms-DS-MachineAccountQuota' "$ROOT/windows/harden.ps1" &&
+   grep -q 'dcspooler' "$ROOT/windows/triage.ps1"; then
+  ok 'windows hardening and triage enforce DC protections (Zerologon, LDAP signing, Spooler, MachineAccountQuota)'
+else
+  no 'windows tools lost the Domain Controller hardening checks'
+fi
+
 printf 'packet self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

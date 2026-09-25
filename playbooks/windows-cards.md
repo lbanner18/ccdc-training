@@ -184,6 +184,15 @@ sc.exe qc NAME
 net user THEACCOUNT
 ```
 
+### `dcspooler` — Print Spooler on a Domain Controller
+
+Print Spooler (`Spooler`) running on a Domain Controller is an unnecessary attack surface and the entry point for PrintNightmare (CVE-2021-34527) and MS-RPRN NTLM relay coercion (PetitPotam). DCs never need to host printers in a competition setting:
+
+```powershell
+Stop-Service -Name Spooler -Force
+Set-Service -Name Spooler -StartupType Disabled
+```
+
 ### Removing a service that is not yours
 
 `baseline.ps1 -Status` lists it as `ADDED services NAME`; `-Explain N` prints
@@ -708,6 +717,24 @@ Set-ItemProperty -Path $dnsKey -Name EnableMulticast -Value 0 -Type DWord
 # Disable NetBIOS over TCP/IP across active adapters:
 Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName SetTcpipNetbios -Arguments @{ TcpipNetbiosOptions = [uint32]2 } }
+```
+
+### Domain Controller hardening (`dczerologon`, `dcldapsign`, `dcmachinequota`)
+
+On a Domain Controller, additional protections stop NTLM relaying, Zerologon, and rogue computer additions:
+
+```powershell
+# Enforce secure Netlogon channel (Zerologon CVE-2020-1472):
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name FullSecureChannelProtection -Value 1 -Type DWord
+
+# Enforce LDAP server signing and channel binding (stops NTLM relay attacks against LDAP):
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name LDAPServerIntegrity -Value 2 -Type DWord
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name LdapEnforceChannelBinding -Value 2 -Type DWord
+
+# Set Active Directory MachineAccountQuota to 0 (stops standard users creating machine accounts / RBCD attacks):
+$d = [ADSI]("LDAP://" + ([ADSI]"LDAP://RootDSE").defaultNamingContext)
+$d.Put("ms-DS-MachineAccountQuota", 0)
+$d.SetInfo()
 ```
 
 ---

@@ -639,6 +639,43 @@ if (Test-Path -LiteralPath $ifeo) {
     Clean 'no debugger hijacks on the accessibility binaries'
 }
 
+# Accessibility binaries replaced on disk (e.g. cmd.exe copied over sethc.exe)
+Begin-Check 'accessibility'
+$accBins = @('sethc.exe', 'utilman.exe', 'osk.exe', 'magnify.exe', 'narrator.exe', 'displayswitch.exe', 'atbroker.exe')
+$cmdPath = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'System32\cmd.exe' } else { 'C:\Windows\System32\cmd.exe' }
+$cmdHash = $null
+if (Test-Path -LiteralPath $cmdPath) {
+    try { $cmdHash = (Get-FileHash -LiteralPath $cmdPath -Algorithm SHA256 -ErrorAction Stop).Hash } catch { }
+}
+foreach ($b in $accBins) {
+    $p = if ($env:SystemRoot) { Join-Path $env:SystemRoot "System32\$b" } else { "C:\Windows\System32\$b" }
+    if (Test-Path -LiteralPath $p) {
+        $binHash = $null
+        try { $binHash = (Get-FileHash -LiteralPath $p -Algorithm SHA256 -ErrorAction Stop).Hash } catch { }
+        if ($cmdHash -and $binHash -and ($cmdHash -eq $binHash)) {
+            Report -Severity 'RED' -Check 'accessibility' -Subject $b `
+                -Description ("accessibility binary {0} is a copy of cmd.exe (lock-screen backdoor)" -f $b) `
+                -Detail @(("The file hash of {0} matches cmd.exe." -f $p),
+                          'Invoking accessibility features at the login screen gives a SYSTEM shell.',
+                          'Restore the original file or run System File Checker.') `
+                -Fix @(("sfc /scanfile={0}" -f $p)) `
+                -Card 'CARD W4'
+        } else {
+            $sig = $null
+            try { $sig = Get-AuthenticodeSignature -LiteralPath $p -ErrorAction Stop } catch { }
+            if ($null -ne $sig -and $sig.Status -ne 'Valid') {
+                Report -Severity 'RED' -Check 'accessibility' -Subject $b `
+                    -Description ("accessibility binary {0} signature status is {1} (tampered file)" -f $b, $sig.Status) `
+                    -Detail @(("The digital signature on {0} is invalid ({1})." -f $p, $sig.Status),
+                              'Windows system binaries are signed by Microsoft. This binary may be a backdoor.') `
+                    -Fix @(("sfc /scanfile={0}" -f $p)) `
+                    -Card 'CARD W4'
+            }
+        }
+    }
+}
+Clean 'accessibility binaries on disk are valid and untampered'
+
 # Winlogon Userinit/Shell - the other classic, and a single appended comma is
 # all it takes.
 Begin-Check 'winlogon'
@@ -732,7 +769,7 @@ if (@($listeners).Count -gt 0) {
                           'CCDC_ALLOWED_TCP_PORTS. If it is not, close it at the firewall first -',
                           'that is reversible and killing the process is not.') `
                 -Fix @(("Get-Process -Id {0} | Select-Object Name,Path,StartTime" -f $l.OwningProcess),
-                       ("New-NetFirewallRule -DisplayName 'CCDC block {0}' -Direction Inbound -LocalPort {0} -Protocol TCP -Action Block" -f $port)) `
+                       ("New-NetFirewallRule -DisplayName 'CCDC block {0}' -Direction Inbound -LocalPort {0} -Protocol TCP -Action {1}" -f $port, 'Block')) `
                 -Card 'CARD W5'
         }
     }
@@ -1023,6 +1060,18 @@ if (($null -eq $restrictSam -or [int]$restrictSam -eq 0)) {
     Clean 'anonymous SAM enumeration is restricted'
 }
 
+$lmCompat = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Lsa' -Name 'LmCompatibilityLevel'
+if ($null -eq $lmCompat -or [int]$lmCompat -lt 5) {
+    Report -Severity 'AMBER' -Check 'lmcompat' -Subject 'LmCompatibilityLevel' `
+        -Description 'NTLMv1 or LM authentication is not refused (LmCompatibilityLevel < 5)' `
+        -Detail @('LmCompatibilityLevel should be 5 to refuse LM/NTLMv1 and send NTLMv2 only.',
+                  'NTLMv1 is trivial to crack or relay.') `
+        -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'' -Name LmCompatibilityLevel -Value 5 -Type DWord') `
+        -Card 'CARD W13'
+} else {
+    Clean 'NTLMv2 is enforced (LmCompatibilityLevel = 5)'
+}
+
 # =============================================================================
 # 9. SERVICE PERMISSIONS - a service can pass every other check and still be
 #    yours to take over
@@ -1264,6 +1313,61 @@ foreach ($sh in $shares) {
     } catch { }
 }
 if (@($shares).Count -gt 0) { Clean ("{0} non-administrative share(s) reviewed" -f @($shares).Count) }
+
+# Domain Controller specific checks (Netlogon secure channel, LDAP signing, Spooler, MachineAccountQuota)
+if ($isDcBox) {
+    Begin-Check 'dcspooler'
+    $spooler = Get-Service -Name 'Spooler' -ErrorAction SilentlyContinue
+    if ($null -ne $spooler -and $spooler.Status -eq 'Running') {
+        Report -Severity 'AMBER' -Check 'dcspooler' -Subject 'Spooler' `
+            -Description 'Print Spooler is running on a Domain Controller (PrintNightmare & NTLM relay coercion)' `
+            -Detail @('Print Spooler on a DC allows PrintNightmare (CVE-2021-34527) and MS-RPRN NTLM relay attacks (PetitPotam).',
+                      'DCs rarely need to host printers in a competition setting.') `
+            -Fix @('Stop-Service -Name Spooler -Force',
+                   'Set-Service -Name Spooler -StartupType Disabled') `
+            -Card 'CARD W2'
+    } else { Clean 'Print Spooler is stopped or disabled on this Domain Controller' }
+
+    Begin-Check 'dczerologon'
+    $fscp = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name 'FullSecureChannelProtection'
+    if ($null -eq $fscp -or [int]$fscp -ne 1) {
+        Report -Severity 'AMBER' -Check 'dczerologon' -Subject 'FullSecureChannelProtection' `
+            -Description 'Netlogon secure channel is not strictly enforced (Zerologon CVE-2020-1472 risk)' `
+            -Detail @('Without FullSecureChannelProtection=1, vulnerable domain controllers can permit unsecure Netlogon channels.') `
+            -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters'' -Name ''FullSecureChannelProtection'' -Value 1 -Type DWord') `
+            -Card 'CARD W10'
+    } else { Clean 'Netlogon FullSecureChannelProtection is enforced' }
+
+    Begin-Check 'dcldapsign'
+    $ldapsign = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name 'LDAPServerIntegrity'
+    if ($null -eq $ldapsign -or [int]$ldapsign -ne 2) {
+        Report -Severity 'AMBER' -Check 'dcldapsign' -Subject 'LDAPServerIntegrity' `
+            -Description 'LDAP server signing is not enforced (vulnerable to NTLM relay attacks against LDAP)' `
+            -Detail @('LDAPServerIntegrity must be 2 to require signing for all incoming LDAP binds.',
+                      'Without signing, coerced NTLM authentication can be relayed to modify Active Directory objects.') `
+            -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name ''LDAPServerIntegrity'' -Value 2 -Type DWord',
+                   'Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name ''LdapEnforceChannelBinding'' -Value 2 -Type DWord') `
+            -Card 'CARD W10'
+    } else { Clean 'LDAP server signing is enforced' }
+
+    Begin-Check 'dcmachinequota'
+    try {
+        $rootDse = [ADSI]"LDAP://RootDSE"
+        $dn = $rootDse.defaultNamingContext
+        if ($dn) {
+            $domainObj = [ADSI]"LDAP://$dn"
+            $quota = $domainObj.Get('ms-DS-MachineAccountQuota')
+            if ($null -ne $quota -and [int]$quota -gt 0) {
+                Report -Severity 'AMBER' -Check 'dcmachinequota' -Subject ('ms-DS-MachineAccountQuota={0}' -f $quota) `
+                    -Description ('unprivileged domain users can create {0} machine accounts (MachineAccountQuota > 0)' -f $quota) `
+                    -Detail @(('ms-DS-MachineAccountQuota is currently {0}.' -f $quota),
+                              'Any standard domain user can join computer accounts, enabling RBCD and NTLM relay attacks.') `
+                    -Fix @('$d = [ADSI]("LDAP://" + ([ADSI]"LDAP://RootDSE").defaultNamingContext); $d.Put("ms-DS-MachineAccountQuota", 0); $d.SetInfo()') `
+                    -Card 'CARD W10'
+            } else { Clean 'Active Directory MachineAccountQuota is 0' }
+        }
+    } catch { }
+}
 
 $tsPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
 $rdpDeny = Get-RegValue -Path $tsPath -Name 'fDenyTSConnections'
