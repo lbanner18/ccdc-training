@@ -156,6 +156,10 @@ $script:Actions = @{
     # ---- restoring things, which is the opposite of risky --------------------
     'scoredservice' = @{
         Tier = 'RED'
+        # A filter that matches nothing returns nothing rather than an error, so
+        # without this a missing service reached Do and failed on $null.StartMode.
+        Can  = { param($s) $null -ne (Get-CimInstance Win32_Service -Filter "Name='$s'" -ErrorAction SilentlyContinue) }
+        Why  = { param($s) "no service named '$s' on this box - check the spelling against the packet, or it is not installed here" }
         What = { param($s) "start the scored service '$s' and set it to start automatically" }
         Do   = { param($s, $ev)
             Get-CimInstance Win32_Service -Filter "Name='$s'" -ErrorAction SilentlyContinue |

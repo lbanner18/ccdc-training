@@ -101,6 +101,13 @@ if (-not $id.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 $isDc = $false
 try { $isDc = ((Get-CimInstance Win32_ComputerSystem -ErrorAction Stop).DomainRole -ge 4) } catch { }
 
+# A line longer than the buffer wraps, and copying it keeps the wrap as a
+# newline - which breaks every long "run this" line pasted into another window.
+try {
+    $buf = $Host.UI.RawUI.BufferSize
+    if ($buf.Width -lt 300) { $buf.Width = 300; $Host.UI.RawUI.BufferSize = $buf }
+} catch { }
+
 Write-Host ''
 Write-Host ("  first15 Phase {0} on {1}{2}" -f $Phase, $env:COMPUTERNAME, $(if ($isDc) { ' (domain controller)' } else { '' })) -ForegroundColor White
 Write-Host  '  Steps that change the box ask first. Ctrl+C stops at any point; re-running is safe.'
@@ -162,7 +169,7 @@ if ($Phase -eq '1') {
 
     Step '4 of 6' 'what is wrong right now (read-only) - scoreduser / scoredservice first'
     Run 'triage' @{ Config = $cfgPath }
-    Pause-ForRead 'Read the REDs. Fix a scoreduser/scoredservice RED before hardening'
+    Pause-ForRead 'Read the REDs. Fix a scoreduser/scoredservice RED (in your SECOND window) before hardening'
 
     Step '5 of 6' 'the hardening checklist - dry run first'
     Run 'harden' @{ Config = $cfgPath }
@@ -197,6 +204,7 @@ if ($Phase -eq '1') {
 # =============================================================================
 Step '1 of 4' 'down to 0 RED'
 Run 'triage' @{ Config = $cfgPath }
+Pause-ForRead 'Run any "run this" lines you want in your SECOND elevated window'
 Run 'sentry' @{ Config = $cfgPath; Status = $true }
 if (Ask 'Apply every automatic fix (sentry -Approve all)?') {
     Run 'sentry' @{ Config = $cfgPath; Approve = 'all'; Apply = $true }

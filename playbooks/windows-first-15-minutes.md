@@ -36,6 +36,10 @@ Expand-Archive C:\kit.zip C:\ -Force; cd C:\ccdc-training-main
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 ```
 
+**4. Open a SECOND elevated 64-bit PowerShell and leave it open.** The runner stays
+in the first window; the "run this" lines that triage and the others print go in
+this one.
+
 ### Phase 1 — lock the doors (every box, before Phase 2 on any)
 
 ```powershell
