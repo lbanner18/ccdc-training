@@ -17,16 +17,29 @@ tar czf - --exclude=.git . | ssh <USER>@<BOX> 'mkdir -p ~/ccdc-training && tar x
 ```
 The box HAS internet? On the box instead: `git clone https://github.com/lbanner18/ccdc-training ~/ccdc-training`
 
-**2. On the box: the config** — fill in users, scored services, ports, checks
+**2. On the box: the config** — for the tryout it is already written from the packet
 ```bash
 cd ~/ccdc-training
 CFG=/tmp/ccdc-linux.env
-cp config/example.env "$CFG" && chmod 600 "$CFG"
-nano "$CFG"
+cp config/tryout-linux.env "$CFG" && chmod 600 "$CFG"
 ```
-Set: `CCDC_ALLOWED_USERS` · `CCDC_SYSTEMD_SERVICES` · `CCDC_TCP_CHECKS` · `CCDC_HTTP_CHECKS` · `CCDC_ALLOWED_TCP_PORTS`.
-Checks are one per line, e.g. `web|127.0.0.1|8080|scored-web`.
+(Any other event: `cp config/example.env "$CFG"` and fill `CCDC_ALLOWED_USERS` by hand.)
 Every new terminal needs `CFG=/tmp/ccdc-linux.env` again.
+
+**2a. Every default password, before anything else** — the red team has the packet
+```bash
+sudo ./linux/passwords.sh --config "$CFG" --apply
+```
+Paste block 1 of the password sheet (`passwords.sh --generate`, made the night
+before), then Ctrl-D. It proves FTP and POP3 still accept each new password,
+and lists sessions opened with the old ones. Then the same block into
+Quotient's Password Change Request.
+
+**2b. Let the box fill in its services** — ports, units, checks, web root
+```bash
+sudo ./linux/discover.sh --config "$CFG"            # read the table against Quotient
+sudo ./linux/discover.sh --config "$CFG" --apply
+```
 
 **3. The "before" record** (read-only)
 ```bash
