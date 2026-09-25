@@ -454,6 +454,9 @@ Update-MpSignature
 # error 0x8024402c / 0x80072ee7: no route to the update server. No internet -
 # nothing to do. Internet up but a domain policy points at WSUS - go direct:
 Update-MpSignature -UpdateSource MicrosoftUpdateServer
+# "completed with errors" on an old Server 2016 image (2016-era definitions):
+# straight from the Malware Protection Center, which worked where both failed
+& "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate -MMPC
 Start-MpScan -ScanType QuickScan
 ```
 

@@ -1146,6 +1146,27 @@ else
   clean "no running process has a deleted executable"
 fi
 
+# Splunk's own daemons. The packet puts an indexer on one box and forwarders on
+# the others, installed under /opt - often from a tarball, so no package owns
+# them - listening on ports no scored service uses (8089 management, 8191 KV
+# store), and the rules forbid disabling forwarding to the Black Team indexer.
+# Reported, they were four AMBER rows on every pass of a box nobody could act
+# on. Matched precisely - those daemon names, in a Splunk tree's bin/ - so a
+# payload dropped beside them, a deleted binary, or an interpreter Splunk runs
+# is still judged on its own.
+splunk_trees="${CCDC_SPLUNK_HOME:-} /opt/splunk /opt/splunkforwarder"
+splunk_daemon_pid() {
+  local exe t
+  exe=$(readlink "/proc/$1/exe" 2>/dev/null) || return 1
+  case "$exe" in *' (deleted)') return 1 ;; esac
+  for t in $splunk_trees; do
+    case "$exe" in
+      "$t"/bin/splunkd|"$t"/bin/mongod|"$t"/bin/mongod-*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # --- 9. Listeners the packet does not account for -----------------------------
 begin
 if ccdc_have ss && [ -n "${CCDC_ALLOWED_TCP_PORTS:-}" ]; then
@@ -1155,9 +1176,18 @@ if ccdc_have ss && [ -n "${CCDC_ALLOWED_TCP_PORTS:-}" ]; then
   # a socket bound to 127.0.0.x or ::1 shows on no scan from anywhere. Leaving
   # them in flagged systemd-resolved's 127.0.0.53:53 on every run, and a check
   # that is wrong on a stock box every time is a check you stop reading.
+  splunk_ports=''
   while IFS= read -r port; do
     [ -n "$port" ] || continue
-    ccdc_list_contains "$port" "${CCDC_ALLOWED_TCP_PORTS:-}" || unexpected="$unexpected $port"
+    ccdc_list_contains "$port" "${CCDC_ALLOWED_TCP_PORTS:-}" && continue
+    holders=$(ss -tlnpH "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+    all_splunk=1
+    for hp in $holders; do splunk_daemon_pid "$hp" || all_splunk=0; done
+    if [ -n "$holders" ] && [ "$all_splunk" -eq 1 ]; then
+      splunk_ports="$splunk_ports $port"
+      continue
+    fi
+    unexpected="$unexpected $port"
   done <<EOF
 $(ss -tlnH 2>/dev/null | awk '$4 !~ /^(127\.|\[::1\]|::1)/ {print $4}' | sed 's/.*://' | sort -un)
 EOF
@@ -1185,6 +1215,7 @@ EOF
   else
     clean "no unexpected listening TCP ports"
   fi
+  [ -z "$splunk_ports" ] || clean "Splunk's own ports, not scored, kept off the network by fw.sh:$splunk_ports"
 else
   clean "port check skipped (need ss + CCDC_ALLOWED_TCP_PORTS)"
 fi
@@ -1290,18 +1321,19 @@ else
 
   # Cache the package lookup per executable: a busy box has hundreds of sockets
   # and a handful of distinct binaries behind them.
-  pkg_cache_paths=''
-  pkg_cache_states=''
+  # One string, "|path=state|" per entry. The two parallel word lists this
+  # replaced were read back with `cut -d' ' -f$i` from a list that began with a
+  # space, so every lookup after the first read the entry BEFORE it. A service
+  # listening on IPv4 and IPv6 is two sockets, so the second one always hit the
+  # cache - measured on the 18.04 replica: dovecot, owned by dovecot-core, was
+  # reported as "a binary no package owns" on its [::]:995 socket.
+  pkg_cache='|'
   pkg_owned() {
-    local exe=$1 i=0 p state
-    for p in $pkg_cache_paths; do
-      i=$((i + 1))
-      if [ "$p" = "$exe" ]; then
-        state=$(printf '%s' "$pkg_cache_states" | cut -d' ' -f"$i")
-        [ "$state" = yes ]
-        return
-      fi
-    done
+    local exe=$1 state
+    case "$pkg_cache" in
+      *"|$exe=yes|"*) return 0 ;;
+      *"|$exe=no|"*|*"|$exe=unknown|"*) return 1 ;;
+    esac
     state=unknown
     # Through lib/provenance.sh, which asks the merged-/usr spelling too. This
     # file sources that library and then had its own copy of the question that
@@ -1311,11 +1343,10 @@ else
     if ccdc_have dpkg-query || ccdc_have rpm; then
       pkg_owns "$exe" && state=yes || state=no
     fi
-    # Only cache path-shaped keys; a path with whitespace would corrupt the
-    # parallel word lists, so such an executable simply is not cached.
+    # A path with a separator or whitespace in it is answered, not cached.
     case "$exe" in
-      *[![:space:]]*[[:space:]]*) : ;;
-      *) pkg_cache_paths="$pkg_cache_paths $exe"; pkg_cache_states="$pkg_cache_states $state" ;;
+      *'|'*|*=*|*[[:space:]]*) : ;;
+      *) pkg_cache="$pkg_cache$exe=$state|" ;;
     esac
     [ "$state" = yes ]
   }
@@ -1565,6 +1596,7 @@ else
     esac
     ccdc_have dpkg-query || ccdc_have rpm || continue
     pkg_owned "$exe" && continue
+    splunk_daemon_pid "$pid" && continue
     case " $seen_unpackaged " in *" $pid|$direction "*) continue ;; esac
     seen_unpackaged="$seen_unpackaged $pid|$direction"
     if [ "$direction" = outbound ]; then
@@ -1614,7 +1646,10 @@ fi
 # password, not a new account at all. Found on the lab box only because the
 # operator happened to run the right `getent` by hand.
 begin
-svcshell=$(awk -F: '$3>0 && $3<1000 && $7 !~ /(nologin|false|sync)$/ {print $1":"$3":"$7}' /etc/passwd 2>/dev/null)
+# The "shell" of shutdown, halt and sync is the one command the account runs
+# (/sbin/shutdown, /sbin/halt, /bin/sync). Those accounts ship on every Red Hat
+# family box, so leaving them out of this list made every Rocky host RED here.
+svcshell=$(awk -F: '$3>0 && $3<1000 && $7 !~ /\/(nologin|false|true|sync|shutdown|halt)$/ {print $1":"$3":"$7}' /etc/passwd 2>/dev/null)
 if [ -n "$svcshell" ]; then
   red "service account(s) with a login shell   [CARD 10]"
   for e in $svcshell; do emit RED svcshell "${e%%:*}" "service account with a login shell"; done
@@ -1756,12 +1791,20 @@ fi
 # variables and defines functions; it does not background a process. So: the
 # reverse-shell patterns, execution out of a world-writable directory, or any
 # form of detached start.
-rc_launch='nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
+#
+# "Detached start" means a lone & at the end of a command. A line that ENDS in
+# && is a condition continued on the next line; matching it flagged Ubuntu's
+# own /etc/profile.d/Z99-cloud-locale-test.sh RED on every cloud-image box.
+rc_launch='nohup |setsid |disown|(^|[^&])&[[:space:]]*\)|(^|[^&])&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
 begin
 rchits=''
 for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc /etc/profile \
          /home/*/.bashrc /home/*/.profile /home/*/.bash_profile /etc/profile.d/*; do
   [ -f "$f" ] || continue
+  # A file under /etc that is byte-for-byte what its package shipped is the
+  # distribution's, not an implant. An EDITED package file is exactly where an
+  # implant hides, so it still gets read.
+  case "$f" in /etc/*) pkg_file_pristine "$f" && continue ;; esac
   grep -qIE "$shells|$rc_launch" "$f" 2>/dev/null && rchits="$rchits $f"
 done
 if [ -n "$rchits" ]; then

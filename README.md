@@ -11,7 +11,7 @@ two questions: **is the scored service up**, and **can I prove what changed**.
   read them.
 - **Playbooks** — 16 documents. Cards you can follow at 2am with a red team on
   the box.
-- **Tested** — 579 assertions across 21 suites, including fixtures that plant
+- **Tested** — 604 assertions across 22 suites, including fixtures that plant
   real persistence on a lab VM and assert the tools find it.
 
 Everything is read-only until you pass `--apply` (`-Apply` on Windows). No
@@ -281,8 +281,8 @@ lab/                      building the practice targets:
   make-unattended-iso.sh  rebuild a Windows ISO so it installs hands-off
   autounattend.xml        the answer file it uses
 redteam/                  red-team fixtures and the regression suite:
-  self-test.sh            runs every suite below (579 assertions, non-root;
-                          462 without the Windows suite, which needs pwsh -
+  self-test.sh            runs every suite below (604 assertions, non-root;
+                          479 without the Windows suite, which needs pwsh -
                           set CCDC_PWSH=/path/to/pwsh, or it skips and says so)
   pasteable-self-test.sh  what the tools PRINT: no unpastable command, no
                           remediation that damages your own box, no flag
@@ -290,6 +290,9 @@ redteam/                  red-team fixtures and the regression suite:
                           but cannot parse
   leftovers-self-test.sh  a payload left on disk after its launcher is gone,
                           and an auth log someone emptied, are both found
+  packet-self-test.sh     the tryout environment: the one password list for
+                          every box, FTP through the firewall, and the false
+                          alarms an 18.04 / Rocky + Splunk replica raised
   baseline-self-test.sh   every finding kind has an action or a written reason
                           it needs a human; nothing destructive can reach a
                           path outside the trigger directories

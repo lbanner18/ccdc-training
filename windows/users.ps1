@@ -72,20 +72,11 @@ Write-Host ''
 Write-Host 'users.ps1 - accounts and passwords'
 Write-CcdcBoxBanner -Facts $facts
 
-if (Test-CcdcIsDomainController) {
-    Write-Host '  THIS IS A DOMAIN CONTROLLER.' -ForegroundColor Yellow
-    Write-Host '  It has no local accounts. Every account here is a DOMAIN account, and'
-    Write-Host '  changing one changes it for every machine in the domain. This tool'
-    Write-Host '  works on local accounts only and will not pretend otherwise.'
-    Write-Host ''
-    Write-Host '  Use these instead:'
-    Write-Host '      Get-ADUser -Filter * -Properties Enabled,PasswordLastSet,whenCreated |'
-    Write-Host '          Sort-Object whenCreated -Descending | Select-Object -First 25 Name,Enabled,whenCreated'
-    Write-Host '      net group "Domain Admins" /domain'
-    Write-Host '      Set-ADAccountPassword -Identity NAME -Reset'
-    Write-Host ''
-    exit 0
-}
+# A domain controller has no local accounts, and the tryout's Windows box is
+# one (AD/DNS are scored). This tool used to print a few AD commands and stop
+# there, so the playbook's "create a backup admin" step did nothing on the box
+# that needed it most. The domain path below does the same jobs against AD.
+$isDc = Test-CcdcIsDomainController
 
 # Never both. -RotateAll plus a list is ambiguous, and an ambiguous command
 # that touches every password on the box should not resolve itself quietly.
@@ -102,12 +93,13 @@ function New-CcdcPassword {
     param([int]$Length = 20)
     # Deliberately excludes characters that break `net user`, cmd quoting, or a
     # hand-copied password read off a screen: no space, no quote, no backtick,
-    # no percent, and no l/I/1/O/0.
+    # no percent, and no l/I/1/O/0. No comma or colon either: a scored
+    # account's password goes into Quotient as user,password.
     $sets = @(
         'ABCDEFGHJKLMNPQRSTUVWXYZ',
         'abcdefghijkmnpqrstuvwxyz',
         '23456789',
-        '!@#$^&*()-_=+[]{}:,.?'
+        '!@#$^&*()-_=+[]{}.?'
     )
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $bytes = New-Object byte[] 1
@@ -144,6 +136,7 @@ function Record-Password {
 
 # --- 5. audit ----------------------------------------------------------------
 $users = @()
+if (-not $isDc) {
 try { $users = @(Get-LocalUser) } catch { Write-CcdcDie "could not read local accounts: $($_.Exception.Message)" }
 
 $adminNames = @()
@@ -169,6 +162,7 @@ Write-Host '  "** NO **" means: enabled, and not named in CCDC_ALLOWED_USERS.'
 Write-Host '  That is the column to read. Each one is either yours and missing from'
 Write-Host '  your config, or it is not yours.'
 Write-Host ''
+}
 
 # The backup admin has to be in the packet list, or every other tool reads it
 # as an intruder: triage reports it RED rogueadmin, -RotateAll changes its
@@ -201,6 +195,112 @@ function Register-CcdcBackupAdmin {
         Write-Host ('            ADD {0} TO CCDC_ALLOWED_USERS in {1} BY HAND.' -f $Name, $Config) -ForegroundColor Yellow
         Write-Host  '            Until you do, triage calls it a rogue admin and -RotateAll changes its password.' -ForegroundColor Yellow
     }
+}
+
+# --- the domain path ---------------------------------------------------------
+if ($isDc) {
+    try { Import-Module ActiveDirectory -ErrorAction Stop }
+    catch { Write-CcdcDie "domain controller, but the ActiveDirectory module will not load: $($_.Exception.Message)" }
+    $builtins = @('Administrator', 'Guest', 'krbtgt', 'DefaultAccount')
+    $privGroups = @('Domain Admins', 'Enterprise Admins', 'Schema Admins', 'Administrators',
+                    'Account Operators', 'Backup Operators', 'Server Operators', 'Print Operators',
+                    'Group Policy Creator Owners', 'DnsAdmins')
+
+    Write-Host '  DOMAIN ACCOUNTS (this is a domain controller: every account is a domain account)'
+    Write-Host ''
+    Write-Host ('  {0,-22} {1,-9} {2,-7} {3,-17} {4}' -f 'NAME','ENABLED','ADMIN','CREATED','IN PACKET?')
+    Write-Host ('  {0}' -f ('-' * 78))
+    $adminSet = @()
+    foreach ($g in @('Domain Admins', 'Enterprise Admins', 'Schema Admins', 'Administrators')) {
+        try { $adminSet += @(Get-ADGroupMember -Identity $g -Recursive -ErrorAction Stop | ForEach-Object { $_.SamAccountName }) } catch { }
+    }
+    $adUsers = @(Get-ADUser -Filter * -Properties Enabled, whenCreated | Sort-Object SamAccountName)
+    foreach ($u in $adUsers) {
+        $n = [string]$u.SamAccountName
+        $inPacket = Test-CcdcListContains -Needle $n -List $allowed
+        $flag = if ($inPacket) { 'yes - SCORED' } elseif ($n -in $builtins) { 'built-in' } elseif ($u.Enabled) { '** NO **' } else { 'no' }
+        Write-Host ('  {0,-22} {1,-9} {2,-7} {3,-17} {4}' -f $n, $(if ($u.Enabled) {'enabled'} else {'disabled'}),
+            $(if ($n -in $adminSet) {'ADMIN'} else {''}), $u.whenCreated.ToString('yyyy-MM-dd HH:mm'), $flag)
+    }
+    Write-Host ''
+    Write-Host '  WHO HOLDS POWER IN THE DOMAIN'
+    foreach ($g in $privGroups) {
+        $m = @()
+        try { $m = @(Get-ADGroupMember -Identity $g -ErrorAction Stop | ForEach-Object { $_.SamAccountName }) } catch { continue }
+        $odd = @($m | Where-Object { -not (Test-CcdcListContains -Needle $_ -List $allowed) -and
+                                     $_ -notin @('Administrator', 'Domain Admins', 'Enterprise Admins', 'Schema Admins') })
+        $line = '  {0,-28} {1}' -f $g, $(if ($m.Count) { $m -join ', ' } else { '(empty)' })
+        if ($odd.Count) { Write-Host $line -ForegroundColor Red; Write-Host ('      NOT IN THE PACKET: {0}   remove: Remove-ADGroupMember -Identity "{1}" -Members {2}' -f ($odd -join ', '), $g, ($odd -join ',')) -ForegroundColor Red }
+        else { Write-Host $line }
+    }
+    Write-Host ''
+
+    if ($CreateAdmin) {
+        Write-Host ('  BACKUP DOMAIN ADMINISTRATOR: {0}' -f $CreateAdmin)
+        if ($CreateAdmin -notmatch '^[A-Za-z0-9._-]{1,20}$') {
+            Write-CcdcDie "refusing that name: use letters, digits, dot, underscore or hyphen, 20 characters or fewer"
+        }
+        $exists = $null
+        try { $exists = Get-ADUser -Identity $CreateAdmin -ErrorAction Stop } catch { }
+        if (-not $Apply) {
+            Write-Host ('    [would] create domain account {0}, add it to Domain Admins,' -f $CreateAdmin)
+            Write-Host  '            set a random password and write it to'
+            Write-Host ('            {0}' -f $secretFile)
+            Write-Host ('            and add {0} to CCDC_ALLOWED_USERS in {1}' -f $CreateAdmin, $Config)
+        } elseif ($exists) {
+            Write-Host ('    {0} already exists - not recreating it.' -f $CreateAdmin)
+            Register-CcdcBackupAdmin -Name $CreateAdmin
+        } else {
+            $pw = New-CcdcPassword -Length $PasswordLength
+            Record-Password -User $CreateAdmin -Password $pw
+            try {
+                New-ADUser -Name $CreateAdmin -SamAccountName $CreateAdmin -Description 'second administrator - incident response' `
+                    -AccountPassword (ConvertTo-SecureString $pw -AsPlainText -Force) -Enabled $true -PasswordNeverExpires $true -ErrorAction Stop
+                Add-ADGroupMember -Identity 'Domain Admins' -Members $CreateAdmin -ErrorAction Stop
+                Write-Host ('    [done]  created {0} and added it to Domain Admins' -f $CreateAdmin) -ForegroundColor Green
+                Write-Host ('            password written to {0}' -f $secretFile)
+                Write-Host  '            WRITE IT ON PAPER NOW. That file is on the box being attacked.' -ForegroundColor Yellow
+                Write-CcdcLog "created backup domain admin $CreateAdmin"
+                Register-CcdcBackupAdmin -Name $CreateAdmin
+            } catch { Write-Host ('    [FAIL]  {0}' -f $_.Exception.Message) -ForegroundColor Red }
+        }
+        Write-Host ''
+    }
+
+    # Scored accounts are rotated with passwords.ps1, from the same block that
+    # goes into Quotient. This rotates only what the packet does not name.
+    $dcTargets = @()
+    if ($RotateAll) {
+        $dcTargets = @($adUsers | Where-Object { $_.Enabled -and $_.SamAccountName -notin @('krbtgt', 'Guest', 'DefaultAccount') -and
+                                                 -not (Test-CcdcListContains -Needle $_.SamAccountName -List $allowed) } |
+                       ForEach-Object { [string]$_.SamAccountName })
+    } elseif ($Rotate) { $dcTargets = @($Rotate) }
+    foreach ($t in $dcTargets) {
+        if ((Test-CcdcListContains -Needle $t -List $allowed) -and -not $IncludeScoredUsers) {
+            Write-Host ('  {0} is a packet account: rotate it with passwords.ps1 so Quotient gets the same password.' -f $t) -ForegroundColor Yellow
+            continue
+        }
+        if (-not $Apply) { Write-Host ('    [would] set a new random password for domain account {0}' -f $t); continue }
+        $pw = New-CcdcPassword -Length $PasswordLength
+        Record-Password -User $t -Password $pw
+        try {
+            Set-ADAccountPassword -Identity $t -Reset -NewPassword (ConvertTo-SecureString $pw -AsPlainText -Force) -ErrorAction Stop
+            Write-Host ('    [done]  {0}: new password written to {1}' -f $t, $secretFile) -ForegroundColor Green
+            Write-CcdcLog "rotated domain account $t"
+        } catch { Write-Host ('    [FAIL]  {0}: {1}' -f $t, $_.Exception.Message) -ForegroundColor Red }
+    }
+    foreach ($d in @($Disable)) {
+        if (-not $d) { continue }
+        if (Test-CcdcListContains -Needle $d -List $allowed) { Write-Host ('  refusing to disable {0}: the packet names it' -f $d) -ForegroundColor Red; continue }
+        if (-not $Apply) { Write-Host ('    [would] disable domain account {0}' -f $d); continue }
+        try { Disable-ADAccount -Identity $d -ErrorAction Stop; Write-Host ('    [done]  disabled {0}' -f $d) -ForegroundColor Green; Write-CcdcLog "disabled domain account $d" }
+        catch { Write-Host ('    [FAIL]  {0}: {1}' -f $d, $_.Exception.Message) -ForegroundColor Red }
+    }
+    if (-not $Apply -and ($CreateAdmin -or @($dcTargets).Count -gt 0 -or $Disable)) {
+        Write-Host ''
+        Write-Host '  DRY RUN. Nothing above changed. Add -Apply.'
+    }
+    exit 0
 }
 
 # --- 3. a second way in ------------------------------------------------------

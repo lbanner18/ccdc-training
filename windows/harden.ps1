@@ -260,9 +260,20 @@ if ($steps -contains 'Defender') {
 
         # A domain policy often points Defender at a WSUS server the event does
         # not provide; with the internet up, going direct is what works.
-        Do-Change 'update signatures (falls back to Microsoft directly if the default source fails)' {
+        # Server 2016 images carry 2016-era definitions and an old engine, and
+        # there BOTH cmdlet sources fail ("completed with errors"). Measured on a
+        # 2016 DC: MpCmdRun straight from the Malware Protection Center took the
+        # definitions from May 2016 to the current day.
+        Do-Change 'update signatures (then Microsoft Update, then the Malware Protection Center directly)' {
             try { Update-MpSignature -ErrorAction Stop }
-            catch { Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Stop }
+            catch {
+                try { Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Stop }
+                catch {
+                    $mpCmd = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+                    $mpOut = & $mpCmd -SignatureUpdate -MMPC 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw ("all three update sources failed: {0}" -f (($mpOut | Select-Object -Last 2) -join ' ')) }
+                }
+            }
         } 'CARD W6'
         Do-Change 'run a quick scan (runs in the background; check the GUI for results)' {
             Start-MpScan -ScanType QuickScan -AsJob | Out-Null
@@ -340,7 +351,11 @@ if ($steps -contains 'PasswordPolicy') {
     $maxAge = Get-CcdcValue -Config $cfg -Name 'CCDC_PW_MAX_AGE'    -Default '0'
     $hist   = Get-CcdcValue -Config $cfg -Name 'CCDC_PW_HISTORY'    -Default '10'
     $lockTh = Get-CcdcValue -Config $cfg -Name 'CCDC_LOCKOUT_THRESHOLD' -Default '10'
-    $lockDur= Get-CcdcValue -Config $cfg -Name 'CCDC_LOCKOUT_DURATION'  -Default '15'
+    # Two minutes, as in the organizers' own sample password-policy memo. The
+    # usernames are in the packet, so ten wrong guesses lock a SCORED account;
+    # at fifteen minutes that was fifteen failed checks per spray, and on a
+    # domain controller it hits every service that logs in as that account.
+    $lockDur= Get-CcdcValue -Config $cfg -Name 'CCDC_LOCKOUT_DURATION'  -Default '2'
 
     Do-Change "minimum password length = $minLen" { & net accounts "/minpwlen:$minLen" | Out-Null } 'CARD W1'
     Do-Change "password history = $hist"          { & net accounts "/uniquepw:$hist"   | Out-Null } 'CARD W1'
@@ -349,9 +364,18 @@ if ($steps -contains 'PasswordPolicy') {
         else { & net accounts "/maxpwage:$maxAge" | Out-Null }
     } 'CARD W1'
     Do-Change "account lockout after $lockTh bad attempts, for $lockDur minutes" {
-        & net accounts "/lockoutthreshold:$lockTh" | Out-Null
-        & net accounts "/lockoutduration:$lockDur" | Out-Null
-        & net accounts "/lockoutwindow:$lockDur"   | Out-Null
+        & net accounts "/lockoutthreshold:$lockTh" 2>$null | Out-Null
+        # Windows refuses a lockout duration shorter than the reset window, and
+        # switching lockout on sets both to 30 minutes - so duration-then-window
+        # failed silently and left 30. Measured on a 2016 DC: "System error 87",
+        # then the step reported done. Window, duration, window reaches the
+        # target from any starting pair; then it is checked, not assumed.
+        & net accounts "/lockoutwindow:$lockDur"   2>$null | Out-Null
+        & net accounts "/lockoutduration:$lockDur" 2>$null | Out-Null
+        & net accounts "/lockoutwindow:$lockDur"   2>$null | Out-Null
+        $now = & net accounts 2>$null
+        $dur = ($now | Select-String 'Lockout duration' | ForEach-Object { ($_.Line -split ':')[-1].Trim() }) -join ''
+        if ($lockTh -ne '0' -and $dur -ne $lockDur) { throw "lockout duration is $dur minutes, not $lockDur - check with: net accounts" }
     } 'CARD W1'
     Note 'Lockout is a trade: it stops password guessing and it is also how someone locks your SCORED accounts out on purpose. A threshold of 10 and a short duration is the compromise.'
     Note 'Modern standard (NIST SP 800-63B): length over complexity, no forced rotation, block known-breached passwords. Say that in the inject response.'

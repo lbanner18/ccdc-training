@@ -46,6 +46,34 @@ pkg_alt_path() {
   esac
 }
 
+# Is FILE exactly what its package shipped - owned AND unmodified? Owned alone
+# is not enough: a package file somebody edited is the best hiding place on the
+# box, because every "is this packaged" check waves it through.
+pkg_file_pristine() {
+  local f=$1 pkg sum want md5file
+  [ -f "$f" ] || return 1
+  if ccdc_have dpkg-query; then
+    pkg=$(dpkg-query -S "$f" 2>/dev/null | grep -v '^diversion' | head -1 | sed 's/: .*//')
+    [ -n "$pkg" ] || return 1
+    case "$pkg" in *,*) return 1 ;; esac
+    sum=$(md5sum <"$f" 2>/dev/null | cut -d' ' -f1)
+    want=$(dpkg-query -W -f='${Conffiles}\n' "$pkg" 2>/dev/null | awk -v f="$f" '$1 == f {print $2; exit}')
+    if [ -z "$want" ]; then
+      md5file=$(dpkg-query --control-path "$pkg" md5sums 2>/dev/null)
+      [ -n "$md5file" ] && want=$(awk -v f="${f#/}" '$2 == f {print $1; exit}' "$md5file" 2>/dev/null)
+    fi
+    [ -n "$want" ] && [ -n "$sum" ] && [ "$sum" = "$want" ]
+    return
+  elif ccdc_have rpm; then
+    rpm -qf "$f" >/dev/null 2>&1 || return 1
+    # rpm -V prints only what differs from the package; nothing for this file
+    # means it is as shipped.
+    [ -z "$(rpm -Vf "$f" 2>/dev/null | awk -v f="$f" '$NF == f')" ]
+    return
+  fi
+  return 1
+}
+
 pkg_owns() {
   local f=$1 alt=''
   alt=$(pkg_alt_path "$f")

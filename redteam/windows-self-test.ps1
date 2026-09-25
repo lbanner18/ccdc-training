@@ -1100,6 +1100,60 @@ if ($sGone -match 'CCDC_SPLUNK_HOME is set to a path that does not exist' -and $
     ok 'splunk.ps1: a mistyped home is a finding, and neither hides a real forwarder nor calls a missing one "not running"'
 } else { nope 'splunk.ps1 trusted a mistyped home, or let it decide whether a forwarder exists' }
 
+# --- the tryout packet: Server 2016, a domain controller --------------------------
+# A scored account's password goes into Quotient as user,password.
+$usersTxtNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\users.ps1'))
+$genFn = [regex]::Match($usersTxtNow, '(?s)function New-CcdcPassword \{.*?\r?\n\}').Value
+if ($genFn) { . ([scriptblock]::Create($genFn)) }
+$sepPw = @(1..300 | ForEach-Object { New-CcdcPassword -Length 20 } | Where-Object { $_ -match '[,:]' })
+if ($genFn -and $sepPw.Count -eq 0) { ok 'users.ps1 passwords never contain a comma or colon (Quotient reads user,password)' }
+else { nope 'users.ps1 can generate a password Quotient would split' }
+
+# Lockout: Windows refuses a duration shorter than the window, and switching
+# lockout on sets both to 30 - duration-first stayed at 30 on a 2016 DC.
+$hardenNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\harden.ps1'))
+$lockBlock = [regex]::Match($hardenNow, '(?s)account lockout after.*?CARD W1').Value
+$iw = $lockBlock.IndexOf('/lockoutwindow'); $idur = $lockBlock.IndexOf('/lockoutduration')
+if ($iw -ge 0 -and $idur -gt $iw -and $lockBlock -match 'throw "lockout duration is' -and
+    $hardenNow -match "CCDC_LOCKOUT_DURATION'\s+-Default '2'") {
+    ok 'harden.ps1 sets the lockout window before the duration, checks what stuck, and defaults to 2 minutes'
+} else { nope 'harden.ps1 lockout can silently stay at 30 minutes, or its default is long again' }
+if ($hardenNow -match 'MpCmdRun\.exe' -and $hardenNow -match '-SignatureUpdate -MMPC') {
+    ok 'harden.ps1 falls back to the Malware Protection Center when both Defender update cmdlets fail'
+} else { nope 'harden.ps1 lost the MMPC signature fallback that an old 2016 image needs' }
+
+# passwords.ps1: a malformed block changes nothing and names every bad line.
+$pwTool = Join-Path $root 'windows\passwords.ps1'
+$pcr = Join-Path $work 'pcr.txt'
+@('banneluk,Ab3d-Ef4h-Jk5m-Np6q', 'svc_web,Ab3d,Ef4h', 'nosuch,Ab3d-Ef4h-Jk5m-Np6q', 'Administrator short') |
+    Set-Content -LiteralPath $pcr -Encoding UTF8
+$pwOut = (& $pwTool -Config $cfgPath -Apply -InputFile $pcr *>&1 | Out-String -Width 4096)
+$pwRc = $LASTEXITCODE
+if ($pwRc -eq 1 -and $pwOut -match 'Nothing was changed' -and $pwOut -match 'line 2: expected exactly one comma' -and
+    $pwOut -match "no account 'nosuch'" -and $pwOut -match 'line 4: ' -and $pwOut -notmatch 'SETTING') {
+    ok 'passwords.ps1 refuses a malformed block whole and names each bad line'
+} else { nope ("passwords.ps1 bad-block handling regressed (rc={0})" -f $pwRc) }
+@('banneluk,Ab3d-Ef4h-Jk5m-Np6q', 'Administrator,Qr7s-Tu8v-Wx9y-Za2b') | Set-Content -LiteralPath $pcr -Encoding UTF8
+$pwOut2 = (& $pwTool -Config $cfgPath -InputFile $pcr *>&1 | Out-String -Width 4096)
+if ($pwOut2 -match 'reads cleanly: 2 account' -and $pwOut2 -notmatch 'SETTING') {
+    ok 'passwords.ps1 accepts a clean block and changes nothing without -Apply'
+} else { nope 'passwords.ps1 rejected a clean block, or changed something without -Apply' }
+
+# The domain controller paths, measured on a 2016 DC.
+$triNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))
+if ($triNow -match "Check 'domainadmin'" -and $triNow -match 'Get-ADGroupMember -Identity \$g -Recursive' -and
+    $triNow -match "Check 'domainuser'") {
+    ok 'triage.ps1 expands the privileged domain groups on a DC (an account added to Domain Admins was invisible)'
+} else { nope 'triage.ps1 is blind to domain admin membership again' }
+if ($triNow -match "Name -in @\('SYSVOL', 'NETLOGON'\)" -and $triNow -match '\$isDcBox -and' -and
+    $triNow -match "'9389' = 'Microsoft.ActiveDirectory.WebServices'") {
+    ok "triage.ps1 leaves a DC's SYSVOL/NETLOGON and its own listeners alone (it printed Remove-SmbShare SYSVOL)"
+} else { nope "triage.ps1 can tell you to remove a domain controller's SYSVOL share again" }
+if ($usersTxtNow -match '\$isDc = Test-CcdcIsDomainController' -and $usersTxtNow -match "Add-ADGroupMember -Identity 'Domain Admins'" -and
+    $usersTxtNow -notmatch 'will not pretend otherwise') {
+    ok 'users.ps1 works on a domain controller: audit, backup Domain Admin, rotate, disable'
+} else { nope 'users.ps1 stops at a domain controller again' }
+
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''
 Write-Host ("windows self-test: {0} passed, {1} failed" -f $pass, $fail)

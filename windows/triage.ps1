@@ -192,6 +192,73 @@ if (@($adminMembers).Count -eq 0) {
     }
 }
 
+# On a domain controller the local Administrators group holds GROUPS - Domain
+# Admins, Enterprise Admins - and the check above skips those by design. So an
+# account added to Domain Admins, which is control of the whole domain and the
+# first thing anyone does with a DC, was invisible: measured on a 2016 DC with
+# a planted member, this check said "only accounts the packet names".
+if ($isDC) {
+    Begin-Check 'domainadmins'
+    $adLoaded = $true
+    try { Import-Module ActiveDirectory -ErrorAction Stop } catch { $adLoaded = $false }
+    if (-not $adLoaded) {
+        Report -Severity 'AMBER' -Check 'admincheck' -Subject 'ActiveDirectory' `
+            -Description 'domain controller, but the ActiveDirectory module would not load - domain groups were NOT checked' `
+            -Fix @('net group "Domain Admins" /domain', 'net group "Enterprise Admins" /domain') -Card 'CARD W1'
+    } else {
+        $privGroups = @('Domain Admins', 'Enterprise Admins', 'Schema Admins', 'Administrators',
+                        'Account Operators', 'Backup Operators', 'Server Operators', 'Print Operators',
+                        'DnsAdmins', 'Group Policy Creator Owners')
+        $held = @{}
+        foreach ($g in $privGroups) {
+            $members = @()
+            try { $members = @(Get-ADGroupMember -Identity $g -Recursive -ErrorAction Stop | Where-Object { $_.objectClass -eq 'user' }) } catch { continue }
+            foreach ($m in $members) {
+                $sam = [string]$m.SamAccountName
+                if ($sam -eq 'Administrator' -or (Test-CcdcListContains -Needle $sam -List $allowedUsers)) { continue }
+                if (-not $held.ContainsKey($sam)) { $held[$sam] = New-Object System.Collections.ArrayList }
+                [void]$held[$sam].Add($g)
+            }
+        }
+        foreach ($sam in @($held.Keys | Sort-Object)) {
+            $direct = @()
+            try {
+                $direct = @(Get-ADPrincipalGroupMembership -Identity $sam -ErrorAction Stop |
+                            Where-Object { $privGroups -contains $_.Name } | ForEach-Object { $_.Name })
+            } catch { }
+            $fix = New-Object System.Collections.ArrayList
+            foreach ($g in $direct) { [void]$fix.Add(("Remove-ADGroupMember -Identity '{0}' -Members {1} -Confirm:`$false" -f $g, $sam)) }
+            [void]$fix.Add(("Disable-ADAccount -Identity {0}      # keep it as evidence; do not delete" -f $sam))
+            [void]$fix.Add(("Get-ADUser {0} -Properties whenCreated,MemberOf    # when, and what else" -f $sam))
+            Report -Severity 'RED' -Check 'domainadmin' -Subject $sam `
+                -Description ('holds {0} and is not in the packet' -f (($held[$sam] | Sort-Object -Unique) -join ', ')) `
+                -Detail @('On a domain controller this is control of the whole domain: every',
+                          'account, the scored AD service, and the tools you are using now.') `
+                -Fix @($fix) -Card 'CARD W1'
+        }
+        if ($held.Count -eq 0) { Clean 'no privileged domain group holds an account the packet does not name' }
+
+        Begin-Check 'domainusers'
+        $extra = 0
+        foreach ($u in @(Get-ADUser -Filter 'Enabled -eq $true' -Properties whenCreated -ErrorAction SilentlyContinue)) {
+            $sam = [string]$u.SamAccountName
+            if ($sam -in @('Administrator', 'Guest', 'krbtgt', 'DefaultAccount')) { continue }
+            if (Test-CcdcListContains -Needle $sam -List $allowedUsers) { continue }
+            $extra++
+            $new = ($u.whenCreated -and (Test-CcdcNewerThanBox -When $u.whenCreated))
+            Report -Severity $(if ($new) { 'RED' } else { 'AMBER' }) -Check 'domainuser' -Subject $sam `
+                -Description ('enabled domain account the packet does not name (created {0})' -f $u.whenCreated.ToString('yyyy-MM-dd HH:mm')) `
+                -Detail @('The packet lists every account these devices should have.',
+                          'Disable, do not delete: the account is evidence for the incident report.') `
+                -Fix @(("Get-ADUser {0} -Properties whenCreated,MemberOf,LastLogonDate" -f $sam),
+                       ("Disable-ADAccount -Identity {0}" -f $sam),
+                       '# if it IS the packet''s, add it to CCDC_ALLOWED_USERS in your config') `
+                -Card 'CARD W1'
+        }
+        if ($extra -eq 0) { Clean 'every enabled domain account is one the packet names' }
+    }
+}
+
 Begin-Check 'localusers'
 $localUsers = @()
 if (-not $isDC) {
@@ -609,6 +676,20 @@ $listeners = @()
 if ($facts['HasNetTCPIP']) {
     try { $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop) } catch { }
 }
+# A domain controller's own listeners, keyed to the process that should hold
+# each. The packet's Windows box is a DC (AD/DNS are scored), and without this
+# the first triage there offered to firewall-block AD Web Services (9389) and
+# the RPC-over-HTTP endpoint mapper (593) - both stock on every DC. A port is
+# only accepted when the EXPECTED binary holds it, so a listener planted on
+# 9389 is still a finding.
+$dcListeners = @{}
+if (Test-CcdcIsDomainController) {
+    $dcListeners = @{
+        '53' = 'dns'; '88' = 'lsass'; '464' = 'lsass'; '389' = 'lsass'; '636' = 'lsass';
+        '3268' = 'lsass'; '3269' = 'lsass'; '593' = 'svchost';
+        '9389' = 'Microsoft.ActiveDirectory.WebServices'; '5722' = 'dfsrs'
+    }
+}
 if (@($listeners).Count -gt 0) {
     $byPort = $listeners | Sort-Object LocalPort -Unique
     foreach ($l in $byPort) {
@@ -626,6 +707,8 @@ if (@($listeners).Count -gt 0) {
             $procName = $p.ProcessName
             try { $procPath = $p.Path } catch { }
         } catch { }
+        if ($dcListeners.ContainsKey($port) -and $procName -eq $dcListeners[$port] -and
+            ($procPath -eq '' -or ($env:SystemRoot -and $procPath -like "$env:SystemRoot\*"))) { continue }
 
         # An interpreter holding a listening port is the Windows shape of the
         # same finding the Linux side calls netprocsvc: a scored service
@@ -731,7 +814,9 @@ if ($facts['HasDefender']) {
                 -Description ('Defender signatures are {0} days old' -f $st.AntivirusSignatureAge) `
                 -Fix @('Update-MpSignature',
                        '# error 0x8024402c/0x80072ee7 with internet up usually means a WSUS policy points elsewhere:',
-                       'Update-MpSignature -UpdateSource MicrosoftUpdateServer') -Card 'CARD W6'
+                       'Update-MpSignature -UpdateSource MicrosoftUpdateServer',
+                       '# "completed with errors" on an old Server 2016 image: straight from Microsoft',
+                       '& "$env:ProgramFiles\Windows Defender\MpCmdRun.exe" -SignatureUpdate -MMPC') -Card 'CARD W6'
         }
         Clean 'Defender status and exclusions reviewed'
     } catch {
@@ -1148,7 +1233,18 @@ if ($null -ne $smbCfg) {
 
 $shares = @()
 try { $shares = @(Get-SmbShare -ErrorAction Stop | Where-Object { $_.Name -notmatch '\$$' }) } catch { }
+# SYSVOL and NETLOGON are how a domain controller serves Group Policy and logon
+# scripts. "Authenticated Users: Full" is Microsoft's default SHARE permission
+# on them - the NTFS permissions underneath are what stop writes. The first run
+# on a 2016 DC printed Remove-SmbShare -Name SYSVOL as the fix, which breaks
+# Group Policy and can stop the DC advertising itself at all.
+$isDcBox = Test-CcdcIsDomainController
+$sysvolRoot = if ($env:SystemRoot) { Join-Path $env:SystemRoot 'SYSVOL\sysvol' } else { '' }
 foreach ($sh in $shares) {
+    if ($isDcBox -and $sysvolRoot -and $sh.Name -in @('SYSVOL', 'NETLOGON') -and [string]$sh.Path -like "$sysvolRoot*") {
+        Clean ("{0} is this domain controller's own share (required - leave it)" -f $sh.Name)
+        continue
+    }
     try {
         foreach ($a in (Get-SmbShareAccess -Name $sh.Name -ErrorAction Stop)) {
             if ($a.AccessControlType -ne 'Allow') { continue }

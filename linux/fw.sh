@@ -54,6 +54,7 @@ fi
 # inspect /tmp while the real root apply has a rollback armed under /run.
 state_dir=/run/ccdc-firewall
 snapshot="$state_dir/rules.snapshot"
+snapshot6="$state_dir/rules6.snapshot"
 pid_file="$state_dir/rollback.handle"
 rollback_script="$state_dir/rollback.sh"
 rollback_unit=ccdc-fw-rollback
@@ -66,10 +67,19 @@ elif [ "$confirm" -eq 1 ] || [ "$rollback" -eq 1 ]; then
 fi
 
 backend=${CCDC_FIREWALL_BACKEND:-auto}
+# Where firewalld is running, configure it instead of replacing it. Rocky - the
+# tryout's Splunk box - runs it by default, and a raw ruleset laid over it is
+# undone the moment anything reloads firewalld; the two then filter side by
+# side and a port has to get past both.
 if [ "$backend" = auto ]; then
-  if ccdc_have nft; then backend=nft; elif ccdc_have iptables-save; then backend=iptables; else ccdc_die "no supported firewall backend"; fi
+  if ccdc_have firewall-cmd && ccdc_have systemctl && systemctl is-active --quiet firewalld.service 2>/dev/null; then backend=firewalld
+  elif ccdc_have nft; then backend=nft; elif ccdc_have iptables-save; then backend=iptables; else ccdc_die "no supported firewall backend"; fi
 fi
-case "$backend" in nft|iptables) ;; *) ccdc_die "CCDC_FIREWALL_BACKEND must be auto, nft, or iptables" ;; esac
+case "$backend" in nft|iptables|firewalld) ;; *) ccdc_die "CCDC_FIREWALL_BACKEND must be auto, nft, iptables or firewalld" ;; esac
+if [ "$backend" = firewalld ]; then
+  ccdc_have firewall-cmd || ccdc_die "CCDC_FIREWALL_BACKEND=firewalld but firewall-cmd is not installed"
+  firewall-cmd --state >/dev/null 2>&1 || ccdc_die "CCDC_FIREWALL_BACKEND=firewalld but firewalld is not running (sudo systemctl start firewalld)"
+fi
 
 allow_outbound=${CCDC_ALLOW_OUTBOUND:-1}
 case "$allow_outbound" in 0|1) ;; *) ccdc_die "CCDC_ALLOW_OUTBOUND must be 0 or 1" ;; esac
@@ -90,22 +100,44 @@ ipv6_active=0
 if [ -r /proc/net/if_inet6 ] && grep -q '[^[:space:]]' /proc/net/if_inet6 2>/dev/null; then
   ipv6_active=1
 fi
+# ip6tables manages the IPv6 half alongside it. Ubuntu 18.04 ships no nft, so
+# before this, fw.sh refused to run at all on the tryout's Ubuntu box.
+v6=0
 if [ "$backend" = iptables ] && [ "$ipv6_active" -eq 1 ]; then
-  ccdc_warn "IPv6 is active, but the iptables backend only replaces IPv4 rules"
-  if [ "$apply" -eq 1 ] && [ "$ack_unmanaged_ipv6" -ne 1 ]; then
-    ccdc_die "use nft, disable IPv6 deliberately, or set CCDC_ACK_IPTABLES_WITHOUT_IPV6=1 after accepting unmanaged IPv6"
+  if ccdc_have ip6tables-save && ccdc_have ip6tables-restore; then
+    v6=1
+  else
+    ccdc_warn "IPv6 is active, but the iptables backend only replaces IPv4 rules (no ip6tables here)"
+    if [ "$apply" -eq 1 ] && [ "$ack_unmanaged_ipv6" -ne 1 ]; then
+      ccdc_die "use nft, disable IPv6 deliberately, or set CCDC_ACK_IPTABLES_WITHOUT_IPV6=1 after accepting unmanaged IPv6"
+    fi
   fi
 fi
+
+# FTP moves its data on a second connection, to a port the server picks and
+# announces inside the control connection (PASV/EPSV). A drop policy that
+# allows only 21 lets the login through and drops the listing - measured on
+# the 18.04 replica. The kernel's FTP helper reads those announcements and
+# marks exactly those data connections RELATED, which the rules already accept.
+ftp_helper=0
+case " ${CCDC_ALLOWED_TCP_PORTS:-} " in *" 21 "*) ftp_helper=1 ;; esac
+case "${CCDC_FTP_HELPER:-auto}" in
+  auto) ;;
+  0) ftp_helper=0 ;;
+  1) ftp_helper=1 ;;
+  *) ccdc_die "CCDC_FTP_HELPER must be auto, 0 or 1" ;;
+esac
 for source in ${CCDC_ALLOWED_SOURCES:-}; do
   case "$source" in *[!0-9A-Fa-f:./]*) ccdc_die "allowed source contains unsupported characters: $source" ;; esac
-  if [ "$backend" = iptables ]; then
-    case "$source" in *:*) ccdc_die "iptables backend does not manage IPv6 source $source; use nft or separate ip6tables rules" ;; esac
+  if [ "$backend" = iptables ] && [ "$v6" -ne 1 ]; then
+    case "$source" in *:*) ccdc_die "iptables backend does not manage IPv6 source $source here (no ip6tables); use nft" ;; esac
   fi
 done
 
 managed_services=''
 if ccdc_have systemctl; then
   for managed_service in firewalld ufw docker; do
+    [ "$backend" = firewalld ] && [ "$managed_service" = firewalld ] && continue
     systemctl is-active --quiet "$managed_service.service" 2>/dev/null || continue
     # On Ubuntu ufw.service is "active" even when the firewall is switched off
     # (it only runs a oneshot at boot). Found live on ubuntu-target: fw.sh
@@ -144,15 +176,36 @@ take_snapshot() {
       ;;
     iptables)
       # iptables-restore flushes by default, so its output needs no header.
-      iptables-save >"$staged" \
-        || { rm -f "$staged"; return 1; }
-      grep -q '^\*' "$staged" \
-        || { rm -f "$staged"; return 1; }
+      # But it only flushes the tables it is GIVEN: a table that was not
+      # loaded when the snapshot was taken would keep the rules this run adds.
+      # So every table this tool writes gets an explicit empty, accepting
+      # definition if the snapshot lacks one - the state "never loaded".
+      { iptables-save; } >"$staged" || { rm -f "$staged"; return 1; }
+      ipt_complete_snapshot "$staged"
+      grep -q '^\*filter' "$staged" || { rm -f "$staged"; return 1; }
+      if [ "$v6" -eq 1 ]; then
+        { ip6tables-save; } >"$staged.6" || { rm -f "$staged" "$staged.6"; return 1; }
+        ipt_complete_snapshot "$staged.6"
+        chmod 0600 "$staged.6" && mv -f "$staged.6" "$snapshot6" \
+          || { rm -f "$staged" "$staged.6"; return 1; }
+      fi
+      ;;
+    firewalld)
+      # Runtime first, so the snapshot is what is filtering right now, not
+      # only what would load at the next reload. Then the whole config tree.
+      firewall-cmd --runtime-to-permanent >/dev/null 2>&1 || { rm -f "$staged"; return 1; }
+      tar -C /etc -cf "$staged" firewalld 2>/dev/null || { rm -f "$staged"; return 1; }
       ;;
     *) ccdc_die "unsupported backend: $backend" ;;
   esac
   chmod 0600 "$staged" || { rm -f "$staged"; return 1; }
   mv -f "$staged" "$snapshot" || { rm -f "$staged"; return 1; }
+}
+
+ipt_complete_snapshot() {
+  local f=$1
+  grep -q '^\*filter' "$f" || printf '*filter\n:INPUT ACCEPT [0:0]\n:FORWARD ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n' >>"$f"
+  grep -q '^\*raw' "$f" || printf '*raw\n:PREROUTING ACCEPT [0:0]\n:OUTPUT ACCEPT [0:0]\nCOMMIT\n' >>"$f"
 }
 
 restore_snapshot() {
@@ -162,9 +215,26 @@ restore_snapshot() {
   fi
   case "$backend" in
     nft) nft -f "$snapshot" ;;
-    iptables) iptables-restore <"$snapshot" ;;
+    iptables)
+      iptables-restore <"$snapshot" || return 1
+      if [ -f "$snapshot6" ]; then ip6tables-restore <"$snapshot6" || return 1; fi
+      ;;
+    firewalld) fwd_restore "$snapshot" ;;
     *) ccdc_die "unsupported backend: $backend" ;;
   esac
+}
+
+# Put /etc/firewalld back exactly as the snapshot had it, then load it.
+fwd_restore() {
+  local tarball=$1
+  [ -f "$tarball" ] || return 1
+  rm -rf /etc/firewalld.ccdc-restore && mkdir -p /etc/firewalld.ccdc-restore \
+    && tar -C /etc/firewalld.ccdc-restore -xf "$tarball" \
+    && rm -rf /etc/firewalld \
+    && mv /etc/firewalld.ccdc-restore/firewalld /etc/firewalld \
+    && rmdir /etc/firewalld.ccdc-restore \
+    && { restorecon -R /etc/firewalld >/dev/null 2>&1 || true; } \
+    && firewall-cmd --reload >/dev/null
 }
 
 cancel_pending_rollback() {
@@ -228,7 +298,7 @@ if [ "$confirm" -eq 1 ]; then
   # Removing the snapshot disarms the rollback a second way: the scheduled
   # script exits early when the snapshot is gone, so a timer that somehow
   # survives cancellation still cannot undo rules you confirmed.
-  rm -f "$snapshot" "$rollback_script"
+  rm -f "$snapshot" "$snapshot6" "$rollback_script"
   ccdc_info "firewall rollback cancelled; current rules retained"
   exit 0
 fi
@@ -236,12 +306,73 @@ fi
 if [ "$rollback" -eq 1 ]; then
   cancel_pending_rollback
   restore_snapshot || ccdc_die "rollback failed; recover from the console"
-  rm -f "$pid_file" "$snapshot" "$rollback_script"
+  rm -f "$pid_file" "$snapshot" "$snapshot6" "$rollback_script"
   ccdc_info "firewall snapshot restored"
   exit 0
 fi
 
-if [ "$backend" = nft ]; then
+if [ "$backend" = firewalld ]; then
+  # Every zone something is bound to, plus the default zone (where an unbound
+  # interface lands). Each is reduced to exactly the allowed ports.
+  fwd_zones=$( { firewall-cmd --get-default-zone; firewall-cmd --get-active-zones 2>/dev/null | grep -v '^[[:space:]]'; } | sort -u | tr '\n' ' ')
+  rules=''
+  for z in $fwd_zones; do
+    P="firewall-cmd --permanent --zone=$z"
+    rules="$rules
+$P --set-target=default"
+    for sv in $(firewall-cmd --permanent --zone="$z" --list-services 2>/dev/null); do
+      # DHCPv6 replies: harmless, and removing it can cost the box its address.
+      [ "$sv" = dhcpv6-client ] && continue
+      rules="$rules
+$P --remove-service=$sv"
+    done
+    for pt in $(firewall-cmd --permanent --zone="$z" --list-ports 2>/dev/null); do rules="$rules
+$P --remove-port=$pt"; done
+    for pt in $(firewall-cmd --permanent --zone="$z" --list-source-ports 2>/dev/null); do rules="$rules
+$P --remove-source-port=$pt"; done
+    for fp in $(firewall-cmd --permanent --zone="$z" --list-forward-ports 2>/dev/null); do rules="$rules
+$P --remove-forward-port=$fp"; done
+    while IFS= read -r rr; do
+      [ -n "$rr" ] || continue
+      rules="$rules
+$P --remove-rich-rule='$(printf '%s' "$rr" | sed "s/'/'\\\\''/g")'"
+    done <<FWDRICH
+$(firewall-cmd --permanent --zone="$z" --list-rich-rules 2>/dev/null)
+FWDRICH
+    firewall-cmd --permanent --zone="$z" --query-masquerade >/dev/null 2>&1 && rules="$rules
+$P --remove-masquerade"
+    for port in ${CCDC_ALLOWED_TCP_PORTS:-}; do
+      if [ "$port" = 21 ] && [ "$ftp_helper" -eq 1 ]; then
+        # firewalld's ftp service carries the FTP helper, so passive data
+        # connections are admitted - port 21 on its own is not enough.
+        rules="$rules
+$P --add-service=ftp"
+      else
+        rules="$rules
+$P --add-port=$port/tcp"
+      fi
+    done
+    for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules="$rules
+$P --add-port=$port/udp"; done
+  done
+  # A source bound to an accept-everything zone (trusted) is a hole through
+  # all of the above - one IP that reaches every port. Scored services must
+  # answer every source equally, so none belongs there.
+  for z in $(firewall-cmd --permanent --get-zones 2>/dev/null); do
+    tgt=$(firewall-cmd --permanent --zone="$z" --get-target 2>/dev/null)
+    [ "$tgt" = ACCEPT ] || continue
+    for src in $(firewall-cmd --permanent --zone="$z" --list-sources 2>/dev/null); do rules="$rules
+firewall-cmd --permanent --zone=$z --remove-source=$src"; done
+    for ifc in $(firewall-cmd --permanent --zone="$z" --list-interfaces 2>/dev/null); do
+      [ "$ifc" = lo ] && continue
+      rules="$rules
+firewall-cmd --permanent --zone=$z --remove-interface=$ifc"
+    done
+  done
+  rules="${rules#
+}
+firewall-cmd --reload"
+elif [ "$backend" = nft ]; then
   rules='flush ruleset
 table inet ccdc {
   chain input { type filter hook input priority 0; policy drop;
@@ -265,6 +396,13 @@ table inet ccdc {
     meta nfproto ipv6 icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem, nd-router-solicit, nd-router-advert, nd-neighbor-solicit, nd-neighbor-advert } accept
   }
   chain forward { type filter hook forward priority 0; policy drop; }"
+  if [ "$ftp_helper" -eq 1 ]; then
+    rules="$rules
+  ct helper ftp-standard { type \"ftp\" protocol tcp; l3proto inet; }
+  chain ftp-helper { type filter hook prerouting priority 0; policy accept;
+    tcp dport 21 ct helper set \"ftp-standard\"
+  }"
+  fi
   if [ "$allow_outbound" -eq 0 ]; then
     rules="$rules
   chain output { type filter hook output priority 0; policy drop;
@@ -294,6 +432,7 @@ else
   for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules="$rules
 -A INPUT -p udp --dport $port -j ACCEPT"; done
   for source in ${CCDC_ALLOWED_SOURCES:-}; do
+    case "$source" in *:*) continue ;; esac   # IPv6 sources go to ip6tables below
     for port in ${CCDC_ALLOWED_TCP_PORTS:-}; do rules="$rules
 -A INPUT -s $source -p tcp --dport $port -j ACCEPT"; done
     for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules="$rules
@@ -306,9 +445,44 @@ else
   fi
   rules="$rules
 COMMIT"
+  # Every table named in a snapshot is also named here, so an apply replaces
+  # it whole instead of adding to what was there.
+  raw='*raw
+:PREROUTING ACCEPT [0:0]
+:OUTPUT ACCEPT [0:0]'
+  [ "$ftp_helper" -eq 1 ] && raw="$raw
+-A PREROUTING -p tcp --dport 21 -j CT --helper ftp"
+  raw="$raw
+COMMIT"
+  # IPv6: the same policy, minus the IPv4 sources, plus the ICMPv6 that IPv6
+  # cannot work without (neighbour discovery is how it finds the gateway).
+  rules6=$(printf '%s\n' "$rules" | grep -vE -- '^-A INPUT -s [0-9.]+(/[0-9]+)? ')
+  rules6=$(printf '%s\n' "$rules6" | sed '/^-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT$/a\
+-A INPUT -p ipv6-icmp --icmpv6-type destination-unreachable -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type packet-too-big -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type time-exceeded -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type parameter-problem -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type router-solicitation -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type router-advertisement -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type neighbour-solicitation -j ACCEPT\
+-A INPUT -p ipv6-icmp --icmpv6-type neighbour-advertisement -j ACCEPT')
+  for source in ${CCDC_ALLOWED_SOURCES:-}; do
+    case "$source" in *:*) ;; *) continue ;; esac
+    for port in ${CCDC_ALLOWED_TCP_PORTS:-}; do rules6=$(printf '%s\n' "$rules6" | sed "/^COMMIT$/i\\
+-A INPUT -s $source -p tcp --dport $port -j ACCEPT"); done
+    for port in ${CCDC_ALLOWED_UDP_PORTS:-}; do rules6=$(printf '%s\n' "$rules6" | sed "/^COMMIT$/i\\
+-A INPUT -s $source -p udp --dport $port -j ACCEPT"); done
+  done
+  rules="$rules
+$raw"
+  rules6="$rules6
+$raw"
 fi
 
 printf '%s\n' "$rules"
+if [ "$backend" = iptables ] && [ "$v6" -eq 1 ]; then
+  printf '\n# IPv6 (ip6tables):\n%s\n' "$rules6"
+fi
 if [ "$apply" -ne 1 ]; then
   ccdc_info "dry run only; no firewall rules changed"
   exit 0
@@ -325,6 +499,11 @@ case "$seconds" in ''|*[!0-9]*) ccdc_die "CCDC_FIREWALL_ROLLBACK_SECONDS must be
 
 validate_generated_rules() {
   case "$backend" in
+    firewalld)
+      # Each line is checked by firewall-cmd itself as it runs; the apply
+      # restores the snapshot on the first one that fails.
+      firewall-cmd --state >/dev/null 2>&1 || return 1
+      ;;
     nft)
       printf '%s\n' "$rules" | nft --check --file - >/dev/null \
         || return 1
@@ -333,12 +512,20 @@ validate_generated_rules() {
       if iptables-restore --help 2>&1 | grep -q -- '--test'; then
         printf '%s\n' "$rules" | iptables-restore --test >/dev/null \
           || return 1
+        if [ "$v6" -eq 1 ]; then
+          printf '%s\n' "$rules6" | ip6tables-restore --test >/dev/null || return 1
+        fi
       else
         ccdc_warn "iptables-restore has no --test support; relying on the armed rollback for apply-time validation"
       fi
       ;;
   esac
 }
+
+# The CT --helper ftp rule (and nft's helper object) need the helper module.
+if [ "$ftp_helper" -eq 1 ] && [ "$apply" -eq 1 ]; then
+  modprobe nf_conntrack_ftp 2>/dev/null || ccdc_warn "could not load nf_conntrack_ftp; FTP listings may fail through this firewall"
+fi
 
 # Parse-check before snapshotting or arming a timer.  The real apply can still
 # fail because the kernel state changes, so the dead-man rollback remains
@@ -356,7 +543,7 @@ cat >"$rollback_staged" <<SCRIPT
 #!/bin/sh
 # Generated by fw.sh. Restores the pre-change firewall unless --confirm ran.
 [ -f "$snapshot" ] || exit 0
-if $( [ "$backend" = nft ] && printf 'nft -f "%s"' "$snapshot" || printf 'iptables-restore <"%s"' "$snapshot" ); then
+if $( if [ "$backend" = nft ]; then printf 'nft -f "%s"' "$snapshot"; elif [ "$backend" = firewalld ]; then printf 'mkdir -p /etc/firewalld.ccdc-restore && tar -C /etc/firewalld.ccdc-restore -xf "%s" && rm -rf /etc/firewalld && mv /etc/firewalld.ccdc-restore/firewalld /etc/firewalld && rmdir /etc/firewalld.ccdc-restore && { restorecon -R /etc/firewalld >/dev/null 2>&1; firewall-cmd --reload >/dev/null; }' "$snapshot"; else printf 'iptables-restore <"%s"' "$snapshot"; [ "$v6" -eq 1 ] && printf ' && ip6tables-restore <"%s"' "$snapshot6"; fi ); then
   # Keep the snapshot until an explicit --confirm or the next safe apply. If
   # this timer raced a very slow apply, the parent still has recovery material.
   rm -f "$pid_file" "$rollback_script"
@@ -421,8 +608,26 @@ fi
 
 apply_failed=0
 case "$backend" in
+  firewalld)
+    while IFS= read -r cmd; do
+      [ -n "$cmd" ] || continue
+      if ! out=$(eval "$cmd" 2>&1); then
+        case "$out" in
+          *NOT_ENABLED*|*ALREADY_ENABLED*) ;;   # already in the wanted state
+          *) ccdc_warn "firewalld refused: $cmd -> $out"; apply_failed=1; break ;;
+        esac
+      fi
+    done <<FWDAPPLY
+$rules
+FWDAPPLY
+    ;;
   nft) printf '%s\n' "$rules" | nft -f - || apply_failed=1 ;;
-  iptables) printf '%s\n' "$rules" | iptables-restore || apply_failed=1 ;;
+  iptables)
+    printf '%s\n' "$rules" | iptables-restore || apply_failed=1
+    if [ "$apply_failed" -eq 0 ] && [ "$v6" -eq 1 ]; then
+      printf '%s\n' "$rules6" | ip6tables-restore || apply_failed=1
+    fi
+    ;;
 esac
 if [ "$apply_failed" -eq 1 ]; then
   ccdc_warn "firewall apply failed; restoring the pre-change snapshot"

@@ -399,7 +399,7 @@ protected_payload() {
 
 # Must match triage.sh's rc-file detector. Remediation captures the literal
 # matching lines and removes only exact whole-line matches.
-rc_patterns='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat|nohup |setsid |disown|&[[:space:]]*\)|&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
+rc_patterns='/dev/tcp|/dev/udp|nc -|ncat|netcat|bash -i|sh -i|curl .*\| *(ba)?sh|wget .*\| *(ba)?sh|base64 -d|python.? -c|perl -e|socat|nohup |setsid |disown|(^|[^&])&[[:space:]]*\)|(^|[^&])&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
 
 # --- what the network-facing actions all need to know -------------------------
 #
