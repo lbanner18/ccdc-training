@@ -54,6 +54,7 @@ Then the same block into Quotient's Password Change Request.
 ```powershell
 .\windows\recon.ps1
 ```
+Then take it off the box: run the `Compress-Archive` line recon prints, right-click the zip in File Explorer → **Copy**, and paste it on your laptop.
 
 **5. What is wrong right now** (read-only) — fix `scoreduser` / `scoredservice` first
 ```powershell
@@ -125,6 +126,8 @@ cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
 
 - A tool looks stuck: the title bar says **Select** — press **Esc**. Do not click inside a running window.
 - A Defender popup is a red-team sighting: **Windows Security → Protection history**, or `Get-MpThreatDetection`.
+- **64-bit PowerShell only.** Check `[Environment]::Is64BitProcess` is `True` before running anything. In 32-bit PowerShell, Defender, Get-LocalUser and Get-WindowsFeature show as "not recognized", and some of harden's registry writes land where Windows never reads them. On the lab box this looked like Defender had been removed.
+- On a domain controller every account is a domain account. Disabling one disables it everywhere in the domain.
 - Never paste a `Block 3389` or a default-deny line by hand; RDP may be how you and the scorer get in.
 - Passwords go on paper, never into chat or a file you keep.
 

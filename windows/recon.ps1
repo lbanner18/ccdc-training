@@ -265,4 +265,9 @@ if (-not $Quiet) {
     Write-Host '  This is the "before" picture. Take it off the box - evidence that lives'
     Write-Host '  only on the machine it describes is evidence somebody can edit.'
     Write-Host ''
+    $zip = Join-Path ($env:SystemDrive + '\') ((Split-Path -Leaf $dir) + '.zip')
+    Write-Host '  Quickest over RDP: zip it, then in File Explorer right-click the zip ->'
+    Write-Host '  Copy, and paste it on your own machine.'
+    Write-Host ("    Compress-Archive -LiteralPath '{0}' -DestinationPath '{1}' -Force" -f ($dir -replace "'", "''"), ($zip -replace "'", "''"))
+    Write-Host ''
 }

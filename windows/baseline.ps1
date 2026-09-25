@@ -115,7 +115,17 @@ function Get-TaskState {
             }
         } catch { }
         $key = ('{0}{1}' -f $t.TaskPath, $t.TaskName)
-        $h[$key] = 'runs={0}; state={1}' -f (($acts | Where-Object { $_ }) -join ' ; '), $t.State
+        # Ready, Running and Queued all mean "enabled and eligible to run", and a
+        # stock task flaps between them on its own as Windows schedules it - which
+        # read as CHANGED every snapshot and trained the operator to ignore task
+        # drift. Collapse them to one token. Disabled stays distinct, so an
+        # attacker turning OFF a defensive task is still caught, as is any change
+        # to what a task RUNS (the runs= field, which is the real payload).
+        $state = switch ([string]$t.State) {
+            { $_ -in 'Ready','Running','Queued' } { 'enabled'; break }
+            default { [string]$t.State }
+        }
+        $h[$key] = 'runs={0}; state={1}' -f (($acts | Where-Object { $_ }) -join ' ; '), $state
     }
     return $h
 }
