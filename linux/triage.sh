@@ -485,7 +485,10 @@ if [ "${#keyfiles[@]}" -gt 0 ]; then
     done
     detail "delete ONLY the lines you do not recognise - never truncate the file,"
     detail "your own key is probably in it. Keep this session open, then verify:"
-    fix "sudo sshd -t && ssh banneluk@\$(hostname -I | awk '{print \$1}')   # from ANOTHER terminal"
+    # The account you are logged in as, not a name from the lab this was
+    # written on: printed as "ssh banneluk@..." it was wrong on every other box.
+    login_user=${SUDO_USER:-$(id -un)}
+    fix "sudo sshd -t && ssh $login_user@\$(hostname -I | awk '{print \$1}')   # from ANOTHER terminal"
   else
     clean "no SSH authorized_keys entries"
   fi
