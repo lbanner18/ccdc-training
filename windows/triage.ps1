@@ -742,7 +742,8 @@ if (@($listeners).Count -gt 0) {
         try {
             $p = Get-Process -Id $l.OwningProcess -ErrorAction Stop
             $procName = $p.ProcessName
-            try { $procPath = $p.Path } catch { }
+            # Path is $null (not '') for protected processes, and $null -eq '' is False.
+            try { $procPath = [string]$p.Path } catch { }
         } catch { }
         if ($dcListeners.ContainsKey($port) -and $procName -eq $dcListeners[$port] -and
             ($procPath -eq '' -or ($env:SystemRoot -and $procPath -like "$env:SystemRoot\*"))) { continue }
