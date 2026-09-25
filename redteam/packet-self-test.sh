@@ -219,19 +219,24 @@ else
   no 'triage lost the pkexec SUID detection'
 fi
 
-if grep -q 'ftpanon' "$tr_" && grep -q 'anonymous_enable' "$tr_" && grep -q 'apacheindexes' "$tr_"; then
+if grep -q 'emit AMBER ftpanon' "$tr_" && grep -q 'anonymous_enable' "$tr_" && grep -q 'apacheindexes' "$tr_" &&
+   grep -q 'the listing IS the scored page' "$tr_"; then
   ok 'triage audits vsftpd for anonymous login and Apache for directory indexing'
 else
   no 'triage lost the FTP anonymous login or Apache directory indexing audit'
 fi
 
+# LDAP signing is the scoring-breaking direction: required, it refuses the plain
+# LDAP login the packet scores AD with (measured on a 2016 DC). harden.ps1 must
+# not require it unless opted in, and triage must flag it RED when it is on.
 if grep -q 'FullSecureChannelProtection' "$ROOT/windows/harden.ps1" &&
-   grep -q 'LDAPServerIntegrity' "$ROOT/windows/harden.ps1" &&
    grep -q 'ms-DS-MachineAccountQuota' "$ROOT/windows/harden.ps1" &&
+   grep -q "CCDC_ACK_LDAP_SIGNING' -Default '0') -eq '1'" "$ROOT/windows/harden.ps1" &&
+   grep -q 'LDAP signing is REQUIRED: plain LDAP logins are refused' "$ROOT/windows/triage.ps1" &&
    grep -q 'dcspooler' "$ROOT/windows/triage.ps1"; then
-  ok 'windows hardening and triage enforce DC protections (Zerologon, LDAP signing, Spooler, MachineAccountQuota)'
+  ok 'DC hardening (Zerologon, Spooler, MachineAccountQuota) never requires LDAP signing unless opted in, and triage flags it when on'
 else
-  no 'windows tools lost the Domain Controller hardening checks'
+  no 'windows tools can require LDAP signing by default again - that refuses the scored LDAP login'
 fi
 
 printf 'packet self-test: %s passed, %s failed\n' "$pass" "$fail"

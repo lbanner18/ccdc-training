@@ -721,15 +721,20 @@ Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' |
 
 ### Domain Controller hardening (`dczerologon`, `dcldapsign`, `dcmachinequota`)
 
-On a Domain Controller, additional protections stop NTLM relaying, Zerologon, and rogue computer additions:
+On a Domain Controller, these stop Zerologon and rogue computer additions - and one of them (LDAP signing) must stay OFF while AD is scored by LDAP login:
 
 ```powershell
 # Enforce secure Netlogon channel (Zerologon CVE-2020-1472):
 Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\Netlogon\Parameters' -Name FullSecureChannelProtection -Value 1 -Type DWord
 
-# Enforce LDAP server signing and channel binding (stops NTLM relay attacks against LDAP):
-Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name LDAPServerIntegrity -Value 2 -Type DWord
-Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name LdapEnforceChannelBinding -Value 2 -Type DWord
+# LDAP signing: do NOT require it during the competition. Requiring it
+# (LDAPServerIntegrity=2) makes the DC refuse every plain LDAP login outside
+# TLS - and the packet scores AD with "an LDAP login using a valid username and
+# password". Measured on a 2016 DC: ldapwhoami -x failed "Strong(er)
+# authentication required (8)" until it was set back to 1. If triage reports
+# dcldapsign RED, put it back:
+Set-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name LDAPServerIntegrity -Value 1 -Type DWord
+Remove-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name LdapEnforceChannelBinding -ErrorAction SilentlyContinue
 
 # Set Active Directory MachineAccountQuota to 0 (stops standard users creating machine accounts / RBCD attacks):
 $d = [ADSI]("LDAP://" + ([ADSI]"LDAP://RootDSE").defaultNamingContext)

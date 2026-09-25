@@ -536,18 +536,26 @@ if ($steps -contains 'RemoteAccess') {
             } 'CARD W10'
         }
 
+        # NOT by default: requiring LDAP signing makes the DC refuse every plain
+        # (simple) LDAP bind that is not inside TLS - and the packet scores AD with
+        # "an LDAP login using a valid username and password". Measured on a 2016
+        # DC: with LDAPServerIntegrity=2, `ldapwhoami -x` as a scored user failed
+        # "Strong(er) authentication required (8)"; set back to 1, it succeeded at
+        # once. That is the AD service off the scoreboard for the rest of the day.
+        # Opt in only when the packet says the scorer binds over LDAPS or signs.
         $ntdsParams = 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'
-        if (Test-Path -LiteralPath $ntdsParams) {
-            Do-Change 'require LDAP server signing and channel binding (prevents NTLM relay attacks)' {
-                Set-ItemProperty -Path $ntdsParams -Name 'LDAPServerIntegrity' -Value 2 -Type DWord
-                Set-ItemProperty -Path $ntdsParams -Name 'LdapEnforceChannelBinding' -Value 2 -Type DWord
-            } 'CARD W10'
+        if ((Get-CcdcValue -Config $cfg -Name 'CCDC_ACK_LDAP_SIGNING' -Default '0') -eq '1') {
+            if (Test-Path -LiteralPath $ntdsParams) {
+                Do-Change 'require LDAP server signing and channel binding (CCDC_ACK_LDAP_SIGNING=1)' {
+                    Set-ItemProperty -Path $ntdsParams -Name 'LDAPServerIntegrity' -Value 2 -Type DWord
+                    Set-ItemProperty -Path $ntdsParams -Name 'LdapEnforceChannelBinding' -Value 2 -Type DWord
+                } 'CARD W10'
+            }
+        } else {
+            Note 'LDAP signing is left as Windows negotiates it. REQUIRING it rejects plain LDAP logins,'
+            Note 'which is very likely how the scorer checks AD. Set CCDC_ACK_LDAP_SIGNING="1" only if'
+            Note 'the packet says the scorer uses LDAPS or signed binds.'
         }
-        $ldapClientParams = 'HKLM:\SYSTEM\CurrentControlSet\Services\ldap'
-        if (-not (Test-Path -LiteralPath $ldapClientParams)) { New-Item -Path $ldapClientParams -Force | Out-Null }
-        Do-Change 'require LDAP client signing' {
-            Set-ItemProperty -Path $ldapClientParams -Name 'LDAPClientIntegrity' -Value 2 -Type DWord
-        } 'CARD W10'
 
         # Active Directory MachineAccountQuota: default 10 allows unprivileged domain users to join computers
         try {

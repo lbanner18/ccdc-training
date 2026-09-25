@@ -1155,11 +1155,13 @@ if ($usersTxtNow -match '\$isDc = Test-CcdcIsDomainController' -and $usersTxtNow
 } else { nope 'users.ps1 stops at a domain controller again' }
 
 $hdnNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\harden.ps1'))
-if ($hdnNow -match 'FullSecureChannelProtection' -and $hdnNow -match 'LDAPServerIntegrity' -and
-    $hdnNow -match 'ms-DS-MachineAccountQuota' -and $triNow -match "Check 'dcspooler'" -and
-    $triNow -match "Check 'dczerologon'" -and $triNow -match "Check 'dcldapsign'") {
-    ok 'harden.ps1 and triage.ps1 enforce DC protections (Zerologon, LDAP signing, Spooler, MachineAccountQuota)'
-} else { nope 'windows tools lost Domain Controller hardening checks' }
+$ldapGate = [regex]::Match($hdnNow, "(?s)CCDC_ACK_LDAP_SIGNING.{0,400}LDAPServerIntegrity' -Value 2").Success
+$ldapUngated = [regex]::Matches($hdnNow, "LDAPServerIntegrity' -Value 2").Count -eq 1
+if ($hdnNow -match 'FullSecureChannelProtection' -and $hdnNow -match 'ms-DS-MachineAccountQuota' -and
+    $ldapGate -and $ldapUngated -and $triNow -match "Check 'dcspooler'" -and
+    $triNow -match "Check 'dczerologon'" -and $triNow -match "Severity 'RED' -Check 'dcldapsign'") {
+    ok 'DC hardening never requires LDAP signing unless opted in (it refuses the scored LDAP login); triage flags it RED'
+} else { nope 'LDAP signing can be required by default again, or triage no longer flags it' }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ''

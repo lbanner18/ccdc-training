@@ -1339,16 +1339,30 @@ if ($isDcBox) {
     } else { Clean 'Netlogon FullSecureChannelProtection is enforced' }
 
     Begin-Check 'dcldapsign'
+    # The scoring-breaking direction is the one to report. The packet scores AD
+    # with "an LDAP login using a valid username and password"; a DC that
+    # REQUIRES signing refuses every plain LDAP bind outside TLS. Measured on a
+    # 2016 DC: LDAPServerIntegrity=2 made `ldapwhoami -x` fail "Strong(er)
+    # authentication required (8)"; back at 1 it worked at once. An earlier
+    # version of this check told you to SET 2 - an AMBER that took AD down.
     $ldapsign = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name 'LDAPServerIntegrity'
-    if ($null -eq $ldapsign -or [int]$ldapsign -ne 2) {
-        Report -Severity 'AMBER' -Check 'dcldapsign' -Subject 'LDAPServerIntegrity' `
-            -Description 'LDAP server signing is not enforced (vulnerable to NTLM relay attacks against LDAP)' `
-            -Detail @('LDAPServerIntegrity must be 2 to require signing for all incoming LDAP binds.',
-                      'Without signing, coerced NTLM authentication can be relayed to modify Active Directory objects.') `
-            -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name ''LDAPServerIntegrity'' -Value 2 -Type DWord',
-                   'Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name ''LdapEnforceChannelBinding'' -Value 2 -Type DWord') `
+    $ldapcbt  = Get-RegValue -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters' -Name 'LdapEnforceChannelBinding'
+    if ($null -ne $ldapsign -and [int]$ldapsign -ge 2) {
+        Report -Severity 'RED' -Check 'dcldapsign' -Subject 'LDAPServerIntegrity' `
+            -Description 'LDAP signing is REQUIRED: plain LDAP logins are refused, and that is very likely how AD is scored' `
+            -Detail @('With LDAPServerIntegrity=2 the DC rejects every simple bind that is not inside TLS.',
+                      'Unless the packet says the scorer uses LDAPS or signed binds, put it back to negotiate (1).',
+                      'Somebody set this - you, a hardening script, or the red team denying your AD points.') `
+            -Fix @('Set-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name LDAPServerIntegrity -Value 1 -Type DWord',
+                   'Remove-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name LdapEnforceChannelBinding -ErrorAction SilentlyContinue',
+                   '# takes effect at once; check with an LDAP login as a scored account') `
             -Card 'CARD W10'
-    } else { Clean 'LDAP server signing is enforced' }
+    } elseif ($null -ne $ldapcbt -and [int]$ldapcbt -ge 2) {
+        Report -Severity 'AMBER' -Check 'dcldapcbt' -Subject 'LdapEnforceChannelBinding' `
+            -Description 'LDAP channel binding is ALWAYS enforced: LDAPS logins from clients without channel binding are refused' `
+            -Fix @('Remove-ItemProperty -Path ''HKLM:\SYSTEM\CurrentControlSet\Services\NTDS\Parameters'' -Name LdapEnforceChannelBinding') `
+            -Card 'CARD W10'
+    } else { Clean 'LDAP signing is negotiated, not required - plain LDAP logins (the likely AD score check) are accepted' }
 
     Begin-Check 'dcmachinequota'
     try {

@@ -1119,7 +1119,9 @@ held_reason() {
     ftpanon)
       printf '\n       FTP allows ANONYMOUS login without credentials.\n\n'
       printf '       This lets anyone read and potentially upload files without authentication.\n\n'
-      printf '       Disable anonymous access in the FTP daemon configuration:\n\n'
+      printf '       FTP is SCORED. Check Quotient first: if its FTP check logs in as\n'
+      printf '       anonymous, turning this off is the outage - leave it on.\n\n'
+      printf '       Otherwise, disable anonymous access in the FTP daemon configuration:\n\n'
       printf '         sudo sed -i "s/^[#[:space:]]*anonymous_enable=.*/anonymous_enable=NO/" /etc/vsftpd.conf\n'
       printf '         sudo systemctl restart vsftpd || sudo systemctl restart pure-ftpd\n\n'
       return 0 ;;

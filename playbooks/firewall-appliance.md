@@ -45,45 +45,65 @@ and the handful of commands per vendor that the order needs.
 | show config | `show configuration commands` | Diagnostics → Backup & Restore → download | System → Configuration → Backups → download | `show running-config` | Device → Setup → Operations → Export |
 | make it stick | `save` (commit alone is lost on reboot) | automatic on Save/Apply | automatic on Apply | `copy running-config startup-config` | **Commit** (nothing applies until you do) |
 
-### VyOS (CLI)
+### VyOS (CLI) - the tryout's "bedrock"
+
+Your job on the router is **access and visibility, not filtering.** The router
+does 1:1 NAT for every scored service, the Splunk forwarders send through it to
+the Black Team's indexer (which you may not block), and the boxes resolve DNS
+through it. One wrong filter here takes every service off the scoreboard at
+once - so harden the HOSTS (fw.sh / harden.ps1) and use the router to see.
+
+**1. The password - first, because the red team has the packet.** Paste the
+first two lines, then `commit` on its own:
 
 ```
 configure
 set system login user vyos authentication plaintext-password 'NEW-PASSWORD'
-commit-confirm 10          # reverts by itself in 10 minutes unless you...
-confirm                    # ...confirm from a NEW session that still works
+commit
 save
-show configuration commands | match firewall     # read the rules
-set system syslog host SPLUNK-IP facility all level info
+exit
 ```
 
-The `commit-confirm` / `confirm` pair works like `linux/fw.sh --apply` /
-`--confirm`: a change that locks you out undoes itself. Use it for every change.
+**2. Read what is there** (operational mode - changes nothing):
 
-#### VyOS 1.4+ / 2025.11 (Circinus) Syntax
-VyOS 1.4 and newer (including 2025.11) changed to nftables-backed firewall syntax:
 ```
-# Management restriction: bind SSH only to your inside/trusted IP
-set service ssh listen-address 'INSIDE-ROUTER-IP'
-delete service https                             # disable web API if present
-
-# Global forward filtering (1.4+):
-set firewall ipv4 forward filter default-action drop
-set firewall ipv4 forward filter rule 10 action accept
-set firewall ipv4 forward filter rule 10 state established enable
-set firewall ipv4 forward filter rule 10 state related enable
-
-# Allow scored services to inside servers (e.g. TCP 80, 22, 21, 110, 389)
-set firewall ipv4 forward filter rule 20 action accept
-set firewall ipv4 forward filter rule 20 destination address 'TARGET-SERVER-IP'
-set firewall ipv4 forward filter rule 20 destination port '80,22,21,110'
-set firewall ipv4 forward filter rule 20 protocol tcp
-
-commit-confirm 10
-confirm
-save
+show configuration commands | match "nat|firewall|service|login"
+show nat destination rules          # the 1:1 NAT that makes you scorable
+show nat source rules
+show firewall                       # anything filtering right now
+show system commit                  # EVERY commit, with who and when
+show interfaces
 ```
-*(On legacy VyOS 1.3, use `set firewall name WAN-IN default-action drop` and `set interfaces ethernet eth0 firewall in name WAN-IN`).*
+
+`show system commit` is the one to come back to: a red-team change to the
+router is a new commit you did not make. See what it changed with
+`show system commit diff N` (or, in `configure` mode, `compare N`).
+
+**3. If you must change something, use commit-confirm - and do NOT paste
+`confirm` with it.** It reverts by itself unless you confirm, which is the
+whole point:
+
+```
+configure
+... your one change ...
+commit-confirm 5
+```
+
+Then check from OFF the box (Quotient, and your laptop over the VPN) that
+the scored services still answer. Only then, in the same session: `confirm`
+and `save`. If anything broke, do nothing - it reverts in 5 minutes.
+
+**Do NOT, on the day:**
+
+- **set a default-drop forward filter** (`set firewall ipv4 forward filter
+  default-action drop`). It blocks every connection the boxes make OUT -
+  DNS, updates, and the Splunk forwarding the rules say you must not disable -
+  plus every scored port you did not list (DNS is UDP 53). The host firewalls
+  already close what is not scored.
+- **move SSH to one listen address** (`set service ssh listen-address`): if
+  you reach the router on the other side, that is you locked out, with only
+  the Proxmox console (no paste) left.
+- **filter by source address** anywhere: rule 4 forbids blocking IPs.
 
 ### pfSense / OPNsense (web UI)
 

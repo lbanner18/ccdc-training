@@ -2093,10 +2093,13 @@ if ccdc_list_contains "21" "${CCDC_ALLOWED_TCP_PORTS:-}" || { ccdc_have ss && ss
     fi
   done
   if [ -n "$ftp_anon" ]; then
-    red "FTP server allows ANONYMOUS login   [CARD 8]"
+    # AMBER, not RED: FTP is SCORED. The packet says a user logs in, but if
+    # Quotient's FTP check turns out to be anonymous, this "fix" is the outage.
+    amber "FTP server allows ANONYMOUS login   [CARD 8]"
     detail "anonymous_enable=YES is active in $ftp_anon"
     detail "anyone on the network can access the FTP server without credentials"
-    emit RED ftpanon "anonymous_enable" "FTP server allows anonymous login"
+    detail "FIRST check Quotient: if its FTP check logs in as anonymous, leave this ON"
+    emit AMBER ftpanon "anonymous_enable" "FTP server allows anonymous login"
     fixhdr
     fix "sudo sed -i 's/^[#[:space:]]*anonymous_enable=.*/anonymous_enable=NO/' $ftp_anon"
     fix "sudo systemctl restart vsftpd || sudo systemctl restart pure-ftpd"
@@ -2121,8 +2124,10 @@ if ccdc_list_contains "80" "${CCDC_ALLOWED_TCP_PORTS:-}" || ccdc_list_contains "
     detail "browsing directories without index.html reveals full file listings to attackers"
     emit AMBER apacheindexes "indexes" "Apache directory indexing is enabled"
     fixhdr
+    fix "curl -s http://127.0.0.1/ | head -5      # BEFORE: if this is a file LIST, the listing IS the scored page - stop here"
     fix "sudo sed -i 's/Options Indexes FollowSymLinks/Options FollowSymLinks/' $apache_indexes"
     fix "sudo apache2ctl configtest && sudo systemctl reload apache2 || sudo systemctl reload httpd"
+    fix "curl -s -o /dev/null -w '%{http_code}\\n' http://127.0.0.1/   # AFTER: must still be 200, not 403"
   else
     clean "Apache directory indexing (Indexes) is not enabled in main config"
   fi

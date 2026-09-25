@@ -86,7 +86,10 @@ case "${1:-}" in
       /^[[:space:]]*[Mm]atch[[:space:]]/ { inmatch=1; next }
       inmatch { next }
       { key=tolower($1); $1=""; sub(/^ /,""); if (!(key in value)) { value[key]=$0 } }
-      END { for (k in value) printf "%s %s\n", k, value[k] }
+      END { for (k in value) {
+              # Like the real one: an allow/deny list prints one line per name.
+              if (k ~ /^(allowusers|denyusers|allowgroups|denygroups)$/) { n = split(value[k], a, " "); for (i = 1; i <= n; i++) printf "%s %s\n", k, a[i] }
+              else printf "%s %s\n", k, value[k] } }
     '
     exit 0
     ;;
@@ -373,6 +376,18 @@ rc=0
 [ "$rc" -eq 0 ] \
   && ok 'valid SSH values containing spaces and hyphens pass validation' \
   || { no 'valid SSH values were rejected'; sed 's/^/    /' "$test_root/valid-values.out" | head -20; }
+
+# The postcondition check compares what sshd -T reports with what was asked
+# for. sshd prints AllowUsers one line per name, so a first-line comparison
+# failed every multi-user list and aborted a correct apply.
+base_env
+printf 'CCDC_SSH_ALLOW_USERS="root operator"\n' >>"$cfg"
+rc=0
+"$sshd_sh" --config "$cfg" --apply >"$test_root/allowusers.out" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && ! grep -qi 'not the effective policy' "$test_root/allowusers.out" \
+  && ok 'a multi-user AllowUsers list applies (compared as a set, not as its first line)' \
+  || { no 'a correct multi-user AllowUsers list was aborted'; sed 's/^/    /' "$test_root/allowusers.out" | tail -8; }
+"$sshd_sh" --config "$cfg" --rollback >/dev/null 2>&1
 
 # ------------------------------------------- a --confirm with nothing pending
 # After an --apply that refused, this printed "rollback cancelled; the new

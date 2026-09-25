@@ -956,7 +956,15 @@ effective_policy_mismatches() {
     name=$1; key=$2; shift 2
     eval "want=\${$name:-}"
     [ -n "$want" ] || continue
-    actual=$(effective_value "$key")
+    case "$key" in
+      allowusers)
+        # sshd -T prints one line PER NAME ("allowusers steve", "allowusers
+        # alex"). Compared as a first line, "steve alex" never matched and the
+        # apply aborted on a correct config. Compare the sets.
+        actual=$(printf '%s\n' "$EFFECTIVE" | awk 'tolower($1) == "allowusers" { for (i = 2; i <= NF; i++) print $i }' | sort -u | tr '\n' ' ' | sed 's/ $//')
+        want=$(printf '%s\n' $want | sort -u | tr '\n' ' ' | sed 's/ $//') ;;
+      *) actual=$(effective_value "$key") ;;
+    esac
     [ "$actual" = "$want" ] || printf '%s|%s|%s\n' "$key" "$want" "${actual:-<missing>}"
   done
 }
