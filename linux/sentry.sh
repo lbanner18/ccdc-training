@@ -1464,7 +1464,7 @@ brief_fix() {
 # thing, keeps a copy in the evidence directory, and needs no editor.
 kit_owned_path() {
   case "$(basename -- "$1")" in
-    "${CCDC_SENTRY_NAME:-node-observer}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*|99-ccdc-hardening.conf) return 0 ;;
+    "${CCDC_SENTRY_NAME:-node-observer}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*|00-ccdc-hardening.conf|99-ccdc-hardening.conf) return 0 ;;
   esac
   grep -q '^# Managed by ccdc' -- "$1" 2>/dev/null
 }
@@ -2715,6 +2715,17 @@ do_install() {
   } >"$tmp" || ccdc_die "cannot stage $unit_path"
   install -m 0644 "$tmp" "$unit_path" || ccdc_die "cannot install $unit_path"
   rm -f -- "$tmp"
+  # `cp -a` deliberately preserves the source tree's metadata, but on an
+  # SELinux host that also preserves its home-directory label. A copy made
+  # from ~/ccdc-training then remains user_home_t under /usr/local/lib, and
+  # systemd cannot execute it (status=203/EXEC). `install` can likewise retain
+  # a bad label on an existing unit inode. Apply the destinations' declared
+  # policy after every install/upgrade; restorecon is absent on non-SELinux
+  # systems, where there is nothing to repair.
+  if ccdc_have restorecon; then
+    restorecon -RF "$install_dir" "$unit_path" >/dev/null 2>&1 \
+      || ccdc_die "could not restore SELinux labels for the sentry installation"
+  fi
   systemctl daemon-reload || ccdc_die "systemd daemon-reload failed"
   systemctl enable "$unit_name" || ccdc_die "could not enable $unit_name"
   # `enable --now` starts an inactive unit but leaves an active one executing

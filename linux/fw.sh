@@ -191,9 +191,8 @@ take_snapshot() {
       fi
       ;;
     firewalld)
-      # Runtime first, so the snapshot is what is filtering right now, not
-      # only what would load at the next reload. Then the whole config tree.
-      firewall-cmd --runtime-to-permanent >/dev/null 2>&1 || { rm -f "$staged"; return 1; }
+      # Archive the existing configuration tree directly without mutating the
+      # live state before the snapshot is secured.
       tar -C /etc -cf "$staged" firewalld 2>/dev/null || { rm -f "$staged"; return 1; }
       ;;
     *) ccdc_die "unsupported backend: $backend" ;;

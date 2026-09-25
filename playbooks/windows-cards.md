@@ -91,6 +91,13 @@ changed:
 .\windows\users.ps1 -Config CONFIG -RotateAll -Apply
 ```
 
+**For scored accounts (Quotient Password Change Request):**
+The packet's default password is known to the red team. Generate one PCR block on your operator box (`./linux/passwords.sh --generate`), submit it to Quotient, and apply the exact same block here:
+```powershell
+.\windows\passwords.ps1 -Apply
+```
+Paste the block, then press Enter on an empty line. On a Domain Controller, this uses `Set-ADAccountPassword` and verifies each account via LDAP; on a standalone server, it changes local accounts and verifies local logon. Add `-Kick` to terminate stale logon sessions.
+
 ### Make a second way in, before you need it
 
 The training said this outright: *"Create a backup admin user and give them

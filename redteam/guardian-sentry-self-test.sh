@@ -124,6 +124,13 @@ esac
 SYSTEMCTL
 chmod 0755 "$test_root/bin/systemctl"
 
+cat >"$test_root/bin/restorecon" <<'RESTORECON'
+#!/usr/bin/env bash
+set -u
+printf '%s\n' "$*" >>"${CCDC_TEST_ROOT:?}/restorecon.log"
+RESTORECON
+chmod 0755 "$test_root/bin/restorecon"
+
 cat >"$test_root/runner.sh" <<'RUNNER'
 #!/usr/bin/env bash
 set -u
@@ -157,6 +164,11 @@ if grep -Fq 'ExecStart=/usr/local/lib/ccdc-sentry/observer ' "$test_root/systemd
   ok 'sentry install uses its configured neutral runtime entrypoint'
 else
   bad 'sentry install left sentry.sh as its runtime process name'
+fi
+if grep -Fxq -- '-RF /usr/local/lib/ccdc-sentry /etc/systemd/system/ccdc-sentry.service' "$test_root/restorecon.log"; then
+  ok 'sentry install restores SELinux labels on its copied tree and unit'
+else
+  bad 'sentry install did not restore SELinux labels on its tree and unit'
 fi
 
 if "$guardian" --config "$config" --install --apply >/dev/null; then

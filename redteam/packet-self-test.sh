@@ -108,10 +108,11 @@ else
   no 'fw.sh (iptables) no longer manages IPv6 - Ubuntu 18.04 has no nft, so it would refuse there again'
 fi
 if grep -q 'backend=firewalld' "$ROOT/linux/fw.sh" && grep -q -- '--add-service=ftp' "$ROOT/linux/fw.sh" &&
-   grep -q 'fwd_restore' "$ROOT/linux/fw.sh" && grep -q -- '--remove-rich-rule' "$ROOT/linux/fw.sh"; then
-  ok 'fw.sh configures a running firewalld (Rocky) instead of laying raw rules over it'
+   grep -q 'fwd_restore' "$ROOT/linux/fw.sh" && grep -q -- '--remove-rich-rule' "$ROOT/linux/fw.sh" &&
+   ! grep -q -- '--runtime-to-permanent' "$ROOT/linux/fw.sh"; then
+  ok 'fw.sh configures a running firewalld (Rocky) and snapshots without mutating live state'
 else
-  no 'fw.sh lost its firewalld backend'
+  no 'fw.sh lost its firewalld backend or mutates state during snapshot'
 fi
 
 # --- triage: the replica's false alarms -----------------------------------------

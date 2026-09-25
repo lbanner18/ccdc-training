@@ -64,7 +64,13 @@ Ctrl+F each of these and fill it in from the packet, then Ctrl+S:
 net user Administrator *
 ```
 
-**8. Down to 0 RED**
+**8. Rotate scored accounts with the Quotient block** (stops red team from logging into packet accounts)
+```powershell
+.\windows\passwords.ps1 -Apply
+```
+Paste the Quotient `user,password` block (from `passwords.sh --generate`), then press Enter on an empty line. On a Domain Controller (like `lapis`), this updates Active Directory and verifies each via LDAP bind.
+
+**9. Down to 0 RED**
 ```powershell
 .\windows\triage.ps1
 .\windows\sentry.ps1 -Status
@@ -72,17 +78,17 @@ net user Administrator *
 ```
 Then each LOOK item you have read: `.\windows\sentry.ps1 -Approve N -Apply` (N from `-Status`).
 
-**9. Canaries and the self-repairing tasks**
+**10. Canaries and the self-repairing tasks**
 ```powershell
 .\windows\arm.ps1 -Apply
 ```
 
-**10. Freeze the clean box**
+**11. Freeze the clean box**
 ```powershell
 .\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply
 ```
 
-**11. In a SECOND elevated window — the lookout**
+**12. In a SECOND elevated window — the lookout**
 ```powershell
 cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
 .\windows\sentry.ps1 -Watch
@@ -295,8 +301,12 @@ Then rotate everything that is not scored:
 > **It skips scored accounts on purpose.** On many setups the scoring engine
 > logs in as those accounts using a password from the packet. Changing it takes
 > the check down. If the packet says to change them — it often does, with a form
-> to submit the new password on — add `-IncludeScoredUsers` and do it
-> deliberately.
+> to submit the new password on — use `passwords.ps1` with your PCR block:
+
+```powershell
+.\windows\passwords.ps1 -Apply
+```
+Paste the same `user,password` block you submitted to Quotient, then press Enter on an empty line. On a Domain Controller (like `lapis`), this resets AD passwords and tests each via LDAP. Add `-Kick` to terminate stale logon sessions.
 
 **Write the passwords on paper.** The tool saves them to
 `C:\ProgramData\CCDC\state\passwords-*.txt`, which is a file on the box

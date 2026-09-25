@@ -36,8 +36,8 @@ cp -- "$ROOT/linux/lib/common.sh" "$test_root/suite/lib/common.sh"
 chmod 0755 "$test_root/suite/sshd.sh"
 
 # A fake sshd whose -T output is assembled from the config files it is given,
-# the way the real one resolves Includes. Enough to test precedence: the LAST
-# value wins, which is what makes a drop-in override invisible in the main file.
+# the way the real one resolves Includes. Enough to test precedence: the FIRST
+# value wins, which is why a later managed drop-in can parse but do nothing.
 cat >"$test_root/bin/sshd" <<'FAKE'
 #!/bin/bash
 main=${FAKE_SSHD_CONFIG:?}
@@ -61,22 +61,31 @@ case "${1:-}" in
     exit 0
     ;;
   -T)
+    # Real sshd reads the main file top to bottom, splices each Include'd file
+    # in where the Include line is, and keeps the FIRST value it sees for a
+    # keyword; the compiled-in defaults only fill what nothing set. The first
+    # version of this fake let the LAST value win, which hid a real bug: the
+    # kit's 99-named drop-in lost to a distribution's 50-named one.
     {
-      printf 'permitrootlogin no\n'
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          [Ii]nclude[[:space:]]*) for f in $(ls "$dropins"/*.conf 2>/dev/null | sort); do cat "$f"; done ;;
+          *) printf '%s\n' "$line" ;;
+        esac
+      done <"$main"
+      printf 'permitrootlogin prohibit-password\n'
       printf 'passwordauthentication yes\n'
       printf 'permitemptypasswords no\n'
       printf 'permituserenvironment no\n'
       printf 'maxauthtries 6\n'
       printf 'x11forwarding no\n'
       printf 'authorizedkeysfile .ssh/authorized_keys\n'
-      cat "$main" 2>/dev/null
-      cat "$dropins"/*.conf 2>/dev/null
     } | awk '
       /^[[:space:]]*#/ { next }
       /^[[:space:]]*$/ { next }
       /^[[:space:]]*[Mm]atch[[:space:]]/ { inmatch=1; next }
       inmatch { next }
-      { key=tolower($1); $1=""; sub(/^ /,""); value[key]=$0; order[key]=1 }
+      { key=tolower($1); $1=""; sub(/^ /,""); if (!(key in value)) { value[key]=$0 } }
       END { for (k in value) printf "%s %s\n", k, value[k] }
     '
     exit 0
@@ -271,7 +280,7 @@ rc=0
                 || no 'a certain lockout was allowed'
 has 'refusing' "$test_root/lockout.out" 'the refusal says so plainly'
 has 'ssh-copy-id' "$test_root/lockout.out" 'and says how to make it safe'
-if [ -f "$dropins/99-ccdc-hardening.conf" ]; then
+if [ -f "$dropins/00-ccdc-hardening.conf" ]; then
   no 'the refused apply wrote a drop-in anyway'
 else
   ok 'the refused apply changed nothing'
@@ -288,7 +297,7 @@ rc=0
 # ------------------------------------------------------- the transaction
 # The apply above is still pending. Everything below is about the undo, which
 # is the only reason this tool is safe to run on a box you are logged into.
-managed="$dropins/99-ccdc-hardening.conf"
+managed="$dropins/00-ccdc-hardening.conf"
 [ -f "$managed" ] && ok 'apply wrote its managed drop-in' || no 'no managed drop-in was written'
 grep -q 'PasswordAuthentication no' "$managed" 2>/dev/null \
   && ok 'the drop-in contains the configured policy' \
@@ -353,6 +362,18 @@ rc=0
 grep -qi 'was NOT changed' "$test_root/invalid.out" \
   && ok 'and it says the config was not changed' || no 'the abort message is unclear'
 
+# Spaces and hyphens are both valid in values this tool explicitly supports.
+# The old shell character class rejected AllowUsers lists and even the
+# documented PermitRootLogin values prohibit-password/forced-commands-only.
+base_env
+printf 'CCDC_SSH_PERMIT_ROOT_LOGIN="prohibit-password"\n' >>"$cfg"
+printf 'CCDC_SSH_ALLOW_USERS="operator backup-user"\n' >>"$cfg"
+rc=0
+"$sshd_sh" --config "$cfg" --dry-run >"$test_root/valid-values.out" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] \
+  && ok 'valid SSH values containing spaces and hyphens pass validation' \
+  || { no 'valid SSH values were rejected'; sed 's/^/    /' "$test_root/valid-values.out" | head -20; }
+
 # ------------------------------------------- a --confirm with nothing pending
 # After an --apply that refused, this printed "rollback cancelled; the new
 # configuration is kept" while SSH was exactly as before (18.04 replica).
@@ -361,6 +382,55 @@ rc=0
 [ "$rc" -ne 0 ] && grep -qi 'nothing to confirm' "$test_root/confirm-none.out" \
   && ok '--confirm with nothing pending says so instead of claiming a kept change' \
   || no '--confirm claimed success with nothing applied'
+
+# ------------------------------------------- a distribution drop-in that sorts early
+# Rocky ships 50-redhat.conf with X11Forwarding yes. sshd keeps the FIRST value
+# it reads, so a 99-named kit drop-in lost that keyword after a "confirmed"
+# apply (measured on the Rocky replica). The kit's file must be read first.
+base_env
+printf 'CCDC_SSH_X11_FORWARDING="no"\n' >>"$cfg"
+printf 'X11Forwarding yes\n' >"$dropins/50-distro.conf"
+"$sshd_sh" --config "$cfg" --apply >"$test_root/order.out" 2>&1
+sshd -T 2>/dev/null | grep -qx 'x11forwarding no' \
+  && ok "the kit's drop-in wins over a distribution drop-in that sorts after 00-" \
+  || { no 'a distribution drop-in still overrides the policy'; ls "$dropins"; }
+"$sshd_sh" --config "$cfg" --rollback >/dev/null 2>&1
+rm -f "$dropins/50-distro.conf"
+
+# No managed filename can sort before every hostile filename. A pre-existing
+# 00-aaa file beats 00-ccdc, so apply must prove its configured value took
+# effect and restore the snapshot instead of inviting a false --confirm.
+base_env
+printf 'CCDC_SSH_X11_FORWARDING="no"\n' >>"$cfg"
+printf 'X11Forwarding yes\n' >"$dropins/00-aaa.conf"
+rc=0
+"$sshd_sh" --config "$cfg" --apply >"$test_root/precedence.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] \
+  && ok 'apply refuses a valid managed file that loses effective precedence' \
+  || no 'apply claimed success although an earlier drop-in won'
+[ ! -f "$managed" ] && [ -f "$dropins/00-aaa.conf" ] \
+  && ok 'the precedence failure restores the exact pre-change drop-in set' \
+  || no 'the precedence failure did not restore the drop-ins'
+has 'overrode the staged policy' "$test_root/precedence.out" \
+  'the precedence refusal explains why the valid file was rejected'
+rm -f "$dropins/00-aaa.conf"
+
+# Upgrading from the old 99- filename is one transaction: 00- lands first,
+# only our marked legacy file is removed, and rollback reconstructs the exact
+# old directory rather than losing the policy during migration.
+base_env
+printf 'CCDC_SSH_X11_FORWARDING="no"\n' >>"$cfg"
+legacy="$dropins/99-ccdc-hardening.conf"
+printf '# Managed by ccdc sshd.sh. Written with a timed rollback armed.\nX11Forwarding yes\n' >"$legacy"
+"$sshd_sh" --config "$cfg" --apply >"$test_root/migrate.out" 2>&1
+[ -f "$managed" ] && [ ! -e "$legacy" ] \
+  && ok 'migration installs 00- before removing the marked legacy 99- file' \
+  || no 'migration left the managed drop-ins in the wrong state'
+"$sshd_sh" --config "$cfg" --rollback >/dev/null 2>&1
+[ ! -e "$managed" ] && grep -q '^X11Forwarding yes$' "$legacy" \
+  && ok 'migration rollback restores the exact legacy policy and removes 00-' \
+  || no 'migration rollback lost or changed the legacy policy'
+rm -f "$legacy"
 
 # ------------------------------------------- a box whose main config has no Include
 # A drop-in there changes nothing, so the Include goes in as part of the same

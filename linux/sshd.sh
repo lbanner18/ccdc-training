@@ -147,7 +147,14 @@ validate_ssh_path() {
 validate_ssh_path "$sshd_config_file" "CCDC_SSHD_CONFIG"
 validate_ssh_path "$dropin_dir" "CCDC_SSHD_DROPIN_DIR"
 
-dropin_file="$dropin_dir/99-ccdc-hardening.conf"
+# 00-, so it is read before normal distribution drop-ins: sshd keeps the first
+# value it sees for a keyword, and drop-ins are read in name order. As
+# 99-ccdc-hardening.conf it lost every keyword Rocky's 50-redhat.conf also set;
+# X11Forwarding stayed yes after a "confirmed" apply. No filename can outrank
+# every possible hostile filename, so do_apply also verifies every configured
+# value against sshd -T and restores the snapshot if this file did not win.
+dropin_file="$dropin_dir/00-ccdc-hardening.conf"
+legacy_dropin_file="$dropin_dir/99-ccdc-hardening.conf"
 rollback_seconds=${CCDC_SSH_ROLLBACK_SECONDS:-120}
 case "$rollback_seconds" in
   ''|*[!0-9]*) ccdc_die "CCDC_SSH_ROLLBACK_SECONDS must be a whole number: $rollback_seconds" ;;
@@ -531,7 +538,7 @@ do_audit() {
           # A drop-in that opens the door is RED on its own, even when a file
           # that sorts earlier wins today: deleting that one - ours, say -
           # hands the login straight back. Live run: 99-rt-tuning.conf set
-          # PermitRootLogin yes, was overridden by 99-ccdc-hardening.conf, and
+          # PermitRootLogin yes, was overridden by the kit's own drop-in, and
           # was only ever an AMBER line in a list of four.
           danger=$(grep -iE '^[[:space:]]*(PermitRootLogin[[:space:]]+yes|PermitEmptyPasswords[[:space:]]+yes|PermitUserEnvironment[[:space:]]+yes|AuthorizedKeysCommand[[:space:]]+[^n])' "$dropin" 2>/dev/null \
             | sed 's/^[[:space:]]*//' | head -1)
@@ -689,7 +696,7 @@ validate_policy_values() {
     # newline here would let a config variable append a directive nobody
     # reviewed - including one that undoes everything above it.
     case "$value" in
-      *[!A-Za-z0-9_@.:-\ ]*|*$'\n'*)
+      *[!A-Za-z0-9_@.:\ -]*|*$'\n'*)
         ccdc_die "$name contains unsupported characters: $value" ;;
     esac
   done
@@ -781,7 +788,8 @@ refuse_certain_lockout() {
 }
 
 take_snapshot() {
-  rm -rf -- "$snapshot_dir" 2>/dev/null || true
+  local f
+  rm -rf -- "$snapshot_dir" 2>/dev/null || return 1
   mkdir -p "$snapshot_dir" || return 1
   chmod 0700 "$snapshot_dir" || return 1
   [ ! -f "$sshd_config_file" ] || cp -p -- "$sshd_config_file" "$snapshot_dir/sshd_config" || return 1
@@ -790,9 +798,12 @@ take_snapshot() {
     # A snapshot of the whole directory, not of the files we are about to edit:
     # restoring has to REMOVE a drop-in we added as well as put back one we
     # changed, and it cannot do that from a list of files it knew about.
-    cp -p -- "$dropin_dir"/*.conf "$snapshot_dir/dropins/" 2>/dev/null || true
+    for f in "$dropin_dir"/*.conf; do
+      [ -e "$f" ] || continue
+      cp -p -- "$f" "$snapshot_dir/dropins/" || return 1
+    done
   fi
-  printf '%s\n' "$dropin_dir" >"$snapshot_dir/dropin_dir"
+  printf '%s\n' "$dropin_dir" >"$snapshot_dir/dropin_dir" || return 1
   return 0
 }
 
@@ -841,15 +852,60 @@ rollback_armed() {
 }
 
 restore_snapshot() {
-  [ -d "$snapshot_dir" ] || return 1
-  [ -f "$snapshot_dir/sshd_config" ] && cp -p -- "$snapshot_dir/sshd_config" "$sshd_config_file"
-  if [ -d "$dropin_dir" ]; then
-    rm -f -- "$dropin_dir"/*.conf 2>/dev/null || true
-    if [ -d "$snapshot_dir/dropins" ]; then
-      cp -p -- "$snapshot_dir/dropins"/*.conf "$dropin_dir/" 2>/dev/null || true
-    fi
+  local saved_dropin restore_main restore_stage f dest
+  [ -d "$snapshot_dir" ] || { ccdc_warn "SSH snapshot is missing: $snapshot_dir"; return 1; }
+  saved_dropin=$(cat "$snapshot_dir/dropin_dir" 2>/dev/null || printf '')
+  [ "$saved_dropin" = "$dropin_dir" ] \
+    || { ccdc_warn "SSH snapshot belongs to a different drop-in directory: ${saved_dropin:-<missing>}"; return 1; }
+
+  # Stage every saved object beside its destination before removing anything.
+  # A full/read-only filesystem therefore fails while the live configuration
+  # is still intact, instead of halfway through restoration.
+  if [ -f "$snapshot_dir/sshd_config" ]; then
+    restore_main="${sshd_config_file}.ccdc-restore.$$"
+    cp -p -- "$snapshot_dir/sshd_config" "$restore_main" \
+      || { rm -f -- "$restore_main"; return 1; }
+  else
+    restore_main=''
+  fi
+  mkdir -p "$dropin_dir" || { rm -f -- "$restore_main"; return 1; }
+  restore_stage="$dropin_dir/.ccdc-restore.$$"
+  rm -rf -- "$restore_stage" 2>/dev/null || { rm -f -- "$restore_main"; return 1; }
+  mkdir "$restore_stage" || { rm -f -- "$restore_main"; return 1; }
+  if [ -d "$snapshot_dir/dropins" ]; then
+    for f in "$snapshot_dir/dropins"/*.conf; do
+      [ -e "$f" ] || continue
+      cp -p -- "$f" "$restore_stage/" \
+        || { rm -f -- "$restore_main"; rm -rf -- "$restore_stage"; return 1; }
+    done
+  fi
+
+  if [ -n "$restore_main" ]; then
+    mv -f -- "$restore_main" "$sshd_config_file" \
+      || { rm -f -- "$restore_main"; rm -rf -- "$restore_stage"; return 1; }
+  fi
+  for f in "$dropin_dir"/*.conf; do
+    [ -e "$f" ] || continue
+    rm -f -- "$f" || { rm -rf -- "$restore_stage"; return 1; }
+  done
+  for f in "$restore_stage"/*.conf; do
+    [ -e "$f" ] || continue
+    dest="$dropin_dir/$(basename -- "$f")"
+    mv -f -- "$f" "$dest" || { rm -rf -- "$restore_stage"; return 1; }
+  done
+  rmdir "$restore_stage" || return 1
+  if ccdc_have restorecon; then
+    restorecon "$sshd_config_file" "$dropin_dir"/*.conf >/dev/null 2>&1 || true
   fi
   return 0
+}
+
+abort_apply_and_restore() {
+  local why=$1
+  if restore_snapshot; then
+    ccdc_die "SSH config was NOT changed ($why; the pre-change snapshot was restored)"
+  fi
+  ccdc_die "$why, and automatic restoration FAILED. Recover from $snapshot_dir at the console; the snapshot was retained."
 }
 
 # Where the policy can go on this box. sshd only reads a drop-in directory if
@@ -877,8 +933,36 @@ policy_target() {
   fi
 }
 
+# `sshd -t` proves the files parse; it does not prove our values won. OpenSSH
+# keeps the first value for most global keywords, so an earlier drop-in (or a
+# directive before the Include line) can silently defeat a perfectly valid
+# managed file. Return every configured postcondition that the effective
+# configuration does not satisfy.
+effective_policy_mismatches() {
+  local name key want actual
+  set -- \
+    CCDC_SSH_PERMIT_ROOT_LOGIN      permitrootlogin \
+    CCDC_SSH_PASSWORD_AUTH          passwordauthentication \
+    CCDC_SSH_PERMIT_EMPTY_PASSWORDS permitemptypasswords \
+    CCDC_SSH_PERMIT_USER_ENV        permituserenvironment \
+    CCDC_SSH_MAX_AUTH_TRIES         maxauthtries \
+    CCDC_SSH_LOGIN_GRACE            logingracetime \
+    CCDC_SSH_X11_FORWARDING         x11forwarding \
+    CCDC_SSH_ALLOW_TCP_FORWARDING   allowtcpforwarding \
+    CCDC_SSH_CLIENT_ALIVE_INTERVAL  clientaliveinterval \
+    CCDC_SSH_ALLOW_USERS            allowusers \
+    CCDC_SSH_BANNER                 banner
+  while [ "$#" -gt 1 ]; do
+    name=$1; key=$2; shift 2
+    eval "want=\${$name:-}"
+    [ -n "$want" ] || continue
+    actual=$(effective_value "$key")
+    [ "$actual" = "$want" ] || printf '%s|%s|%s\n' "$key" "$want" "${actual:-<missing>}"
+  done
+}
+
 do_apply() {
-  local reload preview before_root before_pw
+  local reload preview before_root before_pw mismatches key want actual
 
   have_sshd || ccdc_die "sshd is not installed on this box"
   validate_policy_values
@@ -935,7 +1019,7 @@ do_apply() {
     { printf 'Include %s/*.conf\n' "$dropin_dir"; cat -- "$sshd_config_file"; } >"$sshd_config_file.new.$$" \
       && chmod --reference="$sshd_config_file" "$sshd_config_file.new.$$" 2>/dev/null \
       && mv -f -- "$sshd_config_file.new.$$" "$sshd_config_file" \
-      || { rm -f -- "$sshd_config_file.new.$$"; ccdc_die "could not add the Include line to $sshd_config_file; nothing was changed"; }
+      || { rm -f -- "$sshd_config_file.new.$$"; abort_apply_and_restore "could not add the Include line to $sshd_config_file"; }
     restorecon "$sshd_config_file" >/dev/null 2>&1 || true
     ccdc_info "added as line 1 of $sshd_config_file:  Include $dropin_dir/*.conf  (without it the drop-in is ignored; the rollback removes it too)"
   fi
@@ -947,14 +1031,27 @@ do_apply() {
     } >"$sshd_config_file.new.$$" \
       && chmod --reference="$sshd_config_file" "$sshd_config_file.new.$$" 2>/dev/null \
       && mv -f -- "$sshd_config_file.new.$$" "$sshd_config_file" \
-      || { rm -f -- "$sshd_config_file.new.$$"; ccdc_die "could not write the policy into $sshd_config_file; nothing was changed"; }
+      || { rm -f -- "$sshd_config_file.new.$$"; abort_apply_and_restore "could not write the policy into $sshd_config_file"; }
     restorecon "$sshd_config_file" >/dev/null 2>&1 || true
     ccdc_info "this OpenSSH has no Include: the policy is a marked block at the top of $sshd_config_file (the rollback restores the file)"
   else
-    mkdir -p "$dropin_dir" || ccdc_die "cannot create $dropin_dir"
-    policy_lines >"$dropin_file.new.$$" || ccdc_die "cannot stage the drop-in"
-    chmod 0600 "$dropin_file.new.$$"
-    mv -f -- "$dropin_file.new.$$" "$dropin_file" || ccdc_die "cannot write $dropin_file"
+    mkdir -p "$dropin_dir" || abort_apply_and_restore "cannot create $dropin_dir"
+    # Install 00- before removing our earlier 99- name. Reversing those two
+    # operations creates a no-policy window if staging or rename fails, before
+    # any timed rollback exists. The snapshot covers both names.
+    policy_lines >"$dropin_file.new.$$" \
+      || { rm -f -- "$dropin_file.new.$$"; abort_apply_and_restore "cannot stage $dropin_file"; }
+    chmod 0600 "$dropin_file.new.$$" \
+      || { rm -f -- "$dropin_file.new.$$"; abort_apply_and_restore "cannot secure staged $dropin_file"; }
+    mv -f -- "$dropin_file.new.$$" "$dropin_file" \
+      || { rm -f -- "$dropin_file.new.$$"; abort_apply_and_restore "cannot write $dropin_file"; }
+    # Our own earlier name, from before the rename: only if it carries our
+    # marker. A failed removal restores the pre-change directory rather than
+    # claiming a half-migrated transaction succeeded.
+    if [ -f "$legacy_dropin_file" ] && head -1 "$legacy_dropin_file" 2>/dev/null | grep -q '^# Managed by ccdc sshd.sh'; then
+      rm -f -- "$legacy_dropin_file" \
+        || abort_apply_and_restore "cannot remove legacy managed drop-in $legacy_dropin_file"
+    fi
   fi
 
   # Validate BEFORE anything is reloaded. This is the step that turns a typo
@@ -962,11 +1059,27 @@ do_apply() {
   if ! "$(sshd_bin)" -t 2>"$state_dir/.sshd-apply.err"; then
     ccdc_warn "the new configuration failed sshd -t; restoring and aborting"
     sed 's/^/  /' "$state_dir/.sshd-apply.err" >&2 2>/dev/null || true
-    restore_snapshot
     rm -f "$state_dir/.sshd-apply.err"
-    ccdc_die "SSH config was NOT changed (the staged policy was invalid)"
+    abort_apply_and_restore "the staged policy was invalid"
   fi
   rm -f "$state_dir/.sshd-apply.err"
+
+  # Parsing is not the postcondition. On Rocky, the old 99-named file parsed
+  # cleanly but lost X11Forwarding to 50-redhat.conf because sshd uses the first
+  # value it reads. Check the complete configured policy before a reload or a
+  # rollback timer can make a false success look safe.
+  EFFECTIVE=$(effective_config) || EFFECTIVE=''
+  mismatches=$(effective_policy_mismatches)
+  if [ -n "$mismatches" ]; then
+    ccdc_warn "the staged SSH policy parses, but it is not the effective policy:"
+    while IFS='|' read -r key want actual; do
+      [ -n "$key" ] || continue
+      ccdc_warn "  $key: configured '$want', effective '$actual'"
+    done <<EOF
+$mismatches
+EOF
+    abort_apply_and_restore "an earlier directive or drop-in overrode the staged policy"
+  fi
 
   # Arm the switch before reloading, exactly as fw.sh does. Scheduling second
   # would leave a window where a bad reload has happened and nothing will undo
@@ -975,22 +1088,51 @@ do_apply() {
 #!/bin/sh
 # Generated by sshd.sh. Restores the pre-change SSH config unless --confirm ran.
 [ -d "$snapshot_dir" ] || exit 0
-[ -f "$snapshot_dir/sshd_config" ] && cp -p -- "$snapshot_dir/sshd_config" "$sshd_config_file"
-if [ -d "$dropin_dir" ]; then
-  rm -f -- "$dropin_dir"/*.conf 2>/dev/null
-  [ -d "$snapshot_dir/dropins" ] && cp -p -- "$snapshot_dir/dropins"/*.conf "$dropin_dir/" 2>/dev/null
+saved_dropin=\$(cat "$snapshot_dir/dropin_dir" 2>/dev/null || printf '')
+[ "\$saved_dropin" = "$dropin_dir" ] || exit 1
+main_tmp="$sshd_config_file.ccdc-auto-restore.\$\$"
+drop_tmp="$dropin_dir/.ccdc-auto-restore.\$\$"
+rm -f -- "\$main_tmp" 2>/dev/null
+rm -rf -- "\$drop_tmp" 2>/dev/null
+
+# Stage the complete restore before removing a live drop-in. A full/read-only
+# filesystem must leave the current config intact and the snapshot retained.
+if [ -f "$snapshot_dir/sshd_config" ]; then
+  cp -p -- "$snapshot_dir/sshd_config" "\$main_tmp" || exit 1
 fi
-# Only reload a config that parses. Reloading a broken one would turn a
-# recoverable mistake into a dead sshd.
-if $(sshd_bin) -t 2>/dev/null; then
-  $(restart_cmd) >/dev/null 2>&1
+mkdir -p "$dropin_dir" && mkdir "\$drop_tmp" || { rm -f -- "\$main_tmp"; exit 1; }
+for saved in "$snapshot_dir/dropins"/*.conf; do
+  [ -e "\$saved" ] || continue
+  cp -p -- "\$saved" "\$drop_tmp/" || { rm -f -- "\$main_tmp"; rm -rf -- "\$drop_tmp"; exit 1; }
+done
+
+[ ! -e "\$main_tmp" ] || mv -f -- "\$main_tmp" "$sshd_config_file" \
+  || { rm -rf -- "\$drop_tmp"; exit 1; }
+for live in "$dropin_dir"/*.conf; do
+  [ -e "\$live" ] || continue
+  rm -f -- "\$live" || { rm -rf -- "\$drop_tmp"; exit 1; }
+done
+for saved in "\$drop_tmp"/*.conf; do
+  [ -e "\$saved" ] || continue
+  mv -f -- "\$saved" "$dropin_dir/" || { rm -rf -- "\$drop_tmp"; exit 1; }
+done
+rmdir "\$drop_tmp" || exit 1
+if command -v restorecon >/dev/null 2>&1; then
+  restorecon "$sshd_config_file" "$dropin_dir"/*.conf >/dev/null 2>&1 || true
 fi
-rm -f "$pid_file" "$rollback_script"
-exit 0
+
+# Only declare success after the restored config parses AND the daemon reloads.
+# A failed reload can still leave the new policy live in memory.
+if $(sshd_bin) -t 2>/dev/null && $(restart_cmd) >/dev/null 2>&1; then
+  rm -f "$pid_file" "$rollback_script"
+  exit 0
+fi
+printf '%s\n' 'automatic SSH rollback FAILED; snapshot retained at $snapshot_dir' >&2
+exit 1
 SCRIPT
   chmod 0700 "$rollback_script.new.$$" \
     && mv -f -- "$rollback_script.new.$$" "$rollback_script" \
-    || { rm -f "$rollback_script.new.$$"; restore_snapshot; ccdc_die "cannot create the rollback script; config restored"; }
+    || { rm -f "$rollback_script.new.$$"; abort_apply_and_restore "cannot create the rollback script"; }
 
   if ccdc_have systemd-run; then
     if systemd_error=$(systemd-run --collect --quiet --unit="$rollback_unit" \
@@ -1004,8 +1146,7 @@ SCRIPT
           </dev/null >>"$state_dir/sshd-rollback.err" 2>&1 &
         printf 'pid:%s\n' "$!" >"$pid_file"
       else
-        restore_snapshot
-        ccdc_die "could not arm any rollback; SSH config restored and unchanged"
+        abort_apply_and_restore "could not arm any rollback"
       fi
     fi
   else
@@ -1014,11 +1155,13 @@ SCRIPT
         </dev/null >>"$state_dir/sshd-rollback.err" 2>&1 &
       printf 'pid:%s\n' "$!" >"$pid_file"
     else
-      restore_snapshot
-      ccdc_die "could not arm any rollback; SSH config restored and unchanged"
+      abort_apply_and_restore "could not arm any rollback"
     fi
   fi
-  rollback_armed || { restore_snapshot; rm -f "$pid_file"; ccdc_die "the rollback did not arm; SSH config restored"; }
+  if ! rollback_armed; then
+    rm -f "$pid_file"
+    abort_apply_and_restore "the rollback did not arm"
+  fi
 
   reload=$(restart_cmd)
   # Remember when WE reloaded: a reload does not move the unit's start time,
@@ -1027,7 +1170,9 @@ SCRIPT
   mkdir -p "$state_dir" 2>/dev/null && touch "$state_dir/sshd.reloaded" 2>/dev/null || true
   if ! eval "$reload" >/dev/null 2>&1; then
     ccdc_warn "reload command failed: $reload"
-    ccdc_warn "the rollback is armed and will restore the previous config"
+    cancel_pending_rollback
+    rm -f -- "$rollback_script"
+    abort_apply_and_restore "sshd could not reload the staged policy"
   fi
 
   EFFECTIVE=$(effective_config) || EFFECTIVE=''
@@ -1095,12 +1240,11 @@ case "$mode" in
   rollback)
     cancel_pending_rollback
     restore_snapshot || ccdc_die "rollback failed; restore from $snapshot_dir by hand from the console"
-    if "$(sshd_bin)" -t 2>/dev/null; then
-      touch "$state_dir/sshd.reloaded" 2>/dev/null || true
-      eval "$(restart_cmd)" >/dev/null 2>&1 || ccdc_warn "restored the config but could not reload sshd"
-    else
-      ccdc_warn "restored config does not pass sshd -t; NOT reloading"
-    fi
+    "$(sshd_bin)" -t 2>/dev/null \
+      || ccdc_die "restored files do not pass sshd -t; NOT reloading and retaining $snapshot_dir"
+    touch "$state_dir/sshd.reloaded" 2>/dev/null || true
+    eval "$(restart_cmd)" >/dev/null 2>&1 \
+      || ccdc_die "restored the files but could not reload sshd; snapshot retained at $snapshot_dir"
     rm -rf -- "$snapshot_dir"
     rm -f -- "$rollback_script" "$pid_file"
     ccdc_append_log "$log" "ROLLBACK restored"
