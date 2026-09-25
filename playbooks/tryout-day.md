@@ -87,6 +87,7 @@ them, the scorer uses the old passwords and fails.**
 ```bash
 sudo ./linux/discover.sh --config "$CFG" --apply     # services, ports, checks from what runs
 sudo ./linux/triage.sh --config "$CFG"
+sudo ./linux/harden.sh --config "$CFG"                       # READ the list: --cut only acts on a list you have seen
 sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
 sudo ./linux/users.sh --config "$CFG" --create-admin ops2 --apply     # better: a name only you know
 sudo ./linux/fw.sh --config "$CFG" --apply     # then --confirm from a NEW ssh session
