@@ -207,11 +207,15 @@ block=$(
   printf 'CCDC_TCP_CHECKS="\n%s"\n' "$tcp_checks"
   printf 'CCDC_HTTP_CHECKS="\n%s"\n' "$http_checks"
   [ -n "$splunk_home" ] && printf 'CCDC_SPLUNK_HOME="%s"\n' "$splunk_home"
+  # One path per line: that is how every reader splits these two. Written on
+  # one line, the watchdog took "/etc/ssh/sshd_config /var/www/html/index.html"
+  # as ONE path with a space in it, exited, and guardian refused to arm -
+  # measured on the 18.04 replica, nine restarts in a row.
   if [ -n "$webfiles" ]; then
-    printf 'CCDC_HASH_FILES="%s %s"\n' "${CCDC_HASH_FILES:-/etc/ssh/sshd_config}" "$webfiles"
+    printf 'CCDC_HASH_FILES="\n%s\n"\n' "$(printf '%s\n' ${CCDC_HASH_FILES:-/etc/ssh/sshd_config} $webfiles | awk 'NF && !seen[$0]++')"
   fi
   if [ -n "$webroots" ]; then
-    printf 'CCDC_BACKUP_PATHS="%s\n%s"\n' "${CCDC_BACKUP_PATHS:-/etc}" "$(printf '%s\n' $webroots)"
+    printf 'CCDC_BACKUP_PATHS="\n%s\n"\n' "$(printf '%s\n' ${CCDC_BACKUP_PATHS:-/etc} $webroots | awk 'NF && !seen[$0]++')"
   fi
   printf '# <<< discover.sh\n'
 )

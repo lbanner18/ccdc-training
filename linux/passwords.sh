@@ -343,14 +343,17 @@ workers='^(vsftpd|proftpd|pure-ftpd|in.ftpd|dovecot|pop3|imap|pop3-login|imap-lo
 sessions=''
 for u in "${names[@]}"; do
   [ "$u" = root ] && continue
-  while read -r pid tty etime comm args; do
+  while read -r pid ppid tty etime comm args; do
     [ -n "${pid:-}" ] || continue
     case "$ancestors" in *" $pid "*) continue ;; esac
+    # A child of your own shell - the tee or less this was piped into, a job
+    # you backgrounded - is yours too. Measured: a pipeline's sed was listed.
+    case "$ancestors" in *" $ppid "*) continue ;; esac
     [ -n "$own_tty" ] && [ "$tty" = "$own_tty" ] && continue
     printf '%s' "$comm" | grep -Eq "$workers" && continue
     case "$comm $args" in 'systemd '*--user*) continue ;; esac
     sessions="$sessions$u|$pid|$tty|$etime|$args"$'\n'
-  done < <(ps -o pid=,tty=,etime=,comm=,args= -u "$u" 2>/dev/null)
+  done < <(ps -o pid=,ppid=,tty=,etime=,comm=,args= -u "$u" 2>/dev/null)
 done
 if [ -n "$sessions" ]; then
   printf '\nSTILL RUNNING AS THESE ACCOUNTS, NOT IN YOUR TERMINAL (%s)\n' "${own_tty:-unknown}"

@@ -44,6 +44,14 @@ main=${FAKE_SSHD_CONFIG:?}
 dropins=${FAKE_SSHD_DROPIN_DIR:?}
 case "${1:-}" in
   -t)
+    # -t -f FILE checks FILE; OpenSSH before 8.2 (Ubuntu 18.04 ships 7.6)
+    # rejects Include in sshd_config outright, which FAKE_SSHD_NO_INCLUDE plays.
+    checked=$main
+    [ "${2:-}" = -f ] && checked=${3:-$main}
+    if [ "${FAKE_SSHD_NO_INCLUDE:-0}" = 1 ] && grep -qiE '^[[:space:]]*Include[[:space:]]' "$checked" 2>/dev/null; then
+      printf '%s: line 1: Bad configuration option: Include\n' "$checked" >&2
+      exit 1
+    fi
     # The fixture declares brokenness explicitly, so the test can drive the
     # "config does not parse" path without inventing invalid syntax.
     if grep -qs 'BREAK_ME' "$main" "$dropins"/*.conf 2>/dev/null; then
@@ -345,18 +353,55 @@ rc=0
 grep -qi 'was NOT changed' "$test_root/invalid.out" \
   && ok 'and it says the config was not changed' || no 'the abort message is unclear'
 
+# ------------------------------------------- a --confirm with nothing pending
+# After an --apply that refused, this printed "rollback cancelled; the new
+# configuration is kept" while SSH was exactly as before (18.04 replica).
+rc=0
+"$sshd_sh" --config "$cfg" --confirm >"$test_root/confirm-none.out" 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'nothing to confirm' "$test_root/confirm-none.out" \
+  && ok '--confirm with nothing pending says so instead of claiming a kept change' \
+  || no '--confirm claimed success with nothing applied'
+
 # ------------------------------------------- a box whose main config has no Include
-# Writing a drop-in there changes nothing at all, which is the worst outcome
-# available: a tool that reports success and did nothing.
+# A drop-in there changes nothing, so the Include goes in as part of the same
+# guarded change - line 1, in the snapshot, removed again by the rollback.
 base_env
 printf 'CCDC_SSH_MAX_AUTH_TRIES="3"\n' >>"$cfg"
 grep -v '^Include' "$main" >"$main.noinclude" && mv "$main.noinclude" "$main"
+cp -p "$main" "$test_root/main.orig"
 rc=0
 "$sshd_sh" --config "$cfg" --apply >"$test_root/noinclude.out" 2>&1 || rc=$?
-[ "$rc" -ne 0 ] && ok 'apply refuses when the main config has no Include' \
-                || no 'a drop-in was written where it would be ignored'
-grep -qi 'would be ignored' "$test_root/noinclude.out" \
-  && ok 'and explains that the drop-in would be ignored' || no 'the refusal is unclear'
+[ "$rc" -eq 0 ] && head -1 "$main" | grep -q "^Include $dropins/\*.conf$" && [ -f "$managed" ] \
+  && ok 'no Include: it is added as line 1 and the drop-in written, in one guarded change' \
+  || { no 'no Include: the drop-in was not made effective'; head -3 "$main"; }
+"$sshd_sh" --config "$cfg" --rollback >/dev/null 2>&1
+cmp -s "$main" "$test_root/main.orig" && [ ! -f "$managed" ] \
+  && ok 'and the rollback takes the Include line out again' \
+  || no 'the rollback left the added Include behind'
+
+# ------------------------------------------- an sshd that cannot Include at all
+# OpenSSH 7.6 (Ubuntu 18.04, the tryout's Linux box) rejects Include in
+# sshd_config, so no drop-in can ever work there: the policy goes into a
+# marked block at the top of the main file, where the first value wins.
+export FAKE_SSHD_NO_INCLUDE=1
+rc=0
+"$sshd_sh" --config "$cfg" --apply >"$test_root/inline.out" 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && head -1 "$main" | grep -q '^# >>> ccdc sshd.sh policy' \
+  && sed -n '2,/^# <<< ccdc sshd.sh policy$/p' "$main" | grep -qx 'MaxAuthTries 3' \
+  && ! grep -qi '^Include' "$main" && [ ! -f "$managed" ] \
+  && ok 'no Include support: the policy is a marked block at the top of the main file' \
+  || { no 'no Include support: the policy did not land in the main file'; head -6 "$main"; }
+"$sshd_sh" --config "$cfg" --rollback >/dev/null 2>&1
+cmp -s "$main" "$test_root/main.orig" \
+  && ok 'and the rollback restores the main file exactly' || no 'the rollback left the inline block behind'
+"$sshd_sh" --config "$cfg" --apply >/dev/null 2>&1
+"$sshd_sh" --config "$cfg" --confirm >/dev/null 2>&1
+"$sshd_sh" --config "$cfg" --apply >/dev/null 2>&1
+[ "$(grep -c '^# >>> ccdc sshd.sh policy' "$main")" -eq 1 ] \
+  && ok 'a second apply replaces its block instead of stacking another' \
+  || no 'inline blocks stack up on every apply'
+"$sshd_sh" --config "$cfg" --rollback >/dev/null 2>&1
+unset FAKE_SSHD_NO_INCLUDE
 
 printf 'sshd self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

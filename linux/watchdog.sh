@@ -202,6 +202,9 @@ validate_checks() {
     valid_service_name "$service" || ccdc_die "invalid systemd service name: $service"
   done
   while IFS= read -r path; do
+    # Split on any whitespace (the lists below): a path may not contain any, so
+    # "a b" on one line and one-per-line mean the same thing. Read line by line,
+    # a one-line list was ONE bad path, and the watchdog died on it.
     [ -n "$path" ] || continue
     case "$path" in /*) ;; *) ccdc_die "hash check path must be absolute: $path" ;; esac
     case "$path" in
@@ -212,7 +215,7 @@ validate_checks() {
       */./*|*/.|*/../*|*/..) ccdc_die "hash check path contains traversal: $path" ;;
     esac
   done <<EOF
-${CCDC_HASH_FILES:-}
+$(set -f; printf '%s\n' ${CCDC_HASH_FILES:-})
 EOF
 }
 
@@ -345,7 +348,7 @@ check_hashes() {
     fi
     printf '%s %s\n' "$current" "$path" >>"$next_state"
   done <<EOF
-${CCDC_HASH_FILES:-}
+$(set -f; printf '%s\n' ${CCDC_HASH_FILES:-})
 EOF
   mv "$next_state" "$hash_state" \
     || { ccdc_append_log "$log" "hash_state_install_failed path=$hash_state"; return 1; }

@@ -191,5 +191,25 @@ else
   no "discover.sh classified: $got"
 fi
 
+# --- the hash list: one path per line, and the watchdog takes either -----------
+# discover.sh wrote "/etc/ssh/sshd_config /var/www/html/index.html" on one line;
+# the watchdog read that as ONE path with a space, exited, and guardian refused
+# to arm - measured on the 18.04 replica.
+printf 'CCDC_EVIDENCE_DIR="%s/wd"\nCCDC_HASH_FILES="/etc/hostname /etc/hosts"\n' "$work" >"$work/wd1.env"
+out1=$(timeout 30 "$ROOT/linux/watchdog.sh" --config "$work/wd1.env" --once 2>&1); rc1=$?
+printf 'CCDC_EVIDENCE_DIR="%s/wd"\nCCDC_HASH_FILES="\n/etc/hostname\n/etc/hosts\n"\n' "$work" >"$work/wd2.env"
+out2=$(timeout 30 "$ROOT/linux/watchdog.sh" --config "$work/wd2.env" --once 2>&1); rc2=$?
+if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && ! printf '%s%s' "$out1" "$out2" | grep -q 'contains whitespace'; then
+  ok 'watchdog accepts the hash list on one line or one path per line'
+else
+  no "watchdog rejected a hash list (one-line rc=$rc1, per-line rc=$rc2): $(printf '%s' "$out1" | head -1)"
+fi
+if grep -q "printf 'CCDC_HASH_FILES=\"\\\\n%s\\\\n\"\\\\n'" "$ROOT/linux/discover.sh" &&
+   grep -q "printf 'CCDC_BACKUP_PATHS=\"\\\\n%s\\\\n\"\\\\n'" "$ROOT/linux/discover.sh"; then
+  ok 'discover.sh writes the hash and backup lists one path per line'
+else
+  no 'discover.sh writes a path list on one line again'
+fi
+
 printf 'packet self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

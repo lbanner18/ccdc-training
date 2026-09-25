@@ -852,6 +852,31 @@ restore_snapshot() {
   return 0
 }
 
+# Where the policy can go on this box. sshd only reads a drop-in directory if
+# the main file Includes it, and only OpenSSH 8.2+ understands Include in
+# sshd_config at all. Ubuntu 18.04 - the tryout's Linux box - ships 7.6:
+# measured, `Include` there is "Bad configuration option" and sshd -t fails.
+inline_begin='# >>> ccdc sshd.sh policy - this OpenSSH has no Include; the rollback restores this file'
+inline_end='# <<< ccdc sshd.sh policy'
+sshd_supports_include() {
+  local t
+  # A probe that cannot run proves nothing either way. Try the Include route:
+  # sshd -t still checks the result before anything is reloaded.
+  mkdir -p "$state_dir" 2>/dev/null
+  t=$(mktemp "$state_dir/.sshd-probe.XXXXXX" 2>/dev/null) || return 0
+  { printf 'Include /nonexistent-ccdc-probe/*.conf\n'; cat -- "$sshd_config_file" 2>/dev/null; } >"$t"
+  if "$(sshd_bin)" -t -f "$t" 2>&1 | grep -qi 'Bad configuration option: Include'; then
+    rm -f -- "$t"; return 1
+  fi
+  rm -f -- "$t"; return 0
+}
+policy_target() {
+  if grep -qiE '^[[:space:]]*Include[[:space:]]+.*sshd_config\.d' "$sshd_config_file" 2>/dev/null; then echo dropin
+  elif sshd_supports_include; then echo add-include
+  else echo inline
+  fi
+}
+
 do_apply() {
   local reload preview before_root before_pw
 
@@ -866,8 +891,20 @@ do_apply() {
 
   if [ "$apply" -eq 0 ]; then
     printf 'sshd.sh dry run - this would:\n\n'
-    printf '  write %s:\n' "$dropin_file"
-    policy_lines | sed 's/^/      /'
+    case "$(policy_target)" in
+      add-include)
+        printf '  add as line 1 of %s (it has no Include, so a drop-in alone is ignored):\n' "$sshd_config_file"
+        printf '      Include %s/*.conf\n\n' "$dropin_dir"
+        printf '  write %s:\n' "$dropin_file"
+        policy_lines | sed 's/^/      /' ;;
+      inline)
+        printf '  put this block at the TOP of %s - this OpenSSH has no Include,\n' "$sshd_config_file"
+        printf '  and sshd keeps the first value it reads, so the top wins:\n'
+        { printf '%s\n' "$inline_begin"; policy_lines | grep -v '^#'; printf '%s\n' "$inline_end"; } | sed 's/^/      /' ;;
+      *)
+        printf '  write %s:\n' "$dropin_file"
+        policy_lines | sed 's/^/      /' ;;
+    esac
     printf '\n  validate with: %s -t\n' "$(sshd_bin)"
     printf '  arm a %ss rollback, then: %s\n' "$rollback_seconds" "$(restart_cmd)"
     printf '\n  Nothing has changed. Re-run with --apply.\n'
@@ -887,18 +924,38 @@ do_apply() {
   # The drop-in only works if the main config includes the directory. On a box
   # without an Include line, writing there changes nothing at all - which would
   # be the worst possible outcome: a tool that reports success and does nothing.
-  if ! grep -qiE '^[[:space:]]*Include[[:space:]]+.*sshd_config\.d' "$sshd_config_file" 2>/dev/null; then
-    ccdc_die "$sshd_config_file has no Include for $dropin_dir, so a drop-in would be ignored.
-  Add this as the FIRST line of $sshd_config_file, then re-run:
-      Include $dropin_dir/*.conf
-  (Doing that by hand is deliberate: it is a change to the main file, and you
-  should see exactly what it is.)"
+  #
+  # Ubuntu 18.04 - the tryout's Linux box - has no Include and no directory.
+  # This used to stop and ask for a hand edit of the file you are logged in
+  # through. The main file is already in the snapshot, sshd -t checks the
+  # result before any reload, and the timed rollback restores it, so the one
+  # line goes in as part of this same guarded change - and is said out loud.
+  target=$(policy_target)
+  if [ "$target" = add-include ]; then
+    { printf 'Include %s/*.conf\n' "$dropin_dir"; cat -- "$sshd_config_file"; } >"$sshd_config_file.new.$$" \
+      && chmod --reference="$sshd_config_file" "$sshd_config_file.new.$$" 2>/dev/null \
+      && mv -f -- "$sshd_config_file.new.$$" "$sshd_config_file" \
+      || { rm -f -- "$sshd_config_file.new.$$"; ccdc_die "could not add the Include line to $sshd_config_file; nothing was changed"; }
+    restorecon "$sshd_config_file" >/dev/null 2>&1 || true
+    ccdc_info "added as line 1 of $sshd_config_file:  Include $dropin_dir/*.conf  (without it the drop-in is ignored; the rollback removes it too)"
   fi
 
-  mkdir -p "$dropin_dir" || ccdc_die "cannot create $dropin_dir"
-  policy_lines >"$dropin_file.new.$$" || ccdc_die "cannot stage the drop-in"
-  chmod 0600 "$dropin_file.new.$$"
-  mv -f -- "$dropin_file.new.$$" "$dropin_file" || ccdc_die "cannot write $dropin_file"
+  if [ "$target" = inline ]; then
+    # Any earlier block of ours is replaced, never stacked.
+    { printf '%s\n' "$inline_begin"; policy_lines | grep -v '^#'; printf '%s\n' "$inline_end"
+      awk -v b="$inline_begin" -v e="$inline_end" '$0 == b {skip = 1} !skip {print} $0 == e {skip = 0}' "$sshd_config_file"
+    } >"$sshd_config_file.new.$$" \
+      && chmod --reference="$sshd_config_file" "$sshd_config_file.new.$$" 2>/dev/null \
+      && mv -f -- "$sshd_config_file.new.$$" "$sshd_config_file" \
+      || { rm -f -- "$sshd_config_file.new.$$"; ccdc_die "could not write the policy into $sshd_config_file; nothing was changed"; }
+    restorecon "$sshd_config_file" >/dev/null 2>&1 || true
+    ccdc_info "this OpenSSH has no Include: the policy is a marked block at the top of $sshd_config_file (the rollback restores the file)"
+  else
+    mkdir -p "$dropin_dir" || ccdc_die "cannot create $dropin_dir"
+    policy_lines >"$dropin_file.new.$$" || ccdc_die "cannot stage the drop-in"
+    chmod 0600 "$dropin_file.new.$$"
+    mv -f -- "$dropin_file.new.$$" "$dropin_file" || ccdc_die "cannot write $dropin_file"
+  fi
 
   # Validate BEFORE anything is reloaded. This is the step that turns a typo
   # from an outage into an error message.
@@ -1025,6 +1082,10 @@ case "$mode" in
     ;;
   apply) do_apply ;;
   confirm)
+    # Nothing pending means nothing was applied - say so. After an --apply that
+    # REFUSED (18.04: no Include line), this printed "rollback cancelled; the
+    # new configuration is kept", and SSH was exactly as insecure as before.
+    [ -f "$pid_file" ] || ccdc_die "nothing to confirm: no SSH change is waiting for confirmation. Did --apply succeed? Re-run it and read its last lines."
     cancel_pending_rollback
     rm -rf -- "$snapshot_dir"
     rm -f -- "$rollback_script"
