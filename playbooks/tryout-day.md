@@ -83,14 +83,15 @@ them, the scorer uses the old passwords and fails.**
 
 ## Then each box: its own flow
 
-**Linux** — `playbooks/linux-first-15-minutes.md`, "Linux at a glance", from
-`discover.sh` on. The short version:
+**Linux** — `sudo ./linux/first15.sh --phase 1` on each box, then `--phase 2`. It
+walks `playbooks/linux-first-15-minutes.md`, "Linux at a glance", and asks before
+every change. By hand, the short version:
 ```bash
 sudo ./linux/discover.sh --config "$CFG" --apply     # services, ports, checks from what runs
 sudo ./linux/triage.sh --config "$CFG"
 sudo ./linux/harden.sh --config "$CFG"                       # READ the list: --cut only acts on a list you have seen
 sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
-sudo ./linux/users.sh --config "$CFG" --create-admin ops2 --apply     # better: a name only you know
+id alex; sudo passwd -S alex     # backup admin = alex (packet: only listed users) - in sudo/wheel, not locked
 sudo ./linux/fw.sh --config "$CFG" --apply     # then --confirm from a NEW ssh session
 sudo ./linux/sshd.sh --config "$CFG" --apply   # then --confirm from a NEW ssh session
 sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply

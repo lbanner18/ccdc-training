@@ -8,6 +8,11 @@ The whole flow on one screen, in the order rehearsed end to end on a fresh
 lab box (2026-09-23). Every command is complete; replace only `<USER>@<BOX>`.
 The checklist further down has the detail.
 
+**Or let the runner walk it.** After step 1, `sudo ./linux/first15.sh --phase 1`
+runs steps 2-6 in order and asks before every change. `--phase 2` runs steps 7-11,
+and for the firewall and sshd it has you open the second SSH session before it
+applies. Do Phase 1 on every box before Phase 2 on any.
+
 ### A. Once, at the start
 
 **1. Get the kit** — on YOUR workstation, not the box (no internet on the box):
@@ -58,11 +63,14 @@ sudo ./linux/harden.sh --config "$CFG"
 sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
 ```
 
-**6. A backup admin, then your own password** — both on paper
+**6. Your backup admin is alex, then root's password** — both on paper
 ```bash
-sudo ./linux/users.sh --config "$CFG" --create-admin ops2 --apply
-passwd
+id alex; sudo passwd -S alex      # in sudo (Ubuntu) or wheel (Rocky), and not L/LK
+sudo passwd root                  # sheet section 4
 ```
+alex is a packet administrator whose password block 1 already changed. The packet
+says the box should have *only* its listed users, so do not create a new one. Not a
+bare `passwd`: that changes steve's scored password away from what Quotient has.
 
 **7. Firewall** — it rolls itself back in 60s unless confirmed from a NEW connection
 ```bash

@@ -103,9 +103,9 @@ if [ "$generate" -eq 1 ]; then
     [ ! -e "$out" ] || ccdc_die "refusing to overwrite $out; move it or pick another name"
   fi
   sheet() {
-    local u root_pw vyos_pw splunk_pw admin_pw backup_pw
+    local u root_pw vyos_pw splunk_pw admin_pw
     root_pw=$(new_password); vyos_pw=$(new_password); splunk_pw=$(new_password)
-    admin_pw=$(new_password); backup_pw=$(new_password)
+    admin_pw=$(new_password)
     printf '# Generated %s. Write this on paper. It is not in the repo and must never be.\n\n' "$(date '+%Y-%m-%d %H:%M')"
     # No comma in this header: pasted into Quotient by mistake, a comma would
     # make the header a "user,password" line.
@@ -119,10 +119,8 @@ if [ "$generate" -eq 1 ]; then
     printf '===== 4. NOT SCORED: change these too, and put NONE of them in Quotient =====\n'
     printf '  root (Linux boxes)     %s   sudo passwd root\n' "$root_pw"
     printf '  Administrator (Win)    %s   net user Administrator *\n' "$admin_pw"
-    printf '  your backup admin      %s   Linux: users.sh --create-admin NAME asks for this one\n' "$backup_pw"
-    printf '        name (one only you know): ________________\n'
-    printf '        lapis: users.ps1 -CreateAdmin sets its OWN, in the file it names\n'
-    printf '        (C:\\ProgramData\\CCDC\\state\\passwords-*.txt). Copy it here: ____________________\n'
+    printf '  backup admin: alex, a packet admin - its password is its block 1 line. No new account:\n'
+    printf '        the packet says each box has only its listed users.\n'
     printf '  vyos (router)          %s\n' "$vyos_pw"
     printf '        configure\n'
     printf '        set system login user vyos authentication plaintext-password '"'"'%s'"'"'\n' "$vyos_pw"
