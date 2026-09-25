@@ -11,6 +11,11 @@ list that stops you losing points while you work out the rest.
 > answer instead of an error. For example, you may see no Security-log events
 > or miss another user's scheduled task and think the box is clean.
 
+> **Rehearsing this page on the lab box?** Do it against a box you have
+> deliberately dirtied first, so you find out whether triage actually catches
+> anything. See [Dry run: rehearse against a planted box](#dry-run-rehearse-this-whole-page-against-a-planted-box-lab-only)
+> at the bottom. That step is **lab only** — never on the real box.
+
 ---
 
 ## Windows at a glance
@@ -375,10 +380,18 @@ Read it. Then:
 .\windows\harden.ps1 -Apply
 ```
 
-In order, it does: backup → firewall → Defender → logging → password policy →
-services → remote access → persistence report. After every step that could
-affect a scored service it re-checks, and **stops** if one stopped answering —
-so you find out which step did it, not that something did.
+In order, it does: backup → firewall → Defender (back on, exclusions removed) →
+logging → password policy → services → remote access → persistence report →
+Defender scan. After every step that could affect a scored service it re-checks,
+and **stops** if one stopped answering — so you find out which step did it, not
+that something did.
+
+The **signature update and quick scan run last**, as their own `DefenderScan`
+step, because on an old image the update can crawl through three sources and the
+scan is CPU-heavy — no reason to let that hold up logging, passwords and
+services. Defender itself is already back on with its exclusions stripped much
+earlier, in the Defender step. Run just the tail with
+`.\windows\harden.ps1 -Only DefenderScan -Apply` if you skipped it.
 
 The firewall step writes your RDP and SSH allow rules **before** it sets
 default-inbound to Block. That ordering is the difference between hardening a
@@ -712,6 +725,57 @@ nc -z -v WINDOWS_IP 3389
 | basic Splunk and firewall help | [`splunk-and-firewalls.md`](splunk-and-firewalls.md) |
 | know what a finding means | [`windows-cards.md`](windows-cards.md) |
 | the Linux box | [`linux-first-15-minutes.md`](linux-first-15-minutes.md) |
+
+---
+
+## Dry run: rehearse this whole page against a planted box (lab only)
+
+**This is a practice step, not a game-day step.** It never runs on the real
+`lapis` or any scored box. The point of a dry run is to prove your detection
+actually fires — a clean box tells you nothing, because a broken `triage.ps1`
+also finds nothing on a clean box. So you dirty the box on purpose first, then
+run this whole page against it and check the plants show up.
+
+Do it on the **disposable lab box** (`lapis-test`), and take a snapshot before
+you start so you can get back to clean.
+
+**The loop, in order:**
+
+1. **Snapshot the lab VM** (in Proxmox / your hypervisor), so step 5 is a
+   guaranteed way back.
+
+2. **Plant the footholds** — the red-team fixture. It refuses to run without
+   both confirmations, because it drops *real* backdoors:
+   ```powershell
+   $env:CCDC_WIN_LAB = 1
+   .\redteam\windows-plant.ps1 -IAcceptThisBoxIsDisposable
+   ```
+   It tags every artifact `RT_LAB_PLANT` and prints the ground-truth list of
+   what it planted. Keep that list — it is your answer key.
+
+3. **Now run this page from the top, as if it were game day.** Setup → Phase 1
+   → Phase 2. Do not skip ahead knowing where the plants are; the whole value is
+   in whether the normal flow surfaces them.
+
+4. **Score yourself.** Every item on the plant's ground-truth list should show
+   up as a RED in `triage.ps1` (or in the `sentry.ps1 -Status` queue). Anything
+   on the answer key that your flow did **not** flag is the finding — that is a
+   gap in the tooling or in your order of operations, and it is exactly what a
+   dry run is for.
+
+5. **Clean up and confirm** — then re-run triage to prove the box came back
+   clean. A cleanup you did not verify is a box you no longer know the state of:
+   ```powershell
+   .\redteam\windows-plant.ps1 -IAcceptThisBoxIsDisposable -Cleanup
+   .\windows\triage.ps1
+   ```
+   Or just **revert the snapshot** from step 1 — simpler and leaves nothing
+   behind either way.
+
+To drill only the Guardian/Watchdog recovery chain rather than the full triage
+set, use the recovery self-test instead (same two interlocks) — see
+[Repeat the recovery proof](#repeat-the-recovery-proof-without-typing-each-failure-by-hand)
+above.
 
 ---
 
