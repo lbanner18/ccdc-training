@@ -140,7 +140,23 @@ if ($Phase -eq '1') {
 
     Step '3 of 6' 'the "before" picture (read-only)'
     Run 'recon' @{ Config = $cfgPath }
-    Pause-ForRead 'Copy the zip off the box with the line printed above'
+    $latest = Get-ChildItem -LiteralPath (Join-Path $cfgDir 'evidence') -Directory -Filter 'recon-*' -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($latest) {
+        $zip = Join-Path ($env:SystemDrive + '\') ($latest.Name + '.zip')
+        try {
+            Compress-Archive -LiteralPath $latest.FullName -DestinationPath $zip -Force -ErrorAction Stop
+            Write-Host ''
+            Write-Host "  Zipped the evidence to $zip" -ForegroundColor Green
+            Write-Host '  Take it off the box now: File Explorer -> C:\ -> right-click the zip -> Copy,' -ForegroundColor Yellow
+            Write-Host '  then paste it on your laptop.' -ForegroundColor Yellow
+        } catch {
+            Write-Host "  Could not zip $($latest.FullName): $($_.Exception.Message)" -ForegroundColor Red
+        }
+    } else {
+        Write-Host '  No recon folder found to zip - copy C:\ProgramData\CCDC\evidence off the box by hand.' -ForegroundColor Red
+    }
+    Pause-ForRead 'Copied the zip to your laptop'
 
     Step '4 of 6' 'what is wrong right now (read-only) - scoreduser / scoredservice first'
     Run 'triage' @{ Config = $cfgPath }

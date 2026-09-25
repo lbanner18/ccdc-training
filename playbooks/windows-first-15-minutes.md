@@ -71,8 +71,8 @@ copy the recon zip off · read the REDs · say `y` to harden after reading its l
    ```powershell
    .\windows\recon.ps1
    ```
-   Run the `Compress-Archive` line it prints, right-click the zip in File Explorer →
-   **Copy**, and paste it on your laptop.
+   Run the two zip lines it prints (the runner zips it for you), then right-click
+   the zip in `C:\` in File Explorer → **Copy**, and paste it on your laptop.
 
 4. **What is wrong right now** (read-only) — fix `scoreduser` / `scoredservice` first
    ```powershell
