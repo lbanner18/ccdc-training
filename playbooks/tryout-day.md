@@ -43,7 +43,8 @@ cd ~/ccdc-training && chmod +x linux/*.sh
 CFG=/tmp/ccdc-linux.env; cp config/tryout-linux.env "$CFG" && chmod 600 "$CFG"
 sudo ./linux/passwords.sh --config "$CFG" --apply
 ```
-Paste **block 1** of your sheet, press **Ctrl-D**. It sets all ten, then logs in
+Paste **block 1** of your sheet, press **Ctrl-D**. It sets all ten (an account a
+box doesn't have is skipped and named), then logs in
 to FTP and POP3 as each one to prove the services took them. Sessions still
 open under the OLD password are listed; end them with the printed command, or
 re-run with `--kick`. Also `sudo passwd root` (sheet section 4).

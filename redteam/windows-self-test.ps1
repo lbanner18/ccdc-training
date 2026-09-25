@@ -1130,7 +1130,7 @@ $pcr = Join-Path $work 'pcr.txt'
 $pwOut = (& $pwTool -Config $cfgPath -Apply -InputFile $pcr *>&1 | Out-String -Width 4096)
 $pwRc = $LASTEXITCODE
 if ($pwRc -eq 1 -and $pwOut -match 'Nothing was changed' -and $pwOut -match 'line 2: expected exactly one comma' -and
-    $pwOut -match "no account 'nosuch'" -and $pwOut -match 'line 4: ' -and $pwOut -notmatch 'SETTING') {
+    $pwOut -notmatch 'line 3: ' -and $pwOut -match 'line 4: ' -and $pwOut -notmatch 'SETTING') {
     ok 'passwords.ps1 refuses a malformed block whole and names each bad line'
 } else { nope ("passwords.ps1 bad-block handling regressed (rc={0})" -f $pwRc) }
 @('banneluk,Ab3d-Ef4h-Jk5m-Np6q', 'Administrator,Qr7s-Tu8v-Wx9y-Za2b') | Set-Content -LiteralPath $pcr -Encoding UTF8
@@ -1138,6 +1138,19 @@ $pwOut2 = (& $pwTool -Config $cfgPath -InputFile $pcr *>&1 | Out-String -Width 4
 if ($pwOut2 -match 'reads cleanly: 2 account' -and $pwOut2 -notmatch 'SETTING') {
     ok 'passwords.ps1 accepts a clean block and changes nothing without -Apply'
 } else { nope 'passwords.ps1 rejected a clean block, or changed something without -Apply' }
+# One block for every box: an account this box lacks is skipped and named.
+@('banneluk,Ab3d-Ef4h-Jk5m-Np6q', 'nosuch,Qr7s-Tu8v-Wx9y-Za2b') | Set-Content -LiteralPath $pcr -Encoding UTF8
+$pwOut3 = (& $pwTool -Config $cfgPath -InputFile $pcr *>&1 | Out-String -Width 4096)
+$pwRc3 = $LASTEXITCODE
+if ($pwRc3 -eq 0 -and $pwOut3 -match 'reads cleanly: 1 account' -and $pwOut3 -match 'Not on this box, skipped: nosuch') {
+    ok 'passwords.ps1 skips and names an account this box does not have, and keeps the rest'
+} else { nope ("passwords.ps1 refused a block because one account is not on this box (rc={0})" -f $pwRc3) }
+@('nosuch,Ab3d-Ef4h-Jk5m-Np6q', 'nosuch2,Qr7s-Tu8v-Wx9y-Za2b') | Set-Content -LiteralPath $pcr -Encoding UTF8
+$pwOut4 = (& $pwTool -Config $cfgPath -Apply -InputFile $pcr *>&1 | Out-String -Width 4096)
+$pwRc4 = $LASTEXITCODE
+if ($pwRc4 -eq 1 -and $pwOut4 -match 'none of these accounts exist' -and $pwOut4 -notmatch 'SETTING') {
+    ok 'passwords.ps1 stops when no account in the block is on this box'
+} else { nope ("passwords.ps1 did not stop on a block naming no account here (rc={0})" -f $pwRc4) }
 
 # The domain controller paths, measured on a 2016 DC.
 $triNow = [System.IO.File]::ReadAllText((Join-Path $root 'windows\triage.ps1'))

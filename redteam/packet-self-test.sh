@@ -72,7 +72,7 @@ printf '%s,Ab3d-Ef4h-Jk5m-Np6q\n%s,Ab3d-Ef4h-Jk5m-Np6q\nnosuchuser1,Ab3d-Ef4h-Jk
 out=$("$pw" --config "$work/cfg" --apply <"$work/bad" 2>&1); rc=$?
 if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'Nothing was changed' &&
    printf '%s' "$out" | grep -q 'line 2: .* appears twice' &&
-   printf '%s' "$out" | grep -q "line 3: there is no account 'nosuchuser1'" &&
+   ! printf '%s' "$out" | grep -q 'line 3:' &&
    printf '%s' "$out" | grep -q 'line 4: .* minimum' &&
    printf '%s' "$out" | grep -q "line 5: .*packet's default password" &&
    printf '%s' "$out" | grep -q 'line 6: contains a space' &&
@@ -81,6 +81,25 @@ if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'Nothing was changed' &&
   ok 'a bad block is refused whole, every bad line named, before root is even needed'
 else
   no "a bad block was not refused line by line (rc=$rc): $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+fi
+# One block for every box, and a box need not have every account: the ones it
+# lacks are skipped and named, not a reason to refuse the ones it has.
+printf 'CCDC_EVIDENCE_DIR="%s/ev"\nCCDC_INTERACTIVE_USERS="%s nosuchuser1 nosuchuser2"\n' "$work" "$me" >"$work/cfg2"
+printf '%s,Ab3d-Ef4h-Jk5m-Np6q\nnosuchuser1,Qr7s-Tu8v-Wx9y-Za2b\n' "$me" >"$work/partial"
+out=$("$pw" --config "$work/cfg2" <"$work/partial" 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q 'reads cleanly: 1 account' &&
+   printf '%s' "$out" | grep -q 'Not on this box, skipped: nosuchuser1' &&
+   ! printf '%s' "$out" | grep -q 'still on the packet password'; then
+  ok 'an account this box does not have is skipped and named; the rest of the block still applies'
+else
+  no "a block with an account this box lacks is refused, or misreported (rc=$rc): $(printf '%s' "$out" | head -3 | tr '\n' ' ')"
+fi
+printf 'nosuchuser1,Ab3d-Ef4h-Jk5m-Np6q\nnosuchuser2,Qr7s-Tu8v-Wx9y-Za2b\n' >"$work/nobody"
+out=$("$pw" --config "$work/cfg2" --apply <"$work/nobody" 2>&1); rc=$?
+if [ "$rc" -eq 1 ] && printf '%s' "$out" | grep -q 'none of these accounts exist' && ! printf '%s' "$out" | grep -q 'SETTING'; then
+  ok 'a block with no account on this box stops: the wrong box, or the wrong block'
+else
+  no "a block naming no account on this box was not stopped (rc=$rc)"
 fi
 
 # --- fw.sh: FTP keeps working through the firewall ---------------------------------

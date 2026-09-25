@@ -73,6 +73,7 @@ if ($InputFile) {
 $names = New-Object System.Collections.ArrayList
 $secrets = New-Object System.Collections.ArrayList
 $errors = New-Object System.Collections.ArrayList
+$absent = New-Object System.Collections.ArrayList
 $n = 0
 foreach ($line in $raw) {
     $n++
@@ -88,10 +89,9 @@ foreach ($line in $raw) {
     if ($p.Length -lt $minLen) { [void]$errors.Add("line ${n}: $u's password is $($p.Length) characters; the minimum is $minLen"); continue }
     if ($packetPw -and $p -ceq $packetPw) { [void]$errors.Add("line ${n}: $u is being set to the packet's default password, which the red team has"); continue }
     if (Test-CcdcListContains -Needle $u -List @($names)) { [void]$errors.Add("line ${n}: $u appears twice"); continue }
-    if (-not (Test-AccountExists -Name $u)) {
-        $where = if ($isDc) { 'in the domain' } else { "on $env:COMPUTERNAME" }
-        [void]$errors.Add("line ${n}: there is no account '$u' $where"); continue
-    }
+    # The same block goes on every box, and a box need not have every account:
+    # skip, and say so, rather than refuse the accounts it does have.
+    if (-not (Test-AccountExists -Name $u)) { [void]$absent.Add($u); continue }
     [void]$names.Add($u); [void]$secrets.Add($p)
 }
 if ($errors.Count -gt 0) {
@@ -99,11 +99,16 @@ if ($errors.Count -gt 0) {
     foreach ($e in $errors) { Write-Host "  $e" }
     exit 1
 }
-if ($names.Count -eq 0) { Write-CcdcDie 'no user,password lines were read' }
-$missing = @($scored | Where-Object { -not (Test-CcdcListContains -Needle $_ -List @($names)) })
+if ($names.Count -eq 0) {
+    $where = if ($isDc) { 'in the domain' } else { "on $env:COMPUTERNAME" }
+    if ($absent.Count) { Write-CcdcDie ("none of these accounts exist {0}: {1} - is this the right box?" -f $where, ($absent -join ' ')) }
+    Write-CcdcDie 'no user,password lines were read'
+}
+$missing = @($scored | Where-Object { -not (Test-CcdcListContains -Needle $_ -List @($names)) -and (Test-AccountExists -Name $_) })
 
 if (-not $Apply) {
     Write-Host ("The block reads cleanly: {0} account(s): {1}" -f $names.Count, ($names -join ' '))
+    if ($absent.Count) { Write-Host ("Not on this box, skipped: {0}" -f ($absent -join ' ')) }
     if ($missing.Count) { Write-Host ("NOT in the block, still on the packet password: {0}" -f ($missing -join ' ')) -ForegroundColor Yellow }
     Write-Host 'Nothing was changed. Re-run with -Apply and paste it again to set them.'
     exit 0
@@ -113,6 +118,7 @@ if (-not $Apply) {
 $kind = if ($isDc) { 'DOMAIN' } else { 'LOCAL' }
 Write-Host ''
 Write-Host ("SETTING {0} {1} PASSWORD(S) on {2}" -f $names.Count, $kind, $env:COMPUTERNAME)
+if ($absent.Count) { Write-Host ("  (not on this box, skipped: {0})" -f ($absent -join ' ')) }
 Write-Host ''
 Add-Type -AssemblyName System.DirectoryServices.AccountManagement
 $ctxType = if ($isDc) { [System.DirectoryServices.AccountManagement.ContextType]::Domain } else { [System.DirectoryServices.AccountManagement.ContextType]::Machine }

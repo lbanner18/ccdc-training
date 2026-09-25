@@ -119,7 +119,9 @@ if [ "$generate" -eq 1 ]; then
     printf '===== 4. NOT SCORED: change these too, and put NONE of them in Quotient =====\n'
     printf '  root (Linux boxes)     %s   sudo passwd root\n' "$root_pw"
     printf '  Administrator (Win)    %s   net user Administrator *\n' "$admin_pw"
-    printf '  your backup admin      %s   users.sh --create-admin / users.ps1 -CreateAdmin\n' "$backup_pw"
+    printf '  your backup admin      %s   Linux: users.sh --create-admin NAME asks for this one\n' "$backup_pw"
+    printf '        name (one only you know): ________________\n'
+    printf '        lapis: users.ps1 -CreateAdmin sets its OWN password and prints it. Copy it here: ____________________\n'
     printf '  vyos (router)          %s\n' "$vyos_pw"
     printf '        configure\n'
     printf '        set system login user vyos authentication plaintext-password '"'"'%s'"'"'\n' "$vyos_pw"
@@ -148,6 +150,7 @@ fi
 names=()
 secrets=()
 errors=''
+absent=''
 n=0
 while IFS= read -r line || [ -n "$line" ]; do
   n=$((n + 1))
@@ -175,8 +178,11 @@ while IFS= read -r line || [ -n "$line" ]; do
   for seen in "${names[@]+"${names[@]}"}"; do
     [ "$seen" = "$u" ] && { errors="$errors  line $n: $u appears twice\n"; continue 2; }
   done
+  # The same block goes on every box, and a box need not have every account
+  # (the unscored one may have only the admins): skip, and say so, rather
+  # than refuse the accounts it does have.
   if ! getent passwd "$u" >/dev/null 2>&1; then
-    errors="$errors  line $n: there is no account '$u' on $(hostname)\n"; continue
+    absent="$absent $u"; continue
   fi
   names+=("$u")
   secrets+=("$p")
@@ -188,19 +194,24 @@ unset line p
   printf '%b' "$errors" >&2
   exit 1
 }
-[ "${#names[@]}" -gt 0 ] || ccdc_die "no user,password lines were read"
+if [ "${#names[@]}" -eq 0 ]; then
+  [ -z "$absent" ] || ccdc_die "none of these accounts exist on $(hostname):$absent - is this the right box?"
+  ccdc_die "no user,password lines were read"
+fi
 
 scored=${CCDC_INTERACTIVE_USERS:-}
 missing=''
 if [ -n "$scored" ]; then
   for s in $scored; do
     [ "$s" = root ] && continue
-    ccdc_list_contains "$s" "${names[*]}" || missing="$missing $s"
+    ccdc_list_contains "$s" "${names[*]}" && continue
+    getent passwd "$s" >/dev/null 2>&1 && missing="$missing $s"
   done
 fi
 
 if [ "$apply" -ne 1 ]; then
   printf 'The block reads cleanly: %s account(s): %s\n' "${#names[@]}" "${names[*]}"
+  [ -z "$absent" ] || printf 'Not on this box, skipped:%s\n' "$absent"
   [ -z "$missing" ] || printf 'NOT in the block, still on the packet password:%s\n' "$missing"
   printf 'Nothing was changed. Re-run with --apply and paste it again to set them.\n'
   exit 0
@@ -213,7 +224,9 @@ evidence=$(ccdc_timestamp_dir)
 mkdir -p "$evidence"
 log="$evidence/passwords.log"
 
-printf '\nSETTING %s PASSWORD(S) on %s\n\n' "${#names[@]}" "$(hostname)"
+printf '\nSETTING %s PASSWORD(S) on %s\n' "${#names[@]}" "$(hostname)"
+[ -z "$absent" ] || printf '  (not on this box, skipped:%s)\n' "$absent"
+printf '\n'
 failed=''
 i=0
 while [ "$i" -lt "${#names[@]}" ]; do
