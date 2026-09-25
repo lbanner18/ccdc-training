@@ -1,6 +1,8 @@
 # Local box configurations and evidence are never committed.
 config/*.env
 !config/example.env
+!config/tryout-linux.env
+!config/tryout-windows.env
 evidence/
 backups/
 *.log
@@ -9,6 +11,8 @@ backups/
 # it becomes public on competition day.
 *.env
 !config/example.env
+!config/tryout-linux.env
+!config/tryout-windows.env
 evidence/
 
 # Windows tools write state under CCDC_WIN_ROOT; a stray .tmp here means a
