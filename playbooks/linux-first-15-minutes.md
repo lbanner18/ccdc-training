@@ -98,7 +98,10 @@ sudo ./linux/audit.sh --config "$CFG" --apply
 sudo ./linux/audit.sh --config "$CFG" --capture
 ```
 Changed the config after this? `sudo ./linux/sentry.sh --config "$CFG" --reload-config --apply`
-Updated the kit after this (`git pull`, a re-push)? Run `sudo ./linux/arm.sh --config "$CFG" --apply` again —
+Updated the kit after this — `git pull` where you cloned with git, or on a box
+without it (redstone) re-fetch the tarball and overwrite the directory:
+`cd ~ && curl -L https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.tar.gz | tar xz && rm -rf ccdc-training && mv ccdc-training-main ccdc-training`
+— then run `sudo ./linux/arm.sh --config "$CFG" --apply` again either way:
 sentry runs from its own frozen copy, so a newer kit does not reach it until you do.
 
 ### B. When something new appears — the loop
