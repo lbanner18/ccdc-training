@@ -258,5 +258,31 @@ else
   no 'windows tools can require LDAP signing by default again - that refuses the scored LDAP login'
 fi
 
+# iproute2-180129 (Ubuntu 18.04's ss) prints Netid and State with no
+# separating space when they exactly fill the fixed column width -
+# "tcp"+"CLOSE-WAIT" is "tcpCLOSE-WAIT", one token. A live reverse shell in
+# CLOSE-WAIT (its listener already dead - exactly what killing the visible
+# half of a C2 pair leaves behind) then reads as an unrecognised state and is
+# silently skipped. Measured live on the 18.04 replica: the planted C2's
+# client-side shell and a UDP listener were both invisible to triage until
+# this was normalized.
+sed_norm=$(grep -m1 "ss -tuanpH 2>/dev/null | sed" "$tr_" | sed -E "s/^\\\$\\(ss -tuanpH 2>\/dev\/null \\| //; s/\\)\$//")
+if [ -z "$sed_norm" ]; then
+  no 'triage lost the ss column-collapse normalizer entirely'
+else
+  collapsed_tcp=$(printf 'tcpCLOSE-WAIT 1      0              1.2.3.4:1   1.2.3.4:2   users:(("bash",pid=999,fd=3))\n' | eval "$sed_norm")
+  collapsed_udp=$(printf 'udpUNCONN     0      0              0.0.0.0:1   0.0.0.0:*   users:(("python3",pid=999,fd=3))\n' | eval "$sed_norm")
+  normal_line=$(printf 'tcp   ESTAB      0      0              1.2.3.4:1   1.2.3.4:2   users:(("bash",pid=999,fd=3))\n' | eval "$sed_norm")
+  read -r n1 s1 _ <<<"$collapsed_tcp"
+  read -r n2 s2 _ <<<"$collapsed_udp"
+  read -r n3 s3 _ <<<"$normal_line"
+  if [ "$n1" = tcp ] && [ "$s1" = CLOSE-WAIT ] && [ "$n2" = udp ] && [ "$s2" = UNCONN ] &&
+     [ "$n3" = tcp ] && [ "$s3" = ESTAB ]; then
+    ok 'triage un-collapses ss rows where Netid and State ran together, without touching normally-spaced rows'
+  else
+    no "triage's ss normalizer is broken (tcp/state read as '$n1'/'$s1', '$n2'/'$s2', '$n3'/'$s3')"
+  fi
+fi
+
 printf 'packet self-test: %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

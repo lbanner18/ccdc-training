@@ -1403,6 +1403,16 @@ else
   seen_unpackaged=''
   while read -r netid state _ _ local_addr peer rest; do
     [ -n "${rest:-}" ] || continue
+    # This is the whole reason for the sed on the heredoc above: iproute2's
+    # older ss (measured: ss-180129, Ubuntu 18.04) pads Netid/State to a fixed
+    # width and drops the separating space entirely when they exactly fill it -
+    # "tcp" + "CLOSE-WAIT" prints as one token, "tcpCLOSE-WAIT", with nothing
+    # between them. read -r then puts that whole token in $netid, $state comes
+    # from the NEXT column instead, and the case below never matches - a live
+    # CLOSE-WAIT reverse shell read as "not a state I recognise" and skipped.
+    # Reproduced live: the planted C2's client-side shell, socket in
+    # CLOSE-WAIT after its listener died, was invisible until this was fixed.
+    #
     # CLOSE-WAIT and SYN-SENT too. Found live: the planted C2 shell outlived its
     # server and held a CLOSE-WAIT socket for an hour, invisible here, because
     # only ESTAB counted. A shell still holding a dead connection, or retrying
@@ -1617,7 +1627,7 @@ else
     net_unpkg_buf="$net_unpkg_buf${F}ls -l -- $qexe && $(ccdc_have dpkg-query && printf 'dpkg -S' || printf 'rpm -qf') -- $qexe"$'\n'
     net_unpkg_buf="$net_unpkg_buf${F}sha256sum -- $qexe          # then look it up off the box"$'\n'
   done <<EOF
-$(ss -tuanpH 2>/dev/null)
+$(ss -tuanpH 2>/dev/null | sed -E 's/^(tcp6?|udp6?)([A-Z])/\1 \2/')
 EOF
 
   if [ -n "$net_red_buf" ]; then
