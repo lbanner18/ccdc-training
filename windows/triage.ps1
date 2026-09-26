@@ -379,6 +379,10 @@ if (@($services).Count -eq 0) {
     foreach ($s in $services) {
         $path = $s.PathName
         if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        # Stopped AND disabled cannot run - which is exactly what sentry's svcpath
+        # action leaves behind (evidence kept, not deleted). Re-enable or start
+        # it and it is reported again.
+        if ($s.StartMode -eq 'Disabled' -and $s.State -eq 'Stopped') { continue }
 
         # The executable, dug out of a command line that may carry arguments.
         $exe = $path.Trim()
