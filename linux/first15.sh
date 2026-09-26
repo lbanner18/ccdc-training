@@ -117,6 +117,16 @@ if [ "$phase" = 1 ]; then
     pause 'Submitted the PCR (or will right after this)'
   fi
 
+  if [ -x /opt/splunk/bin/splunk ] || [ -x /opt/splunkforwarder/bin/splunk ]; then
+    printf '\n'
+    note 'Splunk is on this box. Is it actually shipping logs? Read-only check, then one tagged test event:'
+    run "$SCRIPT_DIR/splunk.sh" --config "$CFG"
+    run "$SCRIPT_DIR/splunk.sh" --config "$CFG" --test-event --apply
+    note 'Run the search above in the Splunk web UI (http://THIS-BOX:8000) when you have a minute.'
+    note 'Found = logs arrive. Never disable forwarding: the rules forbid it.'
+    pause 'Copied the search'
+  fi
+
   step '3 of 7' 'let the box fill in its services'
   run "$SCRIPT_DIR/discover.sh" --config "$CFG"
   note "Read that table against Quotient's service list for THIS box."

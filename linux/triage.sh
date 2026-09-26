@@ -642,6 +642,46 @@ else
   clean "no scheduled job launches a file containing a reverse shell"
 fi
 
+# A schedule does not have to contain anything incriminating to be persistence:
+# `*/5 * * * * root /usr/local/bin/anything` passes both checks above, and once
+# the payload is moved away it points at nothing. Same test as the unit check:
+# no package installed it, and it was written after the box was built.
+# /var/spool/cron is never packaged, so there it is only the age.
+begin
+cron_new=''
+for source in "${cron_sources[@]}"; do
+  [ "$source" = /etc/crontab ] && continue
+  own_payload "$source" && continue
+  case "$source" in /var/spool/cron/*) ;; *) pkg_owns "$source" && continue ;; esac
+  newer_than_box "$source" || continue
+  grep -qvE '^[[:space:]]*(#|$|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=)' "$source" 2>/dev/null || continue
+  cron_new="$cron_new $source"
+done
+if [ -n "$cron_new" ]; then
+  amber "scheduled job(s) no package installed, written after this box was built   [CARD 3]"
+  detail "a cron line does not have to look evil to be persistence - is each one yours?"
+  for f in $cron_new; do
+    emit AMBER cronnew "$f" "unpackaged cron file newer than the box"
+    detail "$f  - written $(date -d "@$(stat -c '%Y' "$f" 2>/dev/null)" '+%m-%d %H:%M' 2>/dev/null)"
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done \
+      < <(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | head -4)
+  done
+  fixhdr
+  for f in $cron_new; do
+    printf -v qf '%q' "$f"
+    printf -v qev '%q' "/var/tmp/evidence-cron-$(basename -- "$f")"
+    case "$f" in
+      /var/spool/cron/*)
+        cuser=$(basename -- "$f"); printf -v qcu '%q' "$cuser"
+        fix "sudo cp -- $qf $qev; sudo EDITOR=nano crontab -u $qcu -e   # delete only the lines you did not write" ;;
+      *)
+        fix "sudo cp -- $qf $qev && sudo rm -f -- $qf   # the whole file, if none of it is yours" ;;
+    esac
+  done
+else
+  clean "no unpackaged scheduled job newer than the box"
+fi
+
 # --- 5. systemd units that call home -----------------------------------------
 begin
 unithits=$(grep -rIlE "$shells" /etc/systemd/system /run/systemd/system 2>/dev/null)
@@ -1122,6 +1162,53 @@ EOF
   done
 else
   clean "no process runs from a world-writable directory"
+fi
+
+# A command line that opens bash's /dev/tcp or /dev/udp is a hand-made network
+# connection, and nothing legitimate on a server is started that way. The
+# socket check below only sees it while the connection is up; this sees the
+# process itself, so one whose server went away is still reported.
+# The kit's own probes (watchdog.sh, splunk.sh) open /dev/tcp in a short-lived
+# child; a process whose parent chain runs from the kit is not a finding.
+kit_descendant() {
+  local p=$1 i cmd g=${CCDC_GUARDIAN_NAME:-node-health}
+  for i in 1 2 3 4; do
+    p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
+    [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null || return 1
+    cmd=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)
+    case "$cmd" in
+      *"$SCRIPT_DIR/"*|*"${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}/"*|*"${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-node-observer}}/"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+begin
+devtcp=''
+if [ "$(id -u)" -eq 0 ]; then
+  for c in /proc/[0-9]*/cmdline; do
+    p=${c#/proc/}; p=${p%%/*}
+    [ "$p" = "$$" ] && continue
+    tr '\0' ' ' <"$c" 2>/dev/null | grep -qE '/dev/(tcp|udp)/' || continue
+    kit_descendant "$p" && continue
+    devtcp="$devtcp $p"
+  done
+fi
+if [ -n "$devtcp" ]; then
+  red "process(es) whose command line opens a raw /dev/tcp or /dev/udp connection   [CARD 12]"
+  detail "a shell wired to the network by hand - kill it after you have preserved it"
+  for p in $devtcp; do
+    pexe=$(readlink "/proc/$p/exe" 2>/dev/null) || pexe=unknown
+    emit RED netproc "pid$p:$pexe" "command line opens a /dev/tcp or /dev/udp connection"
+    detail "pid $p  $pexe"
+    detail "  cmdline: $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-88)"
+  done
+  fixhdr
+  for p in $devtcp; do
+    fix "ps -o pid,ppid,user,lstart,cmd -p $p   # who started it, and when - for the report"
+    fix "sudo pkill -9 -P $p; sudo kill -9 $p   # its children first: they can hold the connection"
+  done
+elif [ "$(id -u)" -eq 0 ]; then
+  clean "no process command line opens a raw /dev/tcp or /dev/udp connection"
 fi
 
 # Deleted-on-disk executables: the classic "drop it, run it, unlink it" so the
@@ -1799,6 +1886,11 @@ fi
 # && is a condition continued on the next line; matching it flagged Ubuntu's
 # own /etc/profile.d/Z99-cloud-locale-test.sh RED on every cloud-image box.
 rc_launch='nohup |setsid |disown|(^|[^&])&[[:space:]]*\)|(^|[^&])&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
+# Sourcing a HIDDEN file from a system directory (". /usr/local/lib/.x") runs
+# someone's code on every login with no launch keyword at all. Stock rc files
+# source ~/.bash_aliases and /etc/profile.d/*.sh, never a dot-file under /usr,
+# /opt, /var, /etc, /lib, /srv or /run.
+rc_launch="$rc_launch"'|(^|[;&|[:space:]])(\.|source)[[:space:]]+/(usr|opt|var|etc|lib|lib64|srv|run|bin|sbin)/([^[:space:]]*/)?\.[A-Za-z0-9_]'
 begin
 rchits=''
 for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc /etc/profile \
