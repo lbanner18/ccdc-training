@@ -44,6 +44,23 @@ run() {
   "$@"
 }
 
+# One line per triage finding, instead of the full report with its fix commands.
+brief() {
+  local out n
+  out=$("$SCRIPT_DIR/triage.sh" --config "$CFG" --quiet 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^  (RED|AMBER) ')
+  if [ -z "$out" ]; then ok 'triage: 0 RED, 0 AMBER'; return 0; fi
+  printf '%s\n' "$out" | sed -e $'s/^  RED /  \033[1;31mRED\033[0m /' -e $'s/^  AMBER /  \033[1;33mAMBER\033[0m /'
+  n=$(printf '%s\n' "$out" | grep -c '^  RED ')
+  if [ "$n" -eq 0 ]; then ok '0 RED'; else warn "$n RED"; fi
+  return "$n"
+}
+full_report_offer() {
+  printf '  f = full report with fix commands · Enter = continue: '
+  read -r a || a=''
+  case "$a" in f|F) run "$SCRIPT_DIR/triage.sh" --config "$CFG"; pause 'Full report above' ;; esac
+}
+
 phase=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -62,9 +79,22 @@ printf '  Ctrl-C stops at any point; re-running is safe.\n'
 if [ "$phase" = 1 ]; then
 
   step '1 of 7' 'the config'
-  if [ -f "$CFG" ] && ask "$CFG already exists (an old snapshot's?). Keep it?" y; then
+  keep=0
+  if [ -f "$CFG" ]; then
+    missing=$(comm -23 <(grep -o '^CCDC_[A-Z0-9_]*' "$KIT_ROOT/config/tryout-linux.env" | sort -u) \
+                       <(grep -o '^CCDC_[A-Z0-9_]*' "$CFG" | sort -u) | wc -l)
+    if [ "$missing" -gt 0 ]; then
+      warn "$CFG is an OLD config - $missing setting(s) missing. Replacing it."
+      ask 'Replace with a fresh copy?' y || keep=1
+    else
+      ask "$CFG already exists and is complete. Keep it?" y && keep=1
+    fi
+  fi
+  if [ "$keep" -eq 1 ]; then
     printf '  using the existing %s\n' "$CFG"
   else
+    # rm first: root cannot overwrite another user's file in /tmp (fs.protected_regular)
+    rm -f "$CFG"
     cp "$KIT_ROOT/config/tryout-linux.env" "$CFG" && chmod 600 "$CFG" || die "could not write $CFG"
     ok "copied config/tryout-linux.env -> $CFG"
   fi
@@ -102,8 +132,9 @@ if [ "$phase" = 1 ]; then
   pause 'Note where the evidence went'
 
   step '5 of 7' 'what is wrong right now (read-only)'
-  run "$SCRIPT_DIR/triage.sh" --config "$CFG"
-  pause 'Read the REDs. Fix a scored-user or scored-service RED before cutting'
+  brief
+  note 'Only a scoreduser/scoredservice RED needs fixing now. The rest gets fixed in Phase 2.'
+  full_report_offer
 
   step '6 of 7' 'cut what nothing scored needs - read the list first'
   run "$SCRIPT_DIR/harden.sh" --config "$CFG"
@@ -146,25 +177,38 @@ fi
 # fw.sh and sshd.sh roll themselves back unless confirmed from a NEW session.
 # Confirming from this one proves nothing: it is already in.
 guarded() {
-  local tool=$1 what=$2
-  run "$SCRIPT_DIR/$tool" --config "$CFG" --dry-run
-  if ! ask "Apply the $what change above?"; then
-    note "skipped. Later: sudo ./linux/$tool --config $CFG --apply"
+  local tool=$1 what=$2 key=CCDC_FIREWALL_ROLLBACK_SECONDS secs start st a
+  if ! run "$SCRIPT_DIR/$tool" --config "$CFG" --dry-run; then
+    warn "$what: cannot run with this config (reason above) - SKIPPED, moving on."
     return
   fi
-  local key=CCDC_FIREWALL_ROLLBACK_SECONDS secs
+  if ! ask "Apply the $what change?" y; then
+    note "skipped. Later: sudo $SCRIPT_DIR/$tool --config $CFG --apply"
+    return
+  fi
   [ "$tool" = sshd.sh ] && key=CCDC_SSH_ROLLBACK_SECONDS
   secs=$(set -a; . "$CFG" >/dev/null 2>&1; printf '%s' "${!key:-120}")
-  note "It rolls back in $secs seconds unless confirmed from a NEW ssh session."
-  note "Open a second terminal and ssh in NOW. Have this ready to paste there:"
-  printf '     cd ~/ccdc-training && sudo ./linux/%s --config %s --confirm\n' "$tool" "$CFG"
-  if ! ask 'Second session open and ready?'; then
-    note "not applied. Later: sudo ./linux/$tool --config $CFG --apply"
+  if ! run "$SCRIPT_DIR/$tool" --config "$CFG" --apply >/dev/null; then
+    warn "$what: apply FAILED - nothing changed, nothing to confirm."
     return
   fi
-  run "$SCRIPT_DIR/$tool" --config "$CFG" --apply
-  pause "Confirmed from the NEW session (if it would not connect, let it roll back)"
-  run "$SCRIPT_DIR/$tool" --config "$CFG" --status
+  start=$(date +%s)
+  printf '\n'
+  warn "$what applied - auto-rollback in ${secs}s."
+  note "OTHER TAB: ssh in fresh, then paste:"
+  printf '\n     sudo %s/%s --config %s --confirm\n\n' "$SCRIPT_DIR" "$tool" "$CFG"
+  while :; do
+    printf '  Enter = I confirmed it · r = roll back now: '
+    read -r a || { warn "no input - $what will keep itself only if confirmed in time."; return; }
+    case "$a" in r|R) run "$SCRIPT_DIR/$tool" --config "$CFG" --rollback; return ;; esac
+    st=$("$SCRIPT_DIR/$tool" --config "$CFG" --status 2>&1)
+    case "$st" in
+      *PENDING*) warn "NOT confirmed yet ($(( secs - $(date +%s) + start ))s left). Paste the line above in a NEW session." ;;
+      *) if [ $(( $(date +%s) - start )) -lt "$secs" ]; then ok "$what: confirmed and kept."
+         else warn "$what: the timer ran out - it ROLLED BACK. Re-run Phase 2 to try again."; fi
+         return ;;
+    esac
+  done
 }
 
 step '1 of 5' 'firewall'
@@ -173,11 +217,30 @@ guarded fw.sh 'firewall'
 step '2 of 5' 'sshd'
 guarded sshd.sh 'sshd'
 
-step '3 of 5' 'down to 0 RED'
-run "$SCRIPT_DIR/triage.sh" --config "$CFG"
-pause 'Fix every RED before freezing - the freeze blesses whatever is here'
+step '3 of 5' 'down to 0 RED - fix by number'
+run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --status
+while :; do
+  printf '\n  a = fix every RED · NUMBER = fix that one (AMBERs: read first) · r = re-list · Enter = done: '
+  read -r ans || ans=''
+  case "$ans" in
+    '') break ;;
+    r|R) run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --status ;;
+    a|A) run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --approve --apply ;;
+    *[!0-9]*) note 'a, a number, r, or Enter' ;;
+    *) run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --approve "$ans" --apply ;;
+  esac
+done
+printf '\n'
+brief; reds=$?
+if [ "$reds" -gt 0 ]; then
+  note 'These need a judgement call. f shows each one with its exact fix - run those in your other tab.'
+  full_report_offer
+fi
 
 step '4 of 5' 'freeze the clean box'
+if [ "$reds" -gt 0 ]; then
+  warn "$reds RED still open - blessing now would mark them as normal. Answer n, fix them, re-run Phase 2."
+fi
 if ask 'Bless the baseline now (0 RED, and everything left is yours)?'; then
   run "$SCRIPT_DIR/baseline.sh" --config "$CFG" --bless --stable-for 20 --apply
 else

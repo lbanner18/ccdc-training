@@ -1204,7 +1204,7 @@ EOF
     fixhdr
     for p in $unexpected; do
       fix "sudo ss -tlnp 'sport = :$p'                 # what holds port $p"
-      fix "sudo systemctl status \$(ss -tlnpH 'sport = :$p' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 | xargs -r ps -o unit= -p)"
+      fix "sudo ss -tlnpH 'sport = :$p' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | xargs -r sudo ps -o pid,user,unit,lstart,cmd -p   # who, which unit, what command"
     done
     fix "# THEN decide, and the order matters:"
     fix "#  - it is a scored service on a port you forgot    -> add it to CCDC_ALLOWED_TCP_PORTS"
@@ -1570,7 +1570,7 @@ else
         # The tool told them to. So this branch answers the question the
         # heading actually asks - WHOSE process is this - and offers nothing
         # that can take a service down.
-        entry="$entry${F}systemctl status \$(ps -o unit= -p $qpid 2>/dev/null | tr -d ' ')   # which unit owns it?"$'\n'
+        entry="$entry${F}ps -o unit= -p $qpid 2>/dev/null | xargs -r systemctl status --no-pager   # which unit owns it?"$'\n'
         entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid"$'\n'
         entry="$entry${F}grep -n . <<<\"\$(ps -o cmd= -p $qpid)\"   # is this the packet's service?"$'\n'
         # Commented, because everything inside a "run this" block gets pasted.
