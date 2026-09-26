@@ -91,6 +91,27 @@ if ($WrongOnly) {
     }
 }
 
+# ---- what is left: every RED, including the ones the list above cannot fix ----
+Hdr 'WHAT IS LEFT'
+$triage = Join-Path $PSScriptRoot 'triage.ps1'
+& $triage -Config $cfgPath -Quiet -NoEvidence *> $null
+$ff = Join-Path $env:ProgramData 'CCDC\state\findings.txt'
+$reds = @()
+if (Test-Path -LiteralPath $ff) { $reds = @(Get-Content -LiteralPath $ff | Where-Object { $_ -like 'RED|*' }) }
+if ($reds.Count -eq 0) {
+    Write-Host '  0 RED.' -ForegroundColor Green
+} else {
+    foreach ($r in $reds) {
+        $f = $r -split '\|', 4
+        Write-Host ('  RED  {0,-12} {1}' -f $f[1], $f[2]) -ForegroundColor Red
+        if ($f.Count -ge 4) { Write-Host ('       {0}' -f $f[3]) }
+    }
+    Write-Host ''
+    Write-Host ('  {0} RED left - the list above cannot fix these by number. Each one, with its exact fix,' -f $reds.Count) -ForegroundColor Red
+    Write-Host '  in your SECOND elevated window:' -ForegroundColor Red
+    Write-Host ("     powershell -ExecutionPolicy Bypass -File {0}" -f $triage) -ForegroundColor White
+}
+
 Write-Host ''
 Write-Host '  Run this again any time - a popup, or you come back to this box:' -ForegroundColor Green
 Write-Host "     $again" -ForegroundColor White
