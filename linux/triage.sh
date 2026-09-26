@@ -1704,7 +1704,7 @@ else
     net_unpkg_buf="$net_unpkg_buf${F}ls -l -- $qexe && $(ccdc_have dpkg-query && printf 'dpkg -S' || printf 'rpm -qf') -- $qexe"$'\n'
     net_unpkg_buf="$net_unpkg_buf${F}sha256sum -- $qexe          # then look it up off the box"$'\n'
   done <<EOF
-$(ss -tuanpH 2>/dev/null)
+$(ss -tuanpH 2>/dev/null | sed -E 's/^(tcp|udp)([A-Z])/\1 \2/')
 EOF
 
   if [ -n "$net_red_buf" ]; then
