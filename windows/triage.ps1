@@ -1180,7 +1180,11 @@ foreach ($svc in $allSvc) {
                           'service account. No service configuration is changed, so nothing',
                           'that watches service config will notice.',
                           ('  first service found here: {0}' -f $svcName)) `
-                -Fix @(("icacls ""{0}"" /remove:g ""{1}""" -f $dir, $id),
+                -Fix @("# /remove cannot touch an INHERITED grant: copy inheritance down first, then remove",
+                       ("icacls ""{0}"" /inheritance:d" -f $dir),
+                       ("icacls ""{0}"" /remove:g ""{1}""" -f $dir, $id),
+                       "# give read back, so a service running as a normal account can still load its binary",
+                       ("icacls ""{0}"" /grant ""{1}:(OI)(CI)RX""" -f $dir, $id),
                        ("icacls ""{0}""" -f $dir)) `
                 -Card 'CARD W11'
             break
