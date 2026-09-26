@@ -2243,6 +2243,40 @@ else
   clean "auth log is continuous with the journal"
 fi
 
+# --- SELinux denials (Rocky) ---------------------------------------------------
+# A denial is either an attacker hitting a wall or one of your own tools doing
+# something SELinux does not expect. Both are worth a look, neither is proof.
+if ccdc_have getenforce && [ "$(getenforce 2>/dev/null)" != Disabled ] && [ -r /var/log/audit/audit.log ]; then
+  begin
+  avc_since=$(( $(date +%s) - 1800 ))
+  avc=$(awk -v s="$avc_since" '
+    /type=AVC/ && / denied / {
+      t = $0; sub(/.*msg=audit\(/, "", t); sub(/\..*/, "", t); if (t + 0 < s) next
+      perms = $0; sub(/.*denied +\{ */, "", perms); sub(/ *\}.*/, "", perms)
+      comm = "?"; name = ""; n = split($0, f, " ")
+      for (i = 1; i <= n; i++) {
+        if (f[i] ~ /^comm=/) { comm = f[i]; sub(/^comm=/, "", comm); gsub(/"/, "", comm) }
+        if (f[i] ~ /^(name|path)=/) { name = f[i]; sub(/^[a-z]+=/, "", name); gsub(/"/, "", name) }
+      }
+      key = comm " tried to " perms (name != "" ? " " name : "")
+      if (!(key in cnt)) order[++k] = key
+      cnt[key]++
+    }
+    END { for (i = 1; i <= k; i++) printf "%s  (x%d)\n", order[i], cnt[order[i]] }' /var/log/audit/audit.log 2>/dev/null)
+  if [ -n "$avc" ]; then
+    amber "SELinux BLOCKED something in the last 30 minutes - an attacker hitting a wall, or your own tool"
+    avc_who=$(printf '%s\n' "$avc" | head -1 | awk '{print $1}' | tr -cd 'A-Za-z0-9._-')
+    emit AMBER selinux "${avc_who:-unknown}" "SELinux denied access in the last 30 minutes"
+    printf '%s\n' "$avc" | head -5 | while IFS= read -r l; do detail "$l"; done
+    detail "a shell, python, nc or perl being blocked for a web or mail service is the one to chase"
+    fixhdr
+    fix "sudo sealert -a /var/log/audit/audit.log | less   # what was blocked, why, in plain English"
+    fix "sudo ausearch -m AVC -ts recent -i               # the raw denials, last 10 minutes"
+  else
+    clean "no SELinux denials in the last 30 minutes"
+  fi
+fi
+
 # --- 10. Very recently modified /etc ------------------------------------------
 # Last, and only AMBER, because early in an event most hits are yours. It earns
 # its place later, when you know you changed nothing in the last ten minutes.
