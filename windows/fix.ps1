@@ -57,13 +57,13 @@ Hdr '1 of 2  WHAT IS WRONG - fix by number'
 Run 'sentry' @{ Status = $true }
 while ($true) {
     Write-Host ''
-    $a = Read-Host '  a = fix everything marked safe   NUMBER = fix that one (read a LOOK item first)   r = re-list   Enter = next'
+    $a = Read-Host '  a = fix every RED   NUMBERS = fix those, e.g. 2 4 5 (read each first)   r = re-list   Enter = next'
     $a = ([string]$a).Trim()
     if ($a -eq '') { break }
     elseif ($a -match '^[rR]$') { Run 'sentry' @{ Status = $true } }
     elseif ($a -match '^[aA]$') { Run 'sentry' @{ Approve = 'all'; Apply = $true } }
-    elseif ($a -match '^\d+$')  { Run 'sentry' @{ Approve = $a; Apply = $true } }
-    else { Write-Host '  type a, a number, r, or just Enter' -ForegroundColor Yellow }
+    elseif ($a -match '^\d+([\s,]+\d+)*$') { foreach ($n in ($a -split '[\s,]+')) { Run 'sentry' @{ Approve = $n; Apply = $true } } }
+    else { Write-Host '  type a, one or more numbers, r, or just Enter' -ForegroundColor Yellow }
 }
 
 # ---- part 2: what changed since the box was frozen ---------------------------
