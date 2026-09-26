@@ -44,6 +44,23 @@ run() {
   "$@"
 }
 
+# One line per triage finding, instead of the full report with its fix commands.
+brief() {
+  local out n
+  out=$("$SCRIPT_DIR/triage.sh" --config "$CFG" --quiet 2>/dev/null \
+    | sed 's/\x1b\[[0-9;]*m//g' | grep -E '^  (RED|AMBER) ')
+  if [ -z "$out" ]; then ok 'triage: 0 RED, 0 AMBER'; return 0; fi
+  printf '%s\n' "$out" | sed -e $'s/^  RED /  \033[1;31mRED\033[0m /' -e $'s/^  AMBER /  \033[1;33mAMBER\033[0m /'
+  n=$(printf '%s\n' "$out" | grep -c '^  RED ')
+  if [ "$n" -eq 0 ]; then ok '0 RED'; else warn "$n RED"; fi
+  return "$n"
+}
+full_report_offer() {
+  printf '  f = full report with fix commands · Enter = continue: '
+  read -r a || a=''
+  case "$a" in f|F) run "$SCRIPT_DIR/triage.sh" --config "$CFG"; pause 'Full report above' ;; esac
+}
+
 phase=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -62,9 +79,22 @@ printf '  Ctrl-C stops at any point; re-running is safe.\n'
 if [ "$phase" = 1 ]; then
 
   step '1 of 7' 'the config'
-  if [ -f "$CFG" ] && ask "$CFG already exists (an old snapshot's?). Keep it?" y; then
+  keep=0
+  if [ -f "$CFG" ]; then
+    missing=$(comm -23 <(grep -o '^CCDC_[A-Z0-9_]*' "$KIT_ROOT/config/tryout-linux.env" | sort -u) \
+                       <(grep -o '^CCDC_[A-Z0-9_]*' "$CFG" | sort -u) | wc -l)
+    if [ "$missing" -gt 0 ]; then
+      warn "$CFG is an OLD config - $missing setting(s) missing. Replacing it."
+      ask 'Replace with a fresh copy?' y || keep=1
+    else
+      ask "$CFG already exists and is complete. Keep it?" y && keep=1
+    fi
+  fi
+  if [ "$keep" -eq 1 ]; then
     printf '  using the existing %s\n' "$CFG"
   else
+    # rm first: root cannot overwrite another user's file in /tmp (fs.protected_regular)
+    rm -f "$CFG"
     cp "$KIT_ROOT/config/tryout-linux.env" "$CFG" && chmod 600 "$CFG" || die "could not write $CFG"
     ok "copied config/tryout-linux.env -> $CFG"
   fi
@@ -87,6 +117,16 @@ if [ "$phase" = 1 ]; then
     pause 'Submitted the PCR (or will right after this)'
   fi
 
+  if [ -x /opt/splunk/bin/splunk ] || [ -x /opt/splunkforwarder/bin/splunk ]; then
+    printf '\n'
+    note 'Splunk is on this box. Is it actually shipping logs? Read-only check, then one tagged test event:'
+    run "$SCRIPT_DIR/splunk.sh" --config "$CFG"
+    run "$SCRIPT_DIR/splunk.sh" --config "$CFG" --test-event --apply
+    note 'Run the search above in the Splunk web UI (http://THIS-BOX:8000) when you have a minute.'
+    note 'Found = logs arrive. Never disable forwarding: the rules forbid it.'
+    pause 'Copied the search'
+  fi
+
   step '3 of 7' 'let the box fill in its services'
   run "$SCRIPT_DIR/discover.sh" --config "$CFG"
   note "Read that table against Quotient's service list for THIS box."
@@ -102,8 +142,9 @@ if [ "$phase" = 1 ]; then
   pause 'Note where the evidence went'
 
   step '5 of 7' 'what is wrong right now (read-only)'
-  run "$SCRIPT_DIR/triage.sh" --config "$CFG"
-  pause 'Read the REDs. Fix a scored-user or scored-service RED before cutting'
+  brief
+  note 'Only a scoreduser/scoredservice RED needs fixing now. The rest gets fixed in Phase 2.'
+  full_report_offer
 
   step '6 of 7' 'cut what nothing scored needs - read the list first'
   run "$SCRIPT_DIR/harden.sh" --config "$CFG"
@@ -132,11 +173,13 @@ if [ "$phase" = 1 ]; then
     warn 'alex does not exist on this box. The packet says it should - look before you fix.'
   fi
 
-  printf '\n'
-  ok "Phase 1 done on $(hostname)."
-  printf '  Next: Phase 1 on the other boxes. Then come back and run:\n'
-  printf '     sudo ./linux/first15.sh --phase 2\n'
-  printf '  For commands by hand in this shell:  CFG=%s\n\n' "$CFG"
+  printf '\n\033[32m%s\n' '============================================================================'
+  printf '  Phase 1 done on %s. NEXT:\n\n' "$(hostname)"
+  printf '   1. Phase 1 on every OTHER box first.\n'
+  printf '   2. Then come back to THIS box and run:\n\n'
+  printf '        \033[1msudo %s/first15.sh --phase 2\033[0m\033[32m\n\n' "$SCRIPT_DIR"
+  printf '      Before you start it, have a SECOND tab at a prompt, ready to ssh in here.\n'
+  printf '%s\033[0m\n\n' '============================================================================'
   exit 0
 fi
 
@@ -146,25 +189,38 @@ fi
 # fw.sh and sshd.sh roll themselves back unless confirmed from a NEW session.
 # Confirming from this one proves nothing: it is already in.
 guarded() {
-  local tool=$1 what=$2
-  run "$SCRIPT_DIR/$tool" --config "$CFG" --dry-run
-  if ! ask "Apply the $what change above?"; then
-    note "skipped. Later: sudo ./linux/$tool --config $CFG --apply"
+  local tool=$1 what=$2 key=CCDC_FIREWALL_ROLLBACK_SECONDS secs start st a
+  if ! run "$SCRIPT_DIR/$tool" --config "$CFG" --dry-run; then
+    warn "$what: cannot run with this config (reason above) - SKIPPED, moving on."
     return
   fi
-  local key=CCDC_FIREWALL_ROLLBACK_SECONDS secs
+  if ! ask "Apply the $what change?" y; then
+    note "skipped. Later: sudo $SCRIPT_DIR/$tool --config $CFG --apply"
+    return
+  fi
   [ "$tool" = sshd.sh ] && key=CCDC_SSH_ROLLBACK_SECONDS
   secs=$(set -a; . "$CFG" >/dev/null 2>&1; printf '%s' "${!key:-120}")
-  note "It rolls back in $secs seconds unless confirmed from a NEW ssh session."
-  note "Open a second terminal and ssh in NOW. Have this ready to paste there:"
-  printf '     cd ~/ccdc-training && sudo ./linux/%s --config %s --confirm\n' "$tool" "$CFG"
-  if ! ask 'Second session open and ready?'; then
-    note "not applied. Later: sudo ./linux/$tool --config $CFG --apply"
+  if ! run "$SCRIPT_DIR/$tool" --config "$CFG" --apply >/dev/null; then
+    warn "$what: apply FAILED - nothing changed, nothing to confirm."
     return
   fi
-  run "$SCRIPT_DIR/$tool" --config "$CFG" --apply
-  pause "Confirmed from the NEW session (if it would not connect, let it roll back)"
-  run "$SCRIPT_DIR/$tool" --config "$CFG" --status
+  start=$(date +%s)
+  printf '\n'
+  warn "$what applied - auto-rollback in ${secs}s."
+  note "OTHER TAB: ssh in fresh, then paste:"
+  printf '\n     sudo %s/%s --config %s --confirm\n\n' "$SCRIPT_DIR" "$tool" "$CFG"
+  while :; do
+    printf '  Enter = I confirmed it · r = roll back now: '
+    read -r a || { warn "no input - $what will keep itself only if confirmed in time."; return; }
+    case "$a" in r|R) run "$SCRIPT_DIR/$tool" --config "$CFG" --rollback; return ;; esac
+    st=$("$SCRIPT_DIR/$tool" --config "$CFG" --status 2>&1)
+    case "$st" in
+      *PENDING*) warn "NOT confirmed yet ($(( secs - $(date +%s) + start ))s left). Paste the line above in a NEW session." ;;
+      *) if [ $(( $(date +%s) - start )) -lt "$secs" ]; then ok "$what: confirmed and kept."
+         else warn "$what: the timer ran out - it ROLLED BACK. Re-run Phase 2 to try again."; fi
+         return ;;
+    esac
+  done
 }
 
 step '1 of 5' 'firewall'
@@ -173,15 +229,20 @@ guarded fw.sh 'firewall'
 step '2 of 5' 'sshd'
 guarded sshd.sh 'sshd'
 
-step '3 of 5' 'down to 0 RED'
-run "$SCRIPT_DIR/triage.sh" --config "$CFG"
-pause 'Fix every RED before freezing - the freeze blesses whatever is here'
+step '3 of 5' 'down to 0 RED - fix by number'
+run "$SCRIPT_DIR/fix.sh" --config "$CFG" --wrong-only; reds=$?
 
 step '4 of 5' 'freeze the clean box'
-if ask 'Bless the baseline now (0 RED, and everything left is yours)?'; then
+bless_default=y
+if [ "$reds" -gt 0 ]; then
+  bless_default=n
+  warn "$reds RED still open. Blessing now marks them as NORMAL. Answer n, fix them"
+  warn "(the triage line above shows how), then re-run: sudo $SCRIPT_DIR/first15.sh --phase 2"
+fi
+if ask 'Bless the baseline now?' "$bless_default"; then
   run "$SCRIPT_DIR/baseline.sh" --config "$CFG" --bless --stable-for 20 --apply
 else
-  note "later: sudo ./linux/baseline.sh --config $CFG --bless --stable-for 20 --apply"
+  note "later: sudo $SCRIPT_DIR/baseline.sh --config $CFG --bless --stable-for 20 --apply"
 fi
 
 step '5 of 5' 'arm everything: backups, canaries, sentry, guardian/watchdog, audit'
@@ -191,8 +252,10 @@ if ask 'Arm it?' y; then
   run "$SCRIPT_DIR/audit.sh" --config "$CFG" --capture
 fi
 
-printf '\n'
-ok "Phase 2 done on $(hostname). From here it is the playbook's loop section:"
-printf '     sudo ./linux/sentry.sh --config %s --status\n' "$CFG"
-printf '  For commands by hand in this shell:  CFG=%s\n\n' "$CFG"
+printf '\n\033[32m%s\n' '============================================================================'
+printf '  Phase 2 done on %s. FROM NOW ON, all day, this box needs ONE command:\n\n' "$(hostname)"
+printf '     \033[1msudo %s/fix.sh\033[0m\033[32m\n\n' "$SCRIPT_DIR"
+printf '  Run it when a CCDC popup appears, or whenever you come back to this box.\n'
+printf '  It lists what is wrong, numbered, and fixes what you pick.\n'
+printf '%s\033[0m\n\n' '============================================================================'
 exit 0

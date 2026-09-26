@@ -89,9 +89,11 @@ say `y` to the cut after reading its list.
 ```bash
 sudo ./linux/first15.sh --phase 2
 ```
-**It runs:** firewall → sshd → down to 0 RED → bless → arm and audit.
-**You do:** open a second SSH session when it asks, and paste the `--confirm` line
-there within 120 seconds · fix the REDs · bless only at 0 RED.
+**It runs:** firewall → sshd → down to 0 RED (the numbered fix queue) → bless → arm and audit.
+**You do:** open a second SSH session when it asks, paste the `--confirm` line there
+within 120 seconds, and only THEN press Enter in the runner · at the fix queue, type
+a number to approve that item (`a` = every RED, `r` = re-list, Enter = done) · bless
+only at 0 RED.
 
 **By hand:**
 
@@ -112,10 +114,15 @@ there within 120 seconds · fix the REDs · bless only at 0 RED.
    ```
    Then from a NEW connection: `cd ~/ccdc-training && sudo ./linux/sshd.sh --config /tmp/ccdc-linux.env --confirm`
 
-3. **Down to 0 RED**
+3. **Down to 0 RED** — the kit fixes what it can, by number, after you read it
    ```bash
-   sudo ./linux/triage.sh --config "$CFG"
+   sudo ./linux/sentry.sh --config "$CFG" --status              # the numbered queue
+   sudo ./linux/sentry.sh --config "$CFG" --approve --apply     # every RED at once (AMBERs skipped)
+   sudo ./linux/sentry.sh --config "$CFG" --approve N --apply   # one item, e.g. an AMBER you have read
+   sudo ./linux/triage.sh --config "$CFG"                       # what is left
    ```
+   Numbers stay fixed until the next `--status`. Anything triage shows that is not in
+   the queue needs a judgement call — use its "run this" lines.
 
 4. **Freeze the clean box** — before arm, so arm's recovery bundle carries the blessing
    ```bash

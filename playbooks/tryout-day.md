@@ -109,13 +109,37 @@ then `-Apply` → check **alex** is an active Domain Admin (the packet allows on
 its listed users, so no new account) → `arm.ps1 -Apply` → `baseline.ps1 -Bless
 -StableForSeconds 20 -Apply` → second window: `sentry.ps1 -Watch`.
 
-**Router** — `playbooks/firewall-appliance.md`, VyOS: read, do not filter.
+**Bedrock (VyOS router) — look, do not filter.** It does the 1:1 NAT that makes
+every scored service reachable and carries Splunk forwarding to the Black Team.
+One wrong filter here takes everything off the scoreboard at once; the host
+firewalls already close what is not scored. Detail: `firewall-appliance.md`.
+
+1. Password — in the 10:00 block above.
+2. Save what is there, off the box: `show configuration commands` → copy to your laptop.
+3. All day: `show system commit` lists every change, who and when. **A commit you
+   did not make is the red team on your router.** `show system commit diff N` shows it.
+4. Must change something? `commit-confirm 5` instead of `commit` - it reverts on its
+   own. Check the scored services from off the box, then `confirm` and `save`.
+
+Do NOT: a default-drop filter · `set service ssh listen-address` (lockout; the
+Proxmox console cannot paste) · block any IP (rule 4).
+
+**Splunk (redstone, not scored).** Phase 1 on redstone changes Splunk's admin
+password, checks forwarding and writes one test event, then prints the search.
+
+- Run that search in the web UI, `http://192.168.200+x.12:8000`. Found = logs arrive.
+- **Never disable forwarding or block outbound** — the rules forbid it.
+- For an incident report: one host, a short fixed time range, then the starter
+  searches in `splunk-and-firewalls.md` (failed logins, new users, one IP).
+- Re-check forwarding any time:
+  `sudo ~/ccdc-training/linux/splunk.sh --config /tmp/ccdc-linux.env --test-event --apply`
 
 ## All day — the loop
 
 - **Quotient graphs first.** Everything down at once is a firewall — yours or theirs.
-- Linux: `sudo ./linux/sentry.sh --config "$CFG" --status`, then `--approve --apply` for every RED.
-- Windows: the `sentry.ps1 -Watch` window pops up; `.\windows\baseline.ps1 -Status`.
+- **A popup, or you come back to a box: ONE command.** It lists what is wrong, numbered, and fixes what you pick.
+  - Linux: `sudo ~/ccdc-training/linux/fix.sh`
+  - Windows (elevated): `powershell -ExecutionPolicy Bypass -File C:\ccdc-training-main\windows\fix.ps1`
 - After fixing anything scored: check it from **off the box** (your laptop over NetBird).
 
 ## Rules that cost points if forgotten

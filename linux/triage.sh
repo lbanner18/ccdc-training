@@ -642,6 +642,46 @@ else
   clean "no scheduled job launches a file containing a reverse shell"
 fi
 
+# A schedule does not have to contain anything incriminating to be persistence:
+# `*/5 * * * * root /usr/local/bin/anything` passes both checks above, and once
+# the payload is moved away it points at nothing. Same test as the unit check:
+# no package installed it, and it was written after the box was built.
+# /var/spool/cron is never packaged, so there it is only the age.
+begin
+cron_new=''
+for source in "${cron_sources[@]}"; do
+  [ "$source" = /etc/crontab ] && continue
+  own_payload "$source" && continue
+  case "$source" in /var/spool/cron/*) ;; *) pkg_owns "$source" && continue ;; esac
+  newer_than_box "$source" || continue
+  grep -qvE '^[[:space:]]*(#|$|[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=)' "$source" 2>/dev/null || continue
+  cron_new="$cron_new $source"
+done
+if [ -n "$cron_new" ]; then
+  amber "scheduled job(s) no package installed, written after this box was built   [CARD 3]"
+  detail "a cron line does not have to look evil to be persistence - is each one yours?"
+  for f in $cron_new; do
+    emit AMBER cronnew "$f" "unpackaged cron file newer than the box"
+    detail "$f  - written $(date -d "@$(stat -c '%Y' "$f" 2>/dev/null)" '+%m-%d %H:%M' 2>/dev/null)"
+    while IFS= read -r l; do detail "    $(printf '%s' "$l" | cut -c1-90)"; done \
+      < <(grep -vE '^[[:space:]]*(#|$)' "$f" 2>/dev/null | head -4)
+  done
+  fixhdr
+  for f in $cron_new; do
+    printf -v qf '%q' "$f"
+    printf -v qev '%q' "/var/tmp/evidence-cron-$(basename -- "$f")"
+    case "$f" in
+      /var/spool/cron/*)
+        cuser=$(basename -- "$f"); printf -v qcu '%q' "$cuser"
+        fix "sudo cp -- $qf $qev; sudo EDITOR=nano crontab -u $qcu -e   # delete only the lines you did not write" ;;
+      *)
+        fix "sudo cp -- $qf $qev && sudo rm -f -- $qf   # the whole file, if none of it is yours" ;;
+    esac
+  done
+else
+  clean "no unpackaged scheduled job newer than the box"
+fi
+
 # --- 5. systemd units that call home -----------------------------------------
 begin
 unithits=$(grep -rIlE "$shells" /etc/systemd/system /run/systemd/system 2>/dev/null)
@@ -1124,6 +1164,53 @@ else
   clean "no process runs from a world-writable directory"
 fi
 
+# A command line that opens bash's /dev/tcp or /dev/udp is a hand-made network
+# connection, and nothing legitimate on a server is started that way. The
+# socket check below only sees it while the connection is up; this sees the
+# process itself, so one whose server went away is still reported.
+# The kit's own probes (watchdog.sh, splunk.sh) open /dev/tcp in a short-lived
+# child; a process whose parent chain runs from the kit is not a finding.
+kit_descendant() {
+  local p=$1 i cmd g=${CCDC_GUARDIAN_NAME:-node-health}
+  for i in 1 2 3 4; do
+    p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
+    [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null || return 1
+    cmd=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)
+    case "$cmd" in
+      *"$SCRIPT_DIR/"*|*"${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}/"*|*"${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-node-observer}}/"*) return 0 ;;
+    esac
+  done
+  return 1
+}
+begin
+devtcp=''
+if [ "$(id -u)" -eq 0 ]; then
+  for c in /proc/[0-9]*/cmdline; do
+    p=${c#/proc/}; p=${p%%/*}
+    [ "$p" = "$$" ] && continue
+    tr '\0' ' ' <"$c" 2>/dev/null | grep -qE '/dev/(tcp|udp)/' || continue
+    kit_descendant "$p" && continue
+    devtcp="$devtcp $p"
+  done
+fi
+if [ -n "$devtcp" ]; then
+  red "process(es) whose command line opens a raw /dev/tcp or /dev/udp connection   [CARD 12]"
+  detail "a shell wired to the network by hand - kill it after you have preserved it"
+  for p in $devtcp; do
+    pexe=$(readlink "/proc/$p/exe" 2>/dev/null) || pexe=unknown
+    emit RED netproc "pid$p:$pexe" "command line opens a /dev/tcp or /dev/udp connection"
+    detail "pid $p  $pexe"
+    detail "  cmdline: $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-88)"
+  done
+  fixhdr
+  for p in $devtcp; do
+    fix "ps -o pid,ppid,user,lstart,cmd -p $p   # who started it, and when - for the report"
+    fix "sudo pkill -9 -P $p; sudo kill -9 $p   # its children first: they can hold the connection"
+  done
+elif [ "$(id -u)" -eq 0 ]; then
+  clean "no process command line opens a raw /dev/tcp or /dev/udp connection"
+fi
+
 # Deleted-on-disk executables: the classic "drop it, run it, unlink it" so the
 # payload exists only in memory and hunt.sh's file sweeps cannot see it.
 begin
@@ -1204,7 +1291,7 @@ EOF
     fixhdr
     for p in $unexpected; do
       fix "sudo ss -tlnp 'sport = :$p'                 # what holds port $p"
-      fix "sudo systemctl status \$(ss -tlnpH 'sport = :$p' | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2 | xargs -r ps -o unit= -p)"
+      fix "sudo ss -tlnpH 'sport = :$p' | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | xargs -r sudo ps -o pid,user,unit,lstart,cmd -p   # who, which unit, what command"
     done
     fix "# THEN decide, and the order matters:"
     fix "#  - it is a scored service on a port you forgot    -> add it to CCDC_ALLOWED_TCP_PORTS"
@@ -1580,7 +1667,7 @@ else
         # The tool told them to. So this branch answers the question the
         # heading actually asks - WHOSE process is this - and offers nothing
         # that can take a service down.
-        entry="$entry${F}systemctl status \$(ps -o unit= -p $qpid 2>/dev/null | tr -d ' ')   # which unit owns it?"$'\n'
+        entry="$entry${F}ps -o unit= -p $qpid 2>/dev/null | xargs -r systemctl status --no-pager   # which unit owns it?"$'\n'
         entry="$entry${F}ps -o pid,ppid,user,lstart,cmd -p $qpid"$'\n'
         entry="$entry${F}grep -n . <<<\"\$(ps -o cmd= -p $qpid)\"   # is this the packet's service?"$'\n'
         # Commented, because everything inside a "run this" block gets pasted.
@@ -1809,6 +1896,11 @@ fi
 # && is a condition continued on the next line; matching it flagged Ubuntu's
 # own /etc/profile.d/Z99-cloud-locale-test.sh RED on every cloud-image box.
 rc_launch='nohup |setsid |disown|(^|[^&])&[[:space:]]*\)|(^|[^&])&[[:space:]]*$|/tmp/|/var/tmp/|/dev/shm/'
+# Sourcing a HIDDEN file from a system directory (". /usr/local/lib/.x") runs
+# someone's code on every login with no launch keyword at all. Stock rc files
+# source ~/.bash_aliases and /etc/profile.d/*.sh, never a dot-file under /usr,
+# /opt, /var, /etc, /lib, /srv or /run.
+rc_launch="$rc_launch"'|(^|[;&|[:space:]])(\.|source)[[:space:]]+/(usr|opt|var|etc|lib|lib64|srv|run|bin|sbin)/([^[:space:]]*/)?\.[A-Za-z0-9_]'
 begin
 rchits=''
 for f in /root/.bashrc /root/.profile /root/.bash_profile /etc/bash.bashrc /etc/profile \
@@ -2251,6 +2343,40 @@ elif al_gap=$(ccdc_auth_log_gap "$state_dir"); then
   fix "# or let sentry save it: sudo $qsentry --config $qconfig --status"
 else
   clean "auth log is continuous with the journal"
+fi
+
+# --- SELinux denials (Rocky) ---------------------------------------------------
+# A denial is either an attacker hitting a wall or one of your own tools doing
+# something SELinux does not expect. Both are worth a look, neither is proof.
+if ccdc_have getenforce && [ "$(getenforce 2>/dev/null)" != Disabled ] && [ -r /var/log/audit/audit.log ]; then
+  begin
+  avc_since=$(( $(date +%s) - 1800 ))
+  avc=$(awk -v s="$avc_since" '
+    /type=AVC/ && / denied / {
+      t = $0; sub(/.*msg=audit\(/, "", t); sub(/\..*/, "", t); if (t + 0 < s) next
+      perms = $0; sub(/.*denied +\{ */, "", perms); sub(/ *\}.*/, "", perms)
+      comm = "?"; name = ""; n = split($0, f, " ")
+      for (i = 1; i <= n; i++) {
+        if (f[i] ~ /^comm=/) { comm = f[i]; sub(/^comm=/, "", comm); gsub(/"/, "", comm) }
+        if (f[i] ~ /^(name|path)=/) { name = f[i]; sub(/^[a-z]+=/, "", name); gsub(/"/, "", name) }
+      }
+      key = comm " tried to " perms (name != "" ? " " name : "")
+      if (!(key in cnt)) order[++k] = key
+      cnt[key]++
+    }
+    END { for (i = 1; i <= k; i++) printf "%s  (x%d)\n", order[i], cnt[order[i]] }' /var/log/audit/audit.log 2>/dev/null)
+  if [ -n "$avc" ]; then
+    amber "SELinux BLOCKED something in the last 30 minutes - an attacker hitting a wall, or your own tool"
+    avc_who=$(printf '%s\n' "$avc" | head -1 | awk '{print $1}' | tr -cd 'A-Za-z0-9._-')
+    emit AMBER selinux "${avc_who:-unknown}" "SELinux denied access in the last 30 minutes"
+    printf '%s\n' "$avc" | head -5 | while IFS= read -r l; do detail "$l"; done
+    detail "a shell, python, nc or perl being blocked for a web or mail service is the one to chase"
+    fixhdr
+    fix "sudo sealert -a /var/log/audit/audit.log | less   # what was blocked, why, in plain English"
+    fix "sudo ausearch -m AVC -ts recent -i               # the raw denials, last 10 minutes"
+  else
+    clean "no SELinux denials in the last 30 minutes"
+  fi
 fi
 
 # --- 10. Very recently modified /etc ------------------------------------------

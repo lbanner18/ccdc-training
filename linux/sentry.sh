@@ -1456,6 +1456,8 @@ brief_fix() {
       printf 'look: sudo %s/sshd.sh --config %s   (then --apply, then --confirm from a 2nd login)' "$qkit" "$qconfig" ;;
     etcchange)
       printf 'look: sudo %s/baseline.sh --config %s' "$qkit" "$qconfig" ;;
+    selinux)
+      printf 'look: sudo sealert -a /var/log/audit/audit.log | less   (what SELinux blocked, and why)' ;;
     crondeep)
       printf 'look: sudo cat %q; sudo crontab -l -u %s' "$file" "$(basename -- "${subject%%::*}")" ;;
     rcdeep|rcfile)

@@ -189,7 +189,8 @@ one_pass() {
     alert "CANARY TRIPPED"
     notify_operator "canary-$(printf '%s' "$canary_out" | md5sum | cut -c1-12)" \
       "CCDC: CANARY TRIPPED on $(hostname). Someone touched a decoy file.
-  sudo $SCRIPT_DIR/canary.sh --config $config --check"
+  WHO DID IT:  sudo $SCRIPT_DIR/canary.sh --config $config --check
+  THEN FIX:    sudo ~/ccdc-training/linux/fix.sh"
     printf '%s\n' "$canary_out" | grep -E 'TRIPPED|AUDIT|HINT' | sed 's/^/      /'
   elif [ "${rc:-0}" -ne 0 ]; then
     failed=1
@@ -301,14 +302,13 @@ EOF
         [ -n "$redline" ] || continue
         notify_operator "red-$(printf '%s' "$redline" | sed 's/^ *\[[0-9]*\] *//' | md5sum | cut -c1-12)" \
           "CCDC: $(printf '%s' "$redline" | sed 's/^ *//') on $(hostname)
-  sudo $SCRIPT_DIR/baseline.sh --config $config"
+  FIX IT:  sudo ~/ccdc-training/linux/fix.sh"
       done < <(printf '%s\n' "$base_out" | grep -E '^  \[[0-9]+\] RED')
       printf '%s\n' "$base_out" | grep -E '^  \[[0-9]+\] RED' | head -12 | sed 's/^  /      /'
       if [ "$base_red" -gt 12 ]; then
         printf '      ... and %s more RED not shown here\n' "$((base_red - 12))"
       fi
-      printf '      these do not go away on their own. Full detail and what to do:\n'
-      printf '        sudo %q/baseline.sh --config %q\n' "$SCRIPT_DIR" "$config"
+      printf '      these do not go away on their own. FIX THEM:  sudo ~/ccdc-training/linux/fix.sh\n'
     elif [ "$base_all" -gt 0 ]; then
       printf '%s  %s unexplained item(s), none RED\n' "$(stamp)" "$base_all"
     fi

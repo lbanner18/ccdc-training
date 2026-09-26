@@ -312,6 +312,10 @@ inventory_files() {
       # skimmed. A unit systemd-run created is not in this shape.
       case "${f##*/}" in
         session-*.scope|user-*.slice|user@*.service|*.dbus-*|run-*.mount|run-*.service) continue ;;
+        # Rocky's SELinux troubleshooter, bus-activated after every AVC denial.
+        # Named exactly: D-Bus activation files are not inventoried, so a
+        # blanket dbus-:* skip would hide an attacker's own activated service.
+        dbus-:*-org.fedoraproject.SetroubleshootPrivileged@*.service|dbus-:*-org.fedoraproject.Setroubleshootd@*.service) continue ;;
       esac
       printf '%s|%s|%s\n' "$(kind_for "$f")" "$f" "$(file_content_tag "$f")"
     done
