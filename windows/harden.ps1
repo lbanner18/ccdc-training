@@ -48,7 +48,7 @@
 param(
     [string]$Config = '',
     [switch]$Apply,
-    [ValidateSet('Backup','PasswordPolicy','Services','RemoteAccess','Firewall','Logging','Defender','Persistence')]
+    [ValidateSet('Backup','PasswordPolicy','Services','RemoteAccess','Firewall','Logging','Defender','DefenderScan','Persistence')]
     [string[]]$Only,
     # Say yes in advance to the one step that can cut your own session.
     [switch]$IHaveConsoleAccess
@@ -67,7 +67,7 @@ Assert-CcdcAdmin
 Initialize-CcdcRoot
 $facts = Get-CcdcBoxFacts
 
-$allSteps = @('Backup','PasswordPolicy','Services','RemoteAccess','Firewall','Logging','Defender','Persistence')
+$allSteps = @('Backup','PasswordPolicy','Services','RemoteAccess','Firewall','Logging','Defender','Persistence','DefenderScan')
 $steps = if ($Only) { @($Only) } else { $allSteps }
 
 $script:planned = 0
@@ -258,26 +258,7 @@ if ($steps -contains 'Defender') {
             Note 'Look at what was parked in each excluded path before you move on - that is where the payload lives.'
         } catch { Note "could not read Defender exclusions: $($_.Exception.Message)" }
 
-        # A domain policy often points Defender at a WSUS server the event does
-        # not provide; with the internet up, going direct is what works.
-        # Server 2016 images carry 2016-era definitions and an old engine, and
-        # there BOTH cmdlet sources fail ("completed with errors"). Measured on a
-        # 2016 DC: MpCmdRun straight from the Malware Protection Center took the
-        # definitions from May 2016 to the current day.
-        Do-Change 'update signatures (then Microsoft Update, then the Malware Protection Center directly)' {
-            try { Update-MpSignature -ErrorAction Stop }
-            catch {
-                try { Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Stop }
-                catch {
-                    $mpCmd = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
-                    $mpOut = & $mpCmd -SignatureUpdate -MMPC 2>&1
-                    if ($LASTEXITCODE -ne 0) { throw ("all three update sources failed: {0}" -f (($mpOut | Select-Object -Last 2) -join ' ')) }
-                }
-            }
-        } 'CARD W6'
-        Do-Change 'run a quick scan (runs in the background; check the GUI for results)' {
-            Start-MpScan -ScanType QuickScan -AsJob | Out-Null
-        } 'CARD W6'
+        Note 'Signature update and quick scan are the slow part - they run last, in the DefenderScan step, so they do not hold up logging, passwords and services.'
     }
 }
 
@@ -640,6 +621,43 @@ if ($steps -contains 'Persistence') {
         Write-Host '    nothing on the primary registry persistence or accessibility paths.'
     }
     Note ('That is three checks, not thirteen. For the full sweep run:  .\windows\triage.ps1 -Config {0}' -f $Config)
+}
+
+# =============================================================================
+# STEP: DefenderScan   (checklist 12, deferred)
+# The slow tail of the Defender step, moved to the very end so a slow signature
+# pull or a CPU-heavy scan never bottlenecks logging, passwords and services.
+# Defender is already back on and its exclusions gone by now (the Defender step);
+# this only refreshes definitions and kicks off a background scan.
+# =============================================================================
+if ($steps -contains 'DefenderScan') {
+    Step-Header '12' 'DEFENDER SCAN - update signatures, then scan (the slow tail)' `
+        'Runs last on purpose: the update and scan are the slow part, and nothing else waits on them.'
+
+    if (-not $facts['HasDefender']) {
+        Note 'no Defender module here - nothing to update or scan.'
+    } else {
+        # A domain policy often points Defender at a WSUS server the event does
+        # not provide; with the internet up, going direct is what works.
+        # Server 2016 images carry 2016-era definitions and an old engine, and
+        # there BOTH cmdlet sources fail ("completed with errors"). Measured on a
+        # 2016 DC: MpCmdRun straight from the Malware Protection Center took the
+        # definitions from May 2016 to the current day.
+        Do-Change 'update signatures (then Microsoft Update, then the Malware Protection Center directly)' {
+            try { Update-MpSignature -ErrorAction Stop }
+            catch {
+                try { Update-MpSignature -UpdateSource MicrosoftUpdateServer -ErrorAction Stop }
+                catch {
+                    $mpCmd = Join-Path $env:ProgramFiles 'Windows Defender\MpCmdRun.exe'
+                    $mpOut = & $mpCmd -SignatureUpdate -MMPC 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw ("all three update sources failed: {0}" -f (($mpOut | Select-Object -Last 2) -join ' ')) }
+                }
+            }
+        } 'CARD W6'
+        Do-Change 'run a quick scan (runs in the background; check the GUI for results)' {
+            Start-MpScan -ScanType QuickScan -AsJob | Out-Null
+        } 'CARD W6'
+    }
 }
 
 # =============================================================================

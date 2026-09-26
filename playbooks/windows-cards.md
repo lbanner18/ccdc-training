@@ -803,9 +803,18 @@ anything watching service config sees nothing.
 
 ```powershell
 icacls "C:\path\to\dir"
+icacls "C:\path\to\dir" /inheritance:d
 icacls "C:\path\to\dir" /remove:g "BUILTIN\Users"
-icacls "C:\path\to\dir" /remove:g "Everyone"
+icacls "C:\path\to\dir" /grant "BUILTIN\Users:(OI)(CI)RX"
+icacls "C:\path\to\dir"
 ```
+
+An `(I)` in the first listing means the grant is **inherited** — usually from
+`C:\` itself, which lets Users create files and folders in any folder made
+directly under it. `/remove:g` alone skips inherited grants and the finding stays
+RED; `/inheritance:d` copies them onto the folder first so they can be removed.
+The `/grant ... RX` puts read back so the service can still load its binary. Same
+again with `Everyone` / `Authenticated Users` if those are the ones named.
 
 `(OI)(CI)M` means Modify, inherited by files and folders. On a directory that
 service binaries run from, for a group like Users, that is the finding.

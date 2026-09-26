@@ -187,7 +187,7 @@ baseline inventory off the target after blessing.
 ## 7. Firewall
 
 ```bash
-CCDC_FIREWALL_ROLLBACK_SECONDS="60"
+CCDC_FIREWALL_ROLLBACK_SECONDS="120"
 CCDC_ALLOW_OUTBOUND="1"
 CCDC_ALLOWED_SOURCES=""            # scorer / Splunk / admin, if the packet names them
 ```

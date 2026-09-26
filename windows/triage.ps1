@@ -742,7 +742,8 @@ if (@($listeners).Count -gt 0) {
         try {
             $p = Get-Process -Id $l.OwningProcess -ErrorAction Stop
             $procName = $p.ProcessName
-            try { $procPath = $p.Path } catch { }
+            # Path is $null (not '') for protected processes, and $null -eq '' is False.
+            try { $procPath = [string]$p.Path } catch { }
         } catch { }
         if ($dcListeners.ContainsKey($port) -and $procName -eq $dcListeners[$port] -and
             ($procPath -eq '' -or ($env:SystemRoot -and $procPath -like "$env:SystemRoot\*"))) { continue }
@@ -1179,7 +1180,11 @@ foreach ($svc in $allSvc) {
                           'service account. No service configuration is changed, so nothing',
                           'that watches service config will notice.',
                           ('  first service found here: {0}' -f $svcName)) `
-                -Fix @(("icacls ""{0}"" /remove:g ""{1}""" -f $dir, $id),
+                -Fix @("# /remove cannot touch an INHERITED grant: copy inheritance down first, then remove",
+                       ("icacls ""{0}"" /inheritance:d" -f $dir),
+                       ("icacls ""{0}"" /remove:g ""{1}""" -f $dir, $id),
+                       "# give read back, so a service running as a normal account can still load its binary",
+                       ("icacls ""{0}"" /grant ""{1}:(OI)(CI)RX""" -f $dir, $id),
                        ("icacls ""{0}""" -f $dir)) `
                 -Card 'CARD W11'
             break

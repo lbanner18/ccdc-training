@@ -296,6 +296,16 @@ if ($Check) {
                 $who = ''; $proc = ''
                 if ($msg -match 'Account Name:\s*(\S+)')   { $who = $Matches[1] }
                 if ($msg -match 'Process Name:\s*(.+)')    { $proc = $Matches[1].Trim() }
+                # Defender's real-time engine scans a newly created file within
+                # seconds, and that read is a 4663 identical to an attacker's.
+                # Skip it, but only the exact pair - the engine binary AND the
+                # machine account (SYSTEM logs as COMPUTER$). A read by that
+                # binary under any USER account, or by any other process under
+                # the machine account, still trips. Narrow on purpose: the
+                # comment above warns a false negative here is worse than the
+                # false positive, and this is the tightest match that clears it.
+                $machineAcct = ($env:COMPUTERNAME + '$')
+                if (($proc -replace '.*\\', '') -ieq 'MsMpEng.exe' -and $who -ieq $machineAcct) { break }
                 [void]$raw.Add([pscustomobject]@{
                     When = $e.TimeCreated; Path = $paths[$k].Path; Who = $who; Process = $proc
                 })

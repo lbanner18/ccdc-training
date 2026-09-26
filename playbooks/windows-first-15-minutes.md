@@ -11,92 +11,134 @@ list that stops you losing points while you work out the rest.
 > answer instead of an error. For example, you may see no Security-log events
 > or miss another user's scheduled task and think the box is clean.
 
+> **Rehearsing this page on the lab box?** Do it against a box you have
+> deliberately dirtied first, so you find out whether triage actually catches
+> anything. See [Dry run: rehearse against a planted box](#dry-run-rehearse-this-whole-page-against-a-planted-box-lab-only)
+> at the bottom. That step is **lab only** — never on the real box.
+
 ---
 
 ## Windows at a glance
 
-The whole flow on one screen, in the order it was rehearsed on the lab box.
-Every command is complete: copy it as it stands. Each step has a detailed
-section further down.
+The whole flow on one screen, in the order rehearsed on the lab box. The runner
+does it for you and asks before every change; the commands under **By hand** are
+the same steps if the runner breaks. The detail for each step is further down.
 
-### A. Once, at the start — elevated PowerShell
+### Start — by hand, once
 
-**1. Get the kit** (the box needs internet; see *Minute 0* if it has none)
+**1. A 64-bit elevated PowerShell.** Start → **Windows PowerShell** (NOT the
+"(x86)" one) → **Ctrl+Shift+Enter**. `[Environment]::Is64BitProcess` must say `True`.
+
+**2. Get the kit** (the box needs internet; see *Minute 0* if it has none)
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = 'Tls12'; $ProgressPreference = 'SilentlyContinue'
 iwr -UseBasicParsing https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.zip -OutFile C:\kit.zip
 Expand-Archive C:\kit.zip C:\ -Force; cd C:\ccdc-training-main
 ```
 
-**2. Let this window run the kit**
+**3. Let this window run the kit**
 ```powershell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 ```
 
-**3. The config** — for the tryout it is already written from the packet
-```powershell
-mkdir C:\ProgramData\CCDC -Force | Out-Null
-copy config\tryout-windows.env C:\ProgramData\CCDC\ccdc.env
-```
-(Any other event: copy `config\example.env` instead and fill `CCDC_ALLOWED_USERS` ·
-`CCDC_WINDOWS_SERVICES` · `CCDC_ALLOWED_TCP_PORTS` · `CCDC_TCP_CHECKS` in notepad.)
-If Quotient scores HTTP or FTP on this box too, add `W3SVC`/`FTPSVC` and `80`/`21` to it.
+**4. Open a SECOND elevated 64-bit PowerShell and leave it open.** The runner stays
+in the first window; the "run this" lines that triage and the others print go in
+this one.
 
-**3a. Every default password, before anything else** — the red team has the packet
-```powershell
-.\windows\passwords.ps1 -Apply
-```
-Paste block 1 of the password sheet, then Enter on an empty line. On the domain
-controller it changes the DOMAIN accounts and proves each with an LDAP login.
-Then the same block into Quotient's Password Change Request.
+### Phase 1 — lock the doors (every box, before Phase 2 on any)
 
-**4. The "before" picture** (read-only)
 ```powershell
-.\windows\recon.ps1
+.\windows\first15.ps1 -Phase 1
 ```
+**It runs:** config and the Quotient questions → passwords → recon → triage → harden → alex check.
+**You do:** paste block 1 · type the Administrator password · submit the PCR ·
+copy the recon zip off · read the REDs · say `y` to harden after reading its list.
 
-**5. What is wrong right now** (read-only) — fix `scoreduser` / `scoredservice` first
+**By hand:**
+
+1. **The config** — for the tryout it is already written from the packet
+   ```powershell
+   mkdir C:\ProgramData\CCDC -Force | Out-Null
+   copy config\tryout-windows.env C:\ProgramData\CCDC\ccdc.env
+   ```
+   If Quotient scores HTTP or FTP on this box, add `W3SVC`/`FTPSVC` to
+   `CCDC_WINDOWS_SERVICES` and `80`/`21` to `CCDC_ALLOWED_TCP_PORTS` in notepad.
+   (Any other event: copy `config\example.env` instead and fill `CCDC_ALLOWED_USERS` ·
+   `CCDC_WINDOWS_SERVICES` · `CCDC_ALLOWED_TCP_PORTS` · `CCDC_TCP_CHECKS`.)
+
+2. **Every default password** — the red team has the packet
+   ```powershell
+   .\windows\passwords.ps1 -Apply
+   net user Administrator *
+   ```
+   Paste block 1 of the password sheet, then Enter on an empty line. On the domain
+   controller it changes the DOMAIN accounts and proves each with an LDAP login.
+   The Administrator password is sheet section 4. Then block 1 into Quotient's
+   Password Change Request.
+
+3. **The "before" picture** (read-only)
+   ```powershell
+   .\windows\recon.ps1
+   ```
+   Run the two zip lines it prints (the runner zips it for you), then right-click
+   the zip in `C:\` in File Explorer → **Copy**, and paste it on your laptop.
+
+4. **What is wrong right now** (read-only) — fix `scoreduser` / `scoredservice` first
+   ```powershell
+   .\windows\triage.ps1
+   ```
+
+5. **The hardening checklist** — read the dry run, then apply. Firewall default-deny only ever through here.
+   ```powershell
+   .\windows\harden.ps1
+   .\windows\harden.ps1 -Apply
+   ```
+
+6. **Your backup admin is alex**
+   ```powershell
+   net user alex
+   net group "Domain Admins" /domain
+   ```
+   alex is a packet administrator whose password block 1 already changed. The
+   packet says the box should have *only* its listed users, so do not create a new
+   one. Check alex is active and in Domain Admins (`net localgroup Administrators`
+   off a DC).
+
+### Phase 2 — go deep (one box at a time)
+
 ```powershell
-.\windows\triage.ps1
+.\windows\first15.ps1 -Phase 2
 ```
+**It runs:** down to 0 RED → arm → bless → opens the lookout window.
+**You do:** approve held items by number, only after reading them · bless only at 0 RED.
 
-**6. The hardening checklist** — read the dry run, then apply. Firewall default-deny only ever through here.
-```powershell
-.\windows\harden.ps1
-.\windows\harden.ps1 -Apply
-```
+**By hand:**
 
-**7. A second admin, then your own password** — both on paper
-```powershell
-.\windows\users.ps1 -CreateAdmin ops2 -Apply
-net user Administrator *
-```
+1. **Down to 0 RED**
+   ```powershell
+   .\windows\triage.ps1
+   .\windows\sentry.ps1 -Status
+   .\windows\sentry.ps1 -Approve all -Apply
+   ```
+   Then each held item you have read: `.\windows\sentry.ps1 -Approve N -Apply` (N from `-Status`).
 
-**8. Down to 0 RED**
-```powershell
-.\windows\triage.ps1
-.\windows\sentry.ps1 -Status
-.\windows\sentry.ps1 -Approve all -Apply
-```
-Then each LOOK item you have read: `.\windows\sentry.ps1 -Approve N -Apply` (N from `-Status`).
+2. **Canaries and the self-repairing tasks**
+   ```powershell
+   .\windows\arm.ps1 -Apply
+   ```
 
-**9. Canaries and the self-repairing tasks**
-```powershell
-.\windows\arm.ps1 -Apply
-```
+3. **Freeze the clean box** — after arm, so the baseline includes its tasks
+   ```powershell
+   .\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply
+   ```
 
-**10. Freeze the clean box**
-```powershell
-.\windows\baseline.ps1 -Bless -StableForSeconds 20 -Apply
-```
+4. **In a SECOND elevated window — the lookout**
+   ```powershell
+   cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
+   .\windows\sentry.ps1 -Watch
+   ```
 
-**11. In a SECOND elevated window — the lookout**
-```powershell
-cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
-.\windows\sentry.ps1 -Watch
-```
-
-### B. When the popup fires — the loop
+### When the popup fires — the loop
 
 **1. Everything that changed, numbered**
 ```powershell
@@ -121,10 +163,12 @@ cd C:\ccdc-training-main; Set-ExecutionPolicy -Scope Process Bypass -Force
 .\windows\baseline.ps1 -Status
 ```
 
-### C. Traps that cost time on the lab box
+### Traps that cost time on the lab box
 
 - A tool looks stuck: the title bar says **Select** — press **Esc**. Do not click inside a running window.
 - A Defender popup is a red-team sighting: **Windows Security → Protection history**, or `Get-MpThreatDetection`.
+- **64-bit PowerShell only.** Check `[Environment]::Is64BitProcess` is `True` before running anything. In 32-bit PowerShell, Defender, Get-LocalUser and Get-WindowsFeature show as "not recognized", and some of harden's registry writes land where Windows never reads them. On the lab box this looked like Defender had been removed.
+- On a domain controller every account is a domain account. Disabling one disables it everywhere in the domain.
 - Never paste a `Block 3389` or a default-deny line by hand; RDP may be how you and the scorer get in.
 - Passwords go on paper, never into chat or a file you keep.
 
@@ -287,12 +331,19 @@ The red team knows the default passwords."*
 Read the table. The column that matters is the last one — `** NO **` means
 enabled and not named in your packet list.
 
-**Make a second administrator first.** If they take your account out of
-Administrators, this is the difference between a bad ten minutes and a lost box:
+**Make sure you have a second administrator first.** If they take your account
+out of Administrators, this is the difference between a bad ten minutes and a
+lost box. For the tryout that is **alex**: it is in the packet, and the packet
+says the box should have only its listed users, so do not create a new one.
+Check it is active and still an admin:
 
 ```powershell
-.\windows\users.ps1 -CreateAdmin ops2 -Apply
+net user alex
+net group "Domain Admins" /domain       # off a DC: net localgroup Administrators
 ```
+
+(`users.ps1 -CreateAdmin NAME -Apply` exists for events whose packet allows
+extra accounts.)
 
 Then rotate everything that is not scored:
 
@@ -329,10 +380,18 @@ Read it. Then:
 .\windows\harden.ps1 -Apply
 ```
 
-In order, it does: backup → firewall → Defender → logging → password policy →
-services → remote access → persistence report. After every step that could
-affect a scored service it re-checks, and **stops** if one stopped answering —
-so you find out which step did it, not that something did.
+In order, it does: backup → firewall → Defender (back on, exclusions removed) →
+logging → password policy → services → remote access → persistence report →
+Defender scan. After every step that could affect a scored service it re-checks,
+and **stops** if one stopped answering — so you find out which step did it, not
+that something did.
+
+The **signature update and quick scan run last**, as their own `DefenderScan`
+step, because on an old image the update can crawl through three sources and the
+scan is CPU-heavy — no reason to let that hold up logging, passwords and
+services. Defender itself is already back on with its exclusions stripped much
+earlier, in the Defender step. Run just the tail with
+`.\windows\harden.ps1 -Only DefenderScan -Apply` if you skipped it.
 
 The firewall step writes your RDP and SSH allow rules **before** it sets
 default-inbound to Block. That ordering is the difference between hardening a
@@ -666,6 +725,57 @@ nc -z -v WINDOWS_IP 3389
 | basic Splunk and firewall help | [`splunk-and-firewalls.md`](splunk-and-firewalls.md) |
 | know what a finding means | [`windows-cards.md`](windows-cards.md) |
 | the Linux box | [`linux-first-15-minutes.md`](linux-first-15-minutes.md) |
+
+---
+
+## Dry run: rehearse this whole page against a planted box (lab only)
+
+**This is a practice step, not a game-day step.** It never runs on the real
+`lapis` or any scored box. The point of a dry run is to prove your detection
+actually fires — a clean box tells you nothing, because a broken `triage.ps1`
+also finds nothing on a clean box. So you dirty the box on purpose first, then
+run this whole page against it and check the plants show up.
+
+Do it on the **disposable lab box** (`lapis-test`), and take a snapshot before
+you start so you can get back to clean.
+
+**The loop, in order:**
+
+1. **Snapshot the lab VM** (in Proxmox / your hypervisor), so step 5 is a
+   guaranteed way back.
+
+2. **Plant the footholds** — the red-team fixture. It refuses to run without
+   both confirmations, because it drops *real* backdoors:
+   ```powershell
+   $env:CCDC_WIN_LAB = 1
+   .\redteam\windows-plant.ps1 -IAcceptThisBoxIsDisposable
+   ```
+   It tags every artifact `RT_LAB_PLANT` and prints the ground-truth list of
+   what it planted. Keep that list — it is your answer key.
+
+3. **Now run this page from the top, as if it were game day.** Setup → Phase 1
+   → Phase 2. Do not skip ahead knowing where the plants are; the whole value is
+   in whether the normal flow surfaces them.
+
+4. **Score yourself.** Every item on the plant's ground-truth list should show
+   up as a RED in `triage.ps1` (or in the `sentry.ps1 -Status` queue). Anything
+   on the answer key that your flow did **not** flag is the finding — that is a
+   gap in the tooling or in your order of operations, and it is exactly what a
+   dry run is for.
+
+5. **Clean up and confirm** — then re-run triage to prove the box came back
+   clean. A cleanup you did not verify is a box you no longer know the state of:
+   ```powershell
+   .\redteam\windows-plant.ps1 -IAcceptThisBoxIsDisposable -Cleanup
+   .\windows\triage.ps1
+   ```
+   Or just **revert the snapshot** from step 1 — simpler and leaves nothing
+   behind either way.
+
+To drill only the Guardian/Watchdog recovery chain rather than the full triage
+set, use the recovery self-test instead (same two interlocks) — see
+[Repeat the recovery proof](#repeat-the-recovery-proof-without-typing-each-failure-by-hand)
+above.
 
 ---
 

@@ -83,25 +83,31 @@ them, the scorer uses the old passwords and fails.**
 
 ## Then each box: its own flow
 
-**Linux** — `playbooks/linux-first-15-minutes.md`, "Linux at a glance", from
-`discover.sh` on. The short version:
+**Order: Phase 1 on lapis → iron → redstone, then Phase 2 on each.** Every box gets
+new passwords and hardening before any box gets the deep work. Phase 1 includes
+the password step; if you already did it above, answer `n` there.
+
+**Linux** — `sudo ./linux/first15.sh --phase 1` on each box, then `--phase 2`. It
+walks `playbooks/linux-first-15-minutes.md`, "Linux at a glance", and asks before
+every change. By hand, the short version:
 ```bash
 sudo ./linux/discover.sh --config "$CFG" --apply     # services, ports, checks from what runs
 sudo ./linux/triage.sh --config "$CFG"
 sudo ./linux/harden.sh --config "$CFG"                       # READ the list: --cut only acts on a list you have seen
 sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
-sudo ./linux/users.sh --config "$CFG" --create-admin ops2 --apply     # better: a name only you know
+id alex; sudo passwd -S alex     # backup admin = alex (packet: only listed users) - in sudo/wheel, not locked
 sudo ./linux/fw.sh --config "$CFG" --apply     # then --confirm from a NEW ssh session
 sudo ./linux/sshd.sh --config "$CFG" --apply   # then --confirm from a NEW ssh session
 sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
 sudo ./linux/arm.sh --config "$CFG" --apply
 ```
 
-**Windows (lapis)** — `playbooks/windows-first-15-minutes.md`, "Windows at a
-glance", from triage on: `triage.ps1` → `harden.ps1` then `-Apply` →
-`users.ps1 -CreateAdmin ops2 -Apply` (a Domain Admin on the DC; better, a name only you know) → `arm.ps1
--Apply` → `baseline.ps1 -Bless -StableForSeconds 20 -Apply` → second window:
-`sentry.ps1 -Watch`.
+**Windows (lapis)** — `.\windows\first15.ps1 -Phase 1`, then Phase 1 on the other
+boxes, then `-Phase 2`. It walks `playbooks/windows-first-15-minutes.md`, "Windows
+at a glance", and asks before every change. By hand: `triage.ps1` → `harden.ps1`
+then `-Apply` → check **alex** is an active Domain Admin (the packet allows only
+its listed users, so no new account) → `arm.ps1 -Apply` → `baseline.ps1 -Bless
+-StableForSeconds 20 -Apply` → second window: `sentry.ps1 -Watch`.
 
 **Router** — `playbooks/firewall-appliance.md`, VyOS: read, do not filter.
 
