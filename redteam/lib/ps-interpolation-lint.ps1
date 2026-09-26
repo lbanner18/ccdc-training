@@ -42,6 +42,25 @@ foreach ($p in $Path) {
         foreach ($nested in $s.NestedExpressions) {
             if ($nested -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
             if ($nested.VariablePath.UserPath -ne '_') { continue }
+
+            # $_ inside a scriptblock passed AS AN ARGUMENT to a command - the
+            # { ... } of ForEach-Object/Where-Object/%/? - is bound per item,
+            # same as inside $(...): "-$_" there is deliberate and correct.
+            # A catch block's $_ is a different AST shape (CatchClauseAst.Body,
+            # not a command-argument scriptblock) and still gets flagged - that
+            # is the real gotcha this lint exists for.
+            $ancestor = $nested.Parent
+            $boundByPipeline = $false
+            while ($null -ne $ancestor) {
+                if ($ancestor -is [System.Management.Automation.Language.ScriptBlockExpressionAst] -and
+                    $ancestor.Parent -is [System.Management.Automation.Language.CommandAst]) {
+                    $boundByPipeline = $true
+                    break
+                }
+                $ancestor = $ancestor.Parent
+            }
+            if ($boundByPipeline) { continue }
+
             $hits++
             $line = ($s.Extent.Text -split "`n")[0]
             if ($line.Length -gt 110) { $line = $line.Substring(0, 110) + ' ...' }
