@@ -29,8 +29,8 @@
       fwinbound   setting default-deny inbound can cut your own session. It is
                   in harden.ps1, which writes your allow rule FIRST.
       lsappl      needs a reboot. Rebooting a scored box is your decision.
-      svcpath     a service binary in an odd place may be your application.
-      svcdiracl   directory ACLs need judgement about what else lives there.
+    svcpath and svcdiracl are AMBER actions: they are never included by
+    -Approve all and require their own explicit numbered approval.
 
 .EXAMPLE
     .\sentry.ps1 -Config C:\ProgramData\CCDC\ccdc.env -Status
@@ -352,8 +352,8 @@ $script:Actions = @{
     }
     'svcdiracl' = @{
         Tier = 'AMBER'
-        Can  = { param($s) Test-Path -LiteralPath $s -PathType Container }
-        Why  = { param($s) "the directory '$s' is no longer there" }
+        Can  = { param($s) (Test-Path -LiteralPath $s -PathType Container) -and ($s -notmatch '^[A-Za-z]:\\?$') }
+        Why  = { param($s) "the directory '$s' is no longer there, or is a drive root" }
         What = { param($s) "stop ordinary users writing into '$s' (read access is kept)" }
         Do   = { param($s, $ev)
             (& icacls.exe $s 2>&1) | Out-File (Join-Path $ev 'icacls-before.txt') -Encoding UTF8

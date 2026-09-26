@@ -423,9 +423,9 @@ if (-not (Test-Path -LiteralPath $sentryPath)) {
         nope ("sentry action table problems: {0}" -f ($bad -join '; '))
     }
 
-    # The four findings deliberately left un-automatable. If one of these grows
+    # The findings deliberately left un-automatable. If one of these grows
     # an action, it should be a decision somebody argued for, not a drive-by.
-    $neverAuto = @('fwinbound','lsappl','svcpath','svcdiracl')
+    $neverAuto = @('fwinbound','lsappl')
     $grew = @($neverAuto | Where-Object { $actionNames -contains $_ })
     if ($grew.Count -eq 0) {
         ok 'the findings with no safe automatic fix are still not offered'

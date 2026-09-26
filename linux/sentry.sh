@@ -1516,10 +1516,31 @@ brief_fix() {
 # line he was editing. Every "not yours:" below changes nothing but the one
 # thing, keeps a copy in the evidence directory, and needs no editor.
 kit_owned_path() {
-  case "$(basename -- "$1")" in
-    "${CCDC_SENTRY_NAME:-node-observer}"*|"${CCDC_GUARDIAN_NAME:-node-health}"*|00-ccdc-hardening.conf|99-ccdc-hardening.conf) return 0 ;;
+  local f=$1 g watch ticker reconcile cron
+  g=${CCDC_GUARDIAN_NAME:-node-health}
+  watch=${CCDC_GUARDIAN_WATCH_NAME:-$g-watch}
+  ticker=${CCDC_GUARDIAN_TICKER_NAME:-$g}
+  reconcile=${CCDC_GUARDIAN_RECONCILE_NAME:-$g-reconcile}
+  cron=${CCDC_GUARDIAN_CRON_NAME:-$g}
+  case "$f" in
+    "/etc/systemd/system/${CCDC_SENTRY_NAME:-node-observer}.service"|\
+    "/etc/systemd/system/$watch.service"|\
+    "/etc/systemd/system/$ticker.service"|\
+    "/etc/systemd/system/$reconcile.service"|\
+    "/etc/systemd/system/$reconcile.timer"|\
+    "/etc/cron.d/$cron") return 0 ;;
+    /etc/ssh/sshd_config.d/00-ccdc-hardening.conf|\
+    /etc/ssh/sshd_config.d/99-ccdc-hardening.conf)
+      head -n 1 -- "$f" 2>/dev/null | grep -q '^# Managed by ccdc sshd\.sh'
+      return ;;
+    "${CCDC_AUDIT_RULES_FILE:-/etc/audit/rules.d/60-ccdc.rules}")
+      head -n 1 -- "$f" 2>/dev/null | grep -q '^# Managed by ccdc audit\.sh'
+      return ;;
+    /etc/profile.d/99-ccdc-prompt.sh)
+      head -n 1 -- "$f" 2>/dev/null | grep -qxF '# CCDC_PROMPT_HOOK v1'
+      return ;;
   esac
-  grep -q '^# Managed by ccdc' -- "$1" 2>/dev/null
+  return 1
 }
 
 brief_mute() {

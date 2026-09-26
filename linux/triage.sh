@@ -1175,7 +1175,7 @@ kit_descendant() {
   for i in 1 2 3 4; do
     p=$(awk '/^PPid:/ {print $2}' "/proc/$p/status" 2>/dev/null)
     [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null || return 1
-    cmd=$(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null)
+    cmd=$(tr '\0' ' ' 2>/dev/null <"/proc/$p/cmdline")
     case "$cmd" in
       *"$SCRIPT_DIR/"*|*"${CCDC_GUARDIAN_DIR:-/usr/local/lib/$g}/"*|*"${CCDC_SENTRY_DIR:-/usr/local/lib/${CCDC_SENTRY_NAME:-node-observer}}/"*) return 0 ;;
     esac
@@ -1188,7 +1188,7 @@ if [ "$(id -u)" -eq 0 ]; then
   for c in /proc/[0-9]*/cmdline; do
     p=${c#/proc/}; p=${p%%/*}
     [ "$p" = "$$" ] && continue
-    tr '\0' ' ' <"$c" 2>/dev/null | grep -qE '/dev/(tcp|udp)/' || continue
+    tr '\0' ' ' 2>/dev/null <"$c" | grep -qE '/dev/(tcp|udp)/' || continue
     kit_descendant "$p" && continue
     devtcp="$devtcp $p"
   done
@@ -1200,7 +1200,7 @@ if [ -n "$devtcp" ]; then
     pexe=$(readlink "/proc/$p/exe" 2>/dev/null) || pexe=unknown
     emit RED netproc "pid$p:$pexe" "command line opens a /dev/tcp or /dev/udp connection"
     detail "pid $p  $pexe"
-    detail "  cmdline: $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | cut -c1-88)"
+    detail "  cmdline: $(tr '\0' ' ' 2>/dev/null <"/proc/$p/cmdline" | cut -c1-88)"
   done
   fixhdr
   for p in $devtcp; do
@@ -1468,7 +1468,7 @@ else
   # unit someone installed, so it does not count.
   pid_unit_name() {
     [ -r "/proc/$1/cgroup" ] || return 1
-    tr '/' '\n' <"/proc/$1/cgroup" 2>/dev/null \
+    tr '/' '\n' 2>/dev/null <"/proc/$1/cgroup" \
       | grep -E '\.(service|socket)$' | tail -1
   }
 
@@ -1564,6 +1564,31 @@ else
       exe=$fallback_exe
     fi
 
+    # ss can print the shell and an inherited child on different rows during a
+    # process transition. If this row only named sleep/cat/etc., walk its live
+    # parents and attribute the socket to the first direct suspicious owner.
+    # Once that shell dies and the child is reparented, the child remains a
+    # finding in its own right, which preserves orphaned-socket detection.
+    case "$reason" in
+      *'inherited this one from a shell')
+        ancestor_pid=$pid
+        ancestor_hops=0
+        while [ "$ancestor_hops" -lt 16 ] && [ -r "/proc/$ancestor_pid/status" ]; do
+          parent_pid=$(awk '/^PPid:/{print $2; exit}' "/proc/$ancestor_pid/status" 2>/dev/null)
+          case "${parent_pid:-}" in ''|0|1|*[!0-9]*) break ;; esac
+          ancestor_exe=$(readlink "/proc/$parent_pid/exe" 2>/dev/null) || break
+          if ancestor_reason=$(socket_owner_reason "$ancestor_exe"); then
+            case "$ancestor_reason" in
+              *'inherited this one from a shell') : ;;
+              *) pid=$parent_pid; exe=$ancestor_exe; reason=$ancestor_reason; break ;;
+            esac
+          fi
+          ancestor_pid=$parent_pid
+          ancestor_hops=$((ancestor_hops + 1))
+        done
+        ;;
+    esac
+
     local_port=${local_addr##*:}
     peer_port=${peer##*:}
     direction=outbound
@@ -1630,7 +1655,7 @@ else
           "$direction socket held by a process because $reason"
       fi
 
-      cmd=$(tr '\0' ' ' <"/proc/$pid/cmdline" 2>/dev/null | cut -c1-88)
+      cmd=$(tr '\0' ' ' 2>/dev/null <"/proc/$pid/cmdline" | cut -c1-88)
       started=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^ *//')
       printf -v qpid '%q' "$pid"
       printf -v qevidence '%q' "$state_dir/evidence-pid-$pid"

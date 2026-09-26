@@ -352,9 +352,13 @@ Begin-Check 'services'
 # A shell renamed to look like anything else is still that shell. Size first,
 # so only a same-size file is ever hashed.
 $script:shellTwins = @()
-foreach ($sh in @('System32\cmd.exe', 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
-    $sp = Join-Path $env:SystemRoot $sh
-    try { $script:shellTwins += [pscustomobject]@{ Path = $sp; Size = (Get-Item -LiteralPath $sp -ErrorAction Stop).Length; Hash = (Get-FileHash -LiteralPath $sp -Algorithm SHA256 -ErrorAction Stop).Hash } } catch { }
+if (-not [string]::IsNullOrWhiteSpace($env:SystemRoot)) {
+    foreach ($sh in @('System32\cmd.exe', 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
+        try {
+            $sp = Join-Path $env:SystemRoot $sh -ErrorAction Stop
+            $script:shellTwins += [pscustomobject]@{ Path = $sp; Size = (Get-Item -LiteralPath $sp -ErrorAction Stop).Length; Hash = (Get-FileHash -LiteralPath $sp -Algorithm SHA256 -ErrorAction Stop).Hash }
+        } catch { }
+    }
 }
 function Get-ShellTwin {
     param([string]$File)
