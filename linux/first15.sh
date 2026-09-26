@@ -152,7 +152,10 @@ guarded() {
     note "skipped. Later: sudo ./linux/$tool --config $CFG --apply"
     return
   fi
-  note 'It rolls back in 60 seconds unless confirmed from a NEW ssh session.'
+  local key=CCDC_FIREWALL_ROLLBACK_SECONDS secs
+  [ "$tool" = sshd.sh ] && key=CCDC_SSH_ROLLBACK_SECONDS
+  secs=$(set -a; . "$CFG" >/dev/null 2>&1; printf '%s' "${!key:-120}")
+  note "It rolls back in $secs seconds unless confirmed from a NEW ssh session."
   note "Open a second terminal and ssh in NOW. Have this ready to paste there:"
   printf '     cd ~/ccdc-training && sudo ./linux/%s --config %s --confirm\n' "$tool" "$CFG"
   if ! ask 'Second session open and ready?'; then

@@ -91,11 +91,11 @@ sudo ./linux/first15.sh --phase 2
 ```
 **It runs:** firewall → sshd → down to 0 RED → bless → arm and audit.
 **You do:** open a second SSH session when it asks, and paste the `--confirm` line
-there within 60 seconds · fix the REDs · bless only at 0 RED.
+there within 120 seconds · fix the REDs · bless only at 0 RED.
 
 **By hand:**
 
-1. **Firewall** — it rolls itself back in 60s unless confirmed from a NEW connection
+1. **Firewall** — it rolls itself back in 120s unless confirmed from a NEW connection
    ```bash
    sudo ./linux/fw.sh --config "$CFG" --dry-run
    sudo ./linux/fw.sh --config "$CFG" --apply

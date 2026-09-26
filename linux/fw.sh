@@ -30,7 +30,7 @@ while [ "$#" -gt 0 ]; do
       printf '  --dry-run   render the ruleset and show it. The default.\n'
       printf '  --apply     snapshot, arm the rollback, THEN apply. The rules\n'
       printf '              revert on their own in CCDC_FIREWALL_ROLLBACK_SECONDS\n'
-      printf '              (default 60, minimum 30) unless you confirm.\n'
+      printf '              (default 120, minimum 30) unless you confirm.\n'
       printf '  --confirm   keep the rules. Run this from a NEW connection, not\n'
       printf '              the one you already had open - an existing session\n'
       printf '              survives a rule that blocks new ones, so testing in\n'
@@ -45,6 +45,9 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 ccdc_load_config "$config"
+# Printed commands carry real values: "<cfg>" pasted into bash is a redirect, not a placeholder.
+printf -v qconfig '%q' "$config"
+printf -v qself '%q' "$SCRIPT_DIR/fw.sh"
 if [ "$apply" -eq 1 ]; then CCDC_DRY_RUN=0; else CCDC_DRY_RUN=1; fi
 if [ "$apply" -eq 1 ] || [ "$confirm" -eq 1 ] || [ "$rollback" -eq 1 ]; then
   ccdc_require_root
@@ -291,7 +294,7 @@ if [ "$confirm" -eq 1 ]; then
   # "rollback cancelled; current rules retained" after an --apply that had
   # FAILED, which reads exactly like success. Found live on ubuntu-target.
   if [ ! -f "$pid_file" ]; then
-    ccdc_die "nothing to confirm: no firewall change is waiting for confirmation. Did --apply succeed? Check: $0 --config <cfg> --status"
+    ccdc_die "nothing to confirm: no firewall change is waiting for confirmation. Did --apply succeed? Check: sudo $qself --config $qconfig --status"
   fi
   cancel_pending_rollback
   # Removing the snapshot disarms the rollback a second way: the scheduled
@@ -487,7 +490,7 @@ if [ "$apply" -ne 1 ]; then
   exit 0
 fi
 
-seconds=${CCDC_FIREWALL_ROLLBACK_SECONDS:-60}
+seconds=${CCDC_FIREWALL_ROLLBACK_SECONDS:-120}
 case "$seconds" in ''|*[!0-9]*) ccdc_die "CCDC_FIREWALL_ROLLBACK_SECONDS must be a whole number" ;; esac
 [ "$seconds" -ge 30 ] || ccdc_die "firewall rollback interval must be at least 30 seconds"
 
@@ -650,4 +653,4 @@ if ! rollback_armed; then
 fi
 
 ccdc_info "firewall applied; auto-rollback in ${seconds}s via $(cat "$pid_file")"
-ccdc_info "OPEN A NEW CONNECTION NOW and verify, then run: $0 --config <cfg> --confirm"
+ccdc_info "OPEN A NEW CONNECTION NOW and verify, then run: sudo $qself --config $qconfig --confirm"
