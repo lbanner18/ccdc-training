@@ -38,14 +38,16 @@ baseline=("$SCRIPT_DIR/baseline.sh" --config "$CFG")
 hdr '1 of 2  WHAT IS WRONG - fix by number'
 run "${sentry[@]}" --status
 while :; do
-  printf '\n  \033[1ma\033[0m = fix every RED   \033[1mNUMBER\033[0m = fix that one (read an AMBER first)   \033[1mr\033[0m = re-list   \033[1mEnter\033[0m = next: '
+  printf '\n  \033[1ma\033[0m = fix every RED   \033[1mNUMBERS\033[0m = fix those, e.g. 2 4 5 (read each first)   \033[1mr\033[0m = re-list   \033[1mEnter\033[0m = next: '
   read -r ans || ans=''
   case "$ans" in
     '') break ;;
     r|R) run "${sentry[@]}" --status ;;
     a|A) run "${sentry[@]}" --approve --apply ;;
-    *[!0-9]*) note 'type a, a number, r, or just Enter' ;;
-    *) run "${sentry[@]}" --approve "$ans" --apply ;;
+    *)
+      nums=$(printf '%s' "$ans" | tr ',' ' ')
+      case "$nums" in *[!0-9\ ]*) note 'type a, one or more numbers, r, or just Enter'; continue ;; esac
+      for n in $nums; do run "${sentry[@]}" --approve "$n" --apply; done ;;
   esac
 done
 
@@ -59,15 +61,18 @@ else
   hdr '2 of 2  WHAT CHANGED since you froze this box - fix by number'
   run "${baseline[@]}"
   while :; do
-    printf '\n  \033[1mg\033[0m = fix everything marked safe   \033[1mNUMBER\033[0m = fix that one   \033[1me NUMBER\033[0m = explain it first   \033[1mr\033[0m = re-list   \033[1mEnter\033[0m = done: '
+    printf '\n  \033[1mg\033[0m = fix everything marked safe   \033[1mNUMBERS\033[0m = fix those, e.g. 2 4 5   \033[1me NUMBER\033[0m = explain it first   \033[1mr\033[0m = re-list   \033[1mEnter\033[0m = done: '
     read -r ans || ans=''
     case "$ans" in
       '') break ;;
       r|R) run "${baseline[@]}" ;;
       g|G) run "${baseline[@]}" --approve all-green --apply ;;
       e\ *|E\ *) n=${ans#* }; case "$n" in ''|*[!0-9]*) note 'e then a number, e.g.  e 3' ;; *) run "${baseline[@]}" --explain "$n" ;; esac ;;
-      *[!0-9]*) note 'type g, a number, e NUMBER, r, or just Enter' ;;
-      *) run "${baseline[@]}" --approve "$ans" --apply ;;
+      *)
+        # baseline.sh takes a comma list itself: "2 4 5" -> "2,4,5"
+        nums=$(printf '%s' "$ans" | tr ' ' ',' | tr -s ',' | sed 's/^,//; s/,$//')
+        case "$nums" in ''|*[!0-9,]*) note 'type g, one or more numbers, e NUMBER, r, or just Enter'; continue ;; esac
+        run "${baseline[@]}" --approve "$nums" --apply ;;
     esac
   done
 fi

@@ -1,7 +1,9 @@
 # Tryout day — the Mojank packet, Saturday 2026-09-26
 
-One page, in order. Every command was run on a replica of the packet's boxes
-(Ubuntu 18.04, Rocky 9 + Splunk 10.0.2, a Server 2016 domain controller).
+One page, in order. The Linux and Windows flows were rehearsed on replicas of
+the packet's boxes (Ubuntu 18.04, Rocky 9 + Splunk, a Server 2016 domain
+controller). The VyOS commands were NOT - the lab has no router; they are
+standard commands, check each against the box in front of you.
 `x` is your team number; `200+x` is its third octet (team 12 → `192.168.212.x`).
 
 | box | public / inside | OS | log in as |
@@ -26,10 +28,18 @@ write it there). One list for every box: the same block goes into Quotient.
 
 ## 9:00 — before scoring starts
 
-1. `auth.byuccdc.org` → note your **team number**. Connect NetBird. Open Quotient
-   and **write down which service is scored on which box** — that decides
-   everything below. Open Proxmox (console only; it cannot paste).
-2. Never reveal your team number; inject PDFs are `teamXX_injectYY.pdf`, no real name.
+1. `auth.byuccdc.org` → note your **team number**. Connect NetBird. Open Proxmox
+   (console only; it cannot paste).
+2. Open Quotient and **write this on paper** — the runners ask you about it:
+   ```
+   iron:     ____________      (of HTTP SSH FTP POP3)
+   lapis:    AD/DNS  ______    (HTTP? FTP?)
+   redstone: ____________
+   ```
+   Where it is used: lapis Phase 1 asks "Is HTTP / FTP scored on this box?";
+   iron and redstone Phase 1 print what is running - anything on your paper that
+   is missing, or listed "INSTALLED BUT NOT RUNNING", start with the printed command.
+3. Never reveal your team number; inject PDFs are `teamXX_injectYY.pdf`, no real name.
 
 ## 10:00 — the first ten minutes: every default password, every box
 
@@ -40,7 +50,7 @@ The red team has the same packet and tries its default password everywhere first
 git clone https://github.com/lbanner18/ccdc-training ~/ccdc-training      # iron
 cd ~ && curl -L https://github.com/lbanner18/ccdc-training/archive/refs/heads/main.tar.gz | tar xz && mv ccdc-training-main ccdc-training   # redstone: no git there
 cd ~/ccdc-training && chmod +x linux/*.sh
-CFG=/tmp/ccdc-linux.env; cp config/tryout-linux.env "$CFG" && chmod 600 "$CFG"
+CFG=/tmp/ccdc-linux.env; sudo cp config/tryout-linux.env "$CFG" && sudo chmod 600 "$CFG"
 sudo ./linux/passwords.sh --config "$CFG" --apply
 ```
 Paste **block 1** of your sheet, press **Ctrl-D**. It sets all ten (an account a
@@ -48,6 +58,7 @@ box doesn't have is skipped and named), then logs in
 to FTP and POP3 as each one to prove the services took them. Sessions still
 open under the OLD password are listed; end them with the printed command, or
 re-run with `--kick`. Also `sudo passwd root` (sheet section 4).
+**From here, `sudo` on these boxes wants steve's NEW password** (his block 1 line).
 
 **redstone only — Splunk's admin** (the web UI is `:8000`; admin on the default
 password is a remote shell for anyone). `PACKET-DEFAULT` is the packet's password:
@@ -84,30 +95,27 @@ them, the scorer uses the old passwords and fails.**
 ## Then each box: its own flow
 
 **Order: Phase 1 on lapis → iron → redstone, then Phase 2 on each.** Every box gets
-new passwords and hardening before any box gets the deep work. Phase 1 includes
-the password step; if you already did it above, answer `n` there.
+hardening before any box gets the deep work. The runner asks before every change,
+and the **green box at the end of each phase says exactly what to run next.**
 
-**Linux** — `sudo ./linux/first15.sh --phase 1` on each box, then `--phase 2`. It
-walks `playbooks/linux-first-15-minutes.md`, "Linux at a glance", and asks before
-every change. By hand, the short version:
-```bash
-sudo ./linux/discover.sh --config "$CFG" --apply     # services, ports, checks from what runs
-sudo ./linux/triage.sh --config "$CFG"
-sudo ./linux/harden.sh --config "$CFG"                       # READ the list: --cut only acts on a list you have seen
-sudo ./linux/harden.sh --config "$CFG" --cut all-safe --apply
-id alex; sudo passwd -S alex     # backup admin = alex (packet: only listed users) - in sudo/wheel, not locked
-sudo ./linux/fw.sh --config "$CFG" --apply     # then --confirm from a NEW ssh session
-sudo ./linux/sshd.sh --config "$CFG" --apply   # then --confirm from a NEW ssh session
-sudo ./linux/baseline.sh --config "$CFG" --bless --stable-for 20 --apply
-sudo ./linux/arm.sh --config "$CFG" --apply
-```
+| | Phase 1 | Phase 2 |
+|---|---|---|
+| iron, redstone | `sudo ~/ccdc-training/linux/first15.sh --phase 1` | `sudo ~/ccdc-training/linux/first15.sh --phase 2` |
+| lapis | `.\windows\first15.ps1 -Phase 1` | `.\windows\first15.ps1 -Phase 2` |
 
-**Windows (lapis)** — `.\windows\first15.ps1 -Phase 1`, then Phase 1 on the other
-boxes, then `-Phase 2`. It walks `playbooks/windows-first-15-minutes.md`, "Windows
-at a glance", and asks before every change. By hand: `triage.ps1` → `harden.ps1`
-then `-Apply` → check **alex** is an active Domain Admin (the packet allows only
-its listed users, so no new account) → `arm.ps1 -Apply` → `baseline.ps1 -Bless
--StableForSeconds 20 -Apply` → second window: `sentry.ps1 -Watch`.
+What the runners ask of you:
+
+- **Password step:** you already did it at 10:00 - answer `n`.
+- **Quotient questions / the service table:** answer from your paper.
+- **Linux Phase 2, firewall and SSH:** have a SECOND tab at a prompt first. When it
+  says "applied", ssh in from that tab and paste the one line it prints - 2 minutes.
+  Then press Enter in the runner; it tells you "kept" or "rolled back".
+- **The fix list:** `a` = fix every RED, a number = that one item, Enter = done.
+- **Bless:** only at 0 RED - and **read every AMBER first.** Whatever is on the box
+  when you bless counts as normal from then on.
+
+If a runner breaks, the by-hand steps are in `linux-first-15-minutes.md` and
+`windows-first-15-minutes.md` ("at a glance").
 
 **Bedrock (VyOS router) — look, do not filter.** It does the 1:1 NAT that makes
 every scored service reachable and carries Splunk forwarding to the Black Team.
@@ -124,8 +132,8 @@ firewalls already close what is not scored. Detail: `firewall-appliance.md`.
 Do NOT: a default-drop filter · `set service ssh listen-address` (lockout; the
 Proxmox console cannot paste) · block any IP (rule 4).
 
-**Splunk (redstone, not scored).** Phase 1 on redstone changes Splunk's admin
-password, checks forwarding and writes one test event, then prints the search.
+**Splunk (redstone, not scored).** Its admin password is in the 10:00 block. Phase
+1 on redstone then checks forwarding, writes one test event and prints the search.
 
 - Run that search in the web UI, `http://192.168.200+x.12:8000`. Found = logs arrive.
 - **Never disable forwarding or block outbound** — the rules forbid it.
@@ -136,11 +144,14 @@ password, checks forwarding and writes one test event, then prints the search.
 
 ## All day — the loop
 
-- **Quotient graphs first.** Everything down at once is a firewall — yours or theirs.
 - **A popup, or you come back to a box: ONE command.** It lists what is wrong, numbered, and fixes what you pick.
   - Linux: `sudo ~/ccdc-training/linux/fix.sh`
   - Windows (elevated): `powershell -ExecutionPolicy Bypass -File C:\ccdc-training-main\windows\fix.ps1`
+- **Quotient first.** One service red → that box: run `fix`. Everything red at once →
+  a firewall: yours (a change that did not roll back) or the router's.
+- **Bedrock, every so often:** `show system commit` - a commit you did not make is the red team.
 - After fixing anything scored: check it from **off the box** (your laptop over NetBird).
+- Locked out after a firewall/SSH change? Do nothing for 2 minutes - it rolls itself back.
 
 ## Rules that cost points if forgotten
 

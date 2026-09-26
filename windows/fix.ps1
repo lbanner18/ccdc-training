@@ -57,13 +57,13 @@ Hdr '1 of 2  WHAT IS WRONG - fix by number'
 Run 'sentry' @{ Status = $true }
 while ($true) {
     Write-Host ''
-    $a = Read-Host '  a = fix everything marked safe   NUMBER = fix that one (read a LOOK item first)   r = re-list   Enter = next'
+    $a = Read-Host '  a = fix every RED   NUMBERS = fix those, e.g. 2 4 5 (read each first)   r = re-list   Enter = next'
     $a = ([string]$a).Trim()
     if ($a -eq '') { break }
     elseif ($a -match '^[rR]$') { Run 'sentry' @{ Status = $true } }
     elseif ($a -match '^[aA]$') { Run 'sentry' @{ Approve = 'all'; Apply = $true } }
-    elseif ($a -match '^\d+$')  { Run 'sentry' @{ Approve = $a; Apply = $true } }
-    else { Write-Host '  type a, a number, r, or just Enter' -ForegroundColor Yellow }
+    elseif ($a -match '^\d+([\s,]+\d+)*$') { foreach ($n in ($a -split '[\s,]+')) { Run 'sentry' @{ Approve = $n; Apply = $true } } }
+    else { Write-Host '  type a, one or more numbers, r, or just Enter' -ForegroundColor Yellow }
 }
 
 # ---- part 2: what changed since the box was frozen ---------------------------
@@ -89,6 +89,27 @@ if ($WrongOnly) {
         }
         else { Write-Host '  type a number, r, or just Enter' -ForegroundColor Yellow }
     }
+}
+
+# ---- what is left: every RED, including the ones the list above cannot fix ----
+Hdr 'WHAT IS LEFT'
+$triage = Join-Path $PSScriptRoot 'triage.ps1'
+& $triage -Config $cfgPath -Quiet -NoEvidence *> $null
+$ff = Join-Path $env:ProgramData 'CCDC\state\findings.txt'
+$reds = @()
+if (Test-Path -LiteralPath $ff) { $reds = @(Get-Content -LiteralPath $ff | Where-Object { $_ -like 'RED|*' }) }
+if ($reds.Count -eq 0) {
+    Write-Host '  0 RED.' -ForegroundColor Green
+} else {
+    foreach ($r in $reds) {
+        $f = $r -split '\|', 4
+        Write-Host ('  RED  {0,-12} {1}' -f $f[1], $f[2]) -ForegroundColor Red
+        if ($f.Count -ge 4) { Write-Host ('       {0}' -f $f[3]) }
+    }
+    Write-Host ''
+    Write-Host ('  {0} RED left - the list above cannot fix these by number. Each one, with its exact fix,' -f $reds.Count) -ForegroundColor Red
+    Write-Host '  in your SECOND elevated window:' -ForegroundColor Red
+    Write-Host ("     powershell -ExecutionPolicy Bypass -File {0}" -f $triage) -ForegroundColor White
 }
 
 Write-Host ''

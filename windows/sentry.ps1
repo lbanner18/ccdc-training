@@ -350,6 +350,70 @@ $script:Actions = @{
             if ($LASTEXITCODE -ne 0) { throw "sc sdset failed: $($out -join ' ')" }
         }
     }
+    'svcdiracl' = @{
+        Tier = 'AMBER'
+        Can  = { param($s) Test-Path -LiteralPath $s -PathType Container }
+        Why  = { param($s) "the directory '$s' is no longer there" }
+        What = { param($s) "stop ordinary users writing into '$s' (read access is kept)" }
+        Do   = { param($s, $ev)
+            (& icacls.exe $s 2>&1) | Out-File (Join-Path $ev 'icacls-before.txt') -Encoding UTF8
+            # /remove cannot touch an INHERITED grant: copy inheritance down first.
+            $out = & icacls.exe $s /inheritance:d 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "icacls /inheritance:d failed: $($out -join ' ')" }
+            foreach ($id in 'BUILTIN\Users', 'NT AUTHORITY\Authenticated Users', 'Everyone', 'NT AUTHORITY\INTERACTIVE', 'BUILTIN\Guests') {
+                & icacls.exe $s /remove:g $id 2>&1 | Out-Null
+            }
+            $out = & icacls.exe $s /grant 'BUILTIN\Users:(OI)(CI)RX' 2>&1
+            if ($LASTEXITCODE -ne 0) { throw "icacls /grant failed: $($out -join ' ')" }
+        }
+    }
+    'share' = @{
+        Tier = 'AMBER'
+        Can  = { param($s) $n = ($s -split ' \(')[0]; ($n -notmatch '(?i)^(NETLOGON|SYSVOL|IPC\$|ADMIN\$|[A-Z]\$)$') -and ($null -ne (Get-SmbShare -Name $n -ErrorAction SilentlyContinue)) }
+        Why  = { param($s) "the share '$s' is a system share or no longer exists - not touched" }
+        What = { param($s) "take Everyone / Users / Authenticated Users / Anonymous off the share $s (the share and its files stay)" }
+        Do   = { param($s, $ev)
+            $n = ($s -split ' \(')[0]
+            Get-SmbShareAccess -Name $n -ErrorAction Stop | Out-File (Join-Path $ev 'share-before.txt') -Encoding UTF8
+            foreach ($acct in 'Everyone', 'BUILTIN\Users', 'NT AUTHORITY\Authenticated Users', 'NT AUTHORITY\ANONYMOUS LOGON') {
+                Revoke-SmbShareAccess -Name $n -AccountName $acct -Force -ErrorAction SilentlyContinue | Out-Null
+            }
+        }
+    }
+    'svcpath' = @{
+        Tier = 'AMBER'
+        # Never a service the packet scores, however odd its path looks.
+        Can  = { param($s) ($null -ne (Get-CimInstance Win32_Service -Filter "Name='$s'" -ErrorAction SilentlyContinue)) -and
+                           (@(([string]$cfg['CCDC_WINDOWS_SERVICES']) -split '\s+') -notcontains $s) }
+        Why  = { param($s) "'$s' is gone, or it is listed in CCDC_WINDOWS_SERVICES as scored - not touched" }
+        What = { param($s) "stop and disable service '$s', keeping a copy of its program as evidence (not deleted)" }
+        Do   = { param($s, $ev)
+            $w = Get-CimInstance Win32_Service -Filter "Name='$s'" -ErrorAction Stop
+            $w | Select-Object Name, State, StartMode, PathName, StartName | Out-File (Join-Path $ev 'service-before.txt') -Encoding UTF8
+            $exe = $w.PathName.Trim(); if ($exe.StartsWith('"')) { $exe = ($exe -split '"')[1] } else { $exe = ($exe -split '\s+')[0] }
+            if (Test-Path -LiteralPath $exe) { Copy-Item -LiteralPath $exe -Destination $ev -Force -ErrorAction SilentlyContinue }
+            Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $s -StartupType Disabled -ErrorAction Stop
+        }
+    }
+    'procshell' = @{
+        Tier = 'RED'
+        # The pid must still be the same program: pids are reused.
+        Can  = { param($s) if ($s -notmatch '^pid(\d+):(.+)$') { return $false }
+                           $p = Get-CimInstance Win32_Process -Filter "ProcessId=$($Matches[1])" -ErrorAction SilentlyContinue
+                           ($null -ne $p) -and ($p.ExecutablePath -eq $Matches[2]) }
+        Why  = { param($s) "the process '$s' has already exited, or its pid now belongs to something else" }
+        What = { param($s) "stop the renamed shell $s, after saving its command line and a copy of the program" }
+        Do   = { param($s, $ev)
+            if ($s -notmatch '^pid(\d+):(.+)$') { throw "cannot read process subject '$s'" }
+            $procId = [int]$Matches[1]; $path = $Matches[2]
+            Get-CimInstance Win32_Process -Filter "ProcessId=$procId" -ErrorAction Stop |
+                Select-Object ProcessId, ParentProcessId, CommandLine, CreationDate | Format-List |
+                Out-File (Join-Path $ev 'process-before.txt') -Encoding UTF8
+            Copy-Item -LiteralPath $path -Destination $ev -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $procId -Force -ErrorAction Stop
+        }
+    }
     'listener' = @{
         Tier = 'AMBER'
         What = { param($s) "block $s at the firewall (reversible; the process is left running)" }

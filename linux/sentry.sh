@@ -613,7 +613,7 @@ can_automate() {
       protected_user "$user" && return 1
       case "$group" in sudo|wheel|admin) ;; *) return 1 ;; esac
       ;;
-    cron)
+    cron|cronnew)
       valid_cron_path "$subject" && [ -e "$subject" ] || return 1
       # Shared system crontabs require line-level operator judgement. Dedicated
       # job files can be preserved and removed safely after explicit approval.
@@ -801,7 +801,7 @@ card_for() {
     uid0|emptypw|rootadj)   printf 'CARD 1 - UID-0 account that is not root' ;;
     scoreduser)             printf 'CARD 1 - UID-0 account that is not root (see: a scored account that cannot log in)' ;;
     sshkey)                 printf 'CARD 2 - SSH key you do not recognise' ;;
-    cron|crondeep)          printf 'CARD 3 - scheduled job that calls home' ;;
+    cron|crondeep|cronnew)  printf 'CARD 3 - scheduled job that calls home' ;;
     unit|unittmp|unitdeep|unitdropin|unitdropindeep|rogueunit)
                             printf 'CARD 4 - systemd unit that calls home, or runs from /tmp' ;;
     suid|suidunpackaged)    printf 'CARD 5 - SUID interpreter' ;;
@@ -1188,7 +1188,7 @@ render_action() {
     admingroup)
       user=${subject%%/*}; group=${subject#*/}
       printf 'remove %q from admin group %q' "$user" "$group" ;;
-    cron) printf 'preserve evidence, then remove scheduled job %q' "$subject" ;;
+    cron|cronnew) printf 'preserve evidence, then remove scheduled job %q' "$subject" ;;
     crondeep)
       unit=${subject%%::*}; target=${subject#*::}
       printf 'preserve both; strip the schedule lines naming %q from %q, then delete the payload' "$target" "$unit" ;;
@@ -2485,7 +2485,7 @@ execute_action() {
     scoreduser) action_scoreduser "$subject" ;;
     svcshell) action_svcshell "$subject" ;;
     admingroup) action_admingroup "$subject" ;;
-    cron) action_cron "$subject" ;;
+    cron|cronnew) action_cron "$subject" ;;
     crondeep) action_crondeep "$subject" ;;
     unit|unittmp) action_unit "$subject" ;;
     unitdeep) action_unitdeep "$subject" ;;

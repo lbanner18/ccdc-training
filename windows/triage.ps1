@@ -348,6 +348,26 @@ Clean ("{0} scored account(s) checked for availability" -f @($allowedUsers).Coun
 # =============================================================================
 
 Begin-Check 'services'
+
+# A shell renamed to look like anything else is still that shell. Size first,
+# so only a same-size file is ever hashed.
+$script:shellTwins = @()
+foreach ($sh in @('System32\cmd.exe', 'System32\WindowsPowerShell\v1.0\powershell.exe')) {
+    $sp = Join-Path $env:SystemRoot $sh
+    try { $script:shellTwins += [pscustomobject]@{ Path = $sp; Size = (Get-Item -LiteralPath $sp -ErrorAction Stop).Length; Hash = (Get-FileHash -LiteralPath $sp -Algorithm SHA256 -ErrorAction Stop).Hash } } catch { }
+}
+function Get-ShellTwin {
+    param([string]$File)
+    try { $len = (Get-Item -LiteralPath $File -ErrorAction Stop).Length } catch { return $null }
+    foreach ($t in $script:shellTwins) {
+        if ($t.Size -ne $len -or $t.Path -eq $File) { continue }
+        try { if ((Get-FileHash -LiteralPath $File -Algorithm SHA256 -ErrorAction Stop).Hash -eq $t.Hash) { return $t.Path } } catch { }
+    }
+    return $null
+}
+# Where installers put services. Defender updates itself under ProgramData\Microsoft.
+$stdBinDirs = '(?i)^[A-Z]:\\(Windows|Program Files|Program Files \(x86\)|ProgramData\\Microsoft)\\'
+
 $services = @()
 try { $services = @(Get-CimInstance Win32_Service -ErrorAction Stop) } catch { }
 
@@ -359,6 +379,10 @@ if (@($services).Count -eq 0) {
     foreach ($s in $services) {
         $path = $s.PathName
         if ([string]::IsNullOrWhiteSpace($path)) { continue }
+        # Stopped AND disabled cannot run - which is exactly what sentry's svcpath
+        # action leaves behind (evidence kept, not deleted). Re-enable or start
+        # it and it is reported again.
+        if ($s.StartMode -eq 'Disabled' -and $s.State -eq 'Stopped') { continue }
 
         # The executable, dug out of a command line that may carry arguments.
         $exe = $path.Trim()
@@ -379,6 +403,30 @@ if (@($services).Count -eq 0) {
                        ("Copy-Item {0} C:\ProgramData\CCDC\evidence\ -Force" -f (Q $exe))) `
                 -Card 'CARD W2'
             continue
+        }
+
+        # (a2) Outside where installers put services, AND either a renamed shell
+        # or created after the box was built. Found live: a copy of cmd.exe at
+        # C:\RT_LAB_PLANT_bin\svc.exe, registered as a service, passed (a).
+        if ($exe -notmatch $stdBinDirs -and [System.IO.File]::Exists($exe)) {
+            $twin = Get-ShellTwin -File $exe
+            $created = $null
+            try { $created = [System.IO.File]::GetCreationTime($exe) } catch { }
+            $isNew = ($null -ne $created -and $facts['BoxBuilt'] -and $created -gt $facts['BoxBuilt'].AddHours(2))
+            if ($twin -or $isNew) {
+                $why = if ($twin) { "it is a renamed copy of $twin - a shell, registered as a service" }
+                       else { ('it was created {0}, after this box was built' -f $created.ToString('yyyy-MM-dd HH:mm')) }
+                Report -Severity 'RED' -Check 'svcpath' -Subject $s.Name `
+                    -Description ('service runs a program from outside Windows and Program Files: {0}' -f $exe) `
+                    -Detail @(('  {0}' -f $why), ('  state: {0}, start: {1}' -f $s.State, $s.StartMode)) `
+                    -Fix @(("sc.exe qc {0}" -f $s.Name),
+                           '# preserve the binary BEFORE you delete anything:',
+                           ("Copy-Item {0} C:\ProgramData\CCDC\evidence\ -Force" -f (Q $exe)),
+                           ("Stop-Service {0} -Force; sc.exe delete {0}" -f (Q $s.Name)),
+                           ("Remove-Item {0} -Force" -f (Q $exe))) `
+                    -Card 'CARD W2'
+                continue
+            }
         }
 
         # (b) The unquoted service path problem. Windows will try
@@ -795,9 +843,19 @@ try {
                        ("Copy-Item {0} C:\ProgramData\CCDC\evidence\ -Force    # evidence FIRST" -f (Q $ep)),
                        ("Stop-Process -Id {0} -Force" -f $p.ProcessId)) `
                 -Card 'CARD W5'
+        } elseif ($ep -notmatch $stdBinDirs -and ($twin = Get-ShellTwin -File $ep)) {
+            Report -Severity 'RED' -Check 'procshell' -Subject ('pid{0}:{1}' -f $p.ProcessId, $ep) `
+                -Description ('a renamed shell is running: {0} is a copy of {1}' -f $ep, $twin) `
+                -Detail @(('  cmdline: {0}' -f ([string]$p.CommandLine).Substring(0, [Math]::Min(140, ([string]$p.CommandLine).Length))),
+                          'Nothing legitimate copies a shell to a new name and runs it.') `
+                -Fix @(("Get-CimInstance Win32_Process -Filter 'ProcessId={0}' | Format-List ProcessId,ParentProcessId,CommandLine,CreationDate" -f $p.ProcessId),
+                       ("Copy-Item {0} C:\ProgramData\CCDC\evidence\ -Force    # evidence FIRST" -f (Q $ep)),
+                       ("Stop-Process -Id {0} -Force" -f $p.ProcessId),
+                       '# then what STARTED it: a service, a Run key, a scheduled task - triage lists those too') `
+                -Card 'CARD W5'
         }
     }
-    Clean 'no processes running out of temporary directories'
+    Clean 'no processes running out of temporary directories, and no renamed shells'
 } catch { }
 
 # =============================================================================
