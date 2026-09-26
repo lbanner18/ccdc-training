@@ -114,8 +114,9 @@ its listed users, so no new account) → `arm.ps1 -Apply` → `baseline.ps1 -Ble
 ## All day — the loop
 
 - **Quotient graphs first.** Everything down at once is a firewall — yours or theirs.
-- Linux: `sudo ./linux/sentry.sh --config "$CFG" --status`, then `--approve --apply` for every RED.
-- Windows: the `sentry.ps1 -Watch` window pops up; `.\windows\baseline.ps1 -Status`.
+- **A popup, or you come back to a box: ONE command.** It lists what is wrong, numbered, and fixes what you pick.
+  - Linux: `sudo ~/ccdc-training/linux/fix.sh`
+  - Windows (elevated): `powershell -ExecutionPolicy Bypass -File C:\ccdc-training-main\windows\fix.ps1`
 - After fixing anything scored: check it from **off the box** (your laptop over NetBird).
 
 ## Rules that cost points if forgotten

@@ -163,11 +163,13 @@ if [ "$phase" = 1 ]; then
     warn 'alex does not exist on this box. The packet says it should - look before you fix.'
   fi
 
-  printf '\n'
-  ok "Phase 1 done on $(hostname)."
-  printf '  Next: Phase 1 on the other boxes. Then come back and run:\n'
-  printf '     sudo ./linux/first15.sh --phase 2\n'
-  printf '  For commands by hand in this shell:  CFG=%s\n\n' "$CFG"
+  printf '\n\033[32m%s\n' '============================================================================'
+  printf '  Phase 1 done on %s. NEXT:\n\n' "$(hostname)"
+  printf '   1. Phase 1 on every OTHER box first.\n'
+  printf '   2. Then come back to THIS box and run:\n\n'
+  printf '        \033[1msudo %s/first15.sh --phase 2\033[0m\033[32m\n\n' "$SCRIPT_DIR"
+  printf '      Before you start it, have a SECOND tab at a prompt, ready to ssh in here.\n'
+  printf '%s\033[0m\n\n' '============================================================================'
   exit 0
 fi
 
@@ -218,33 +220,19 @@ step '2 of 5' 'sshd'
 guarded sshd.sh 'sshd'
 
 step '3 of 5' 'down to 0 RED - fix by number'
-run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --status
-while :; do
-  printf '\n  a = fix every RED · NUMBER = fix that one (AMBERs: read first) · r = re-list · Enter = done: '
-  read -r ans || ans=''
-  case "$ans" in
-    '') break ;;
-    r|R) run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --status ;;
-    a|A) run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --approve --apply ;;
-    *[!0-9]*) note 'a, a number, r, or Enter' ;;
-    *) run "$SCRIPT_DIR/sentry.sh" --config "$CFG" --approve "$ans" --apply ;;
-  esac
-done
-printf '\n'
-brief; reds=$?
-if [ "$reds" -gt 0 ]; then
-  note 'These need a judgement call. f shows each one with its exact fix - run those in your other tab.'
-  full_report_offer
-fi
+run "$SCRIPT_DIR/fix.sh" --config "$CFG" --wrong-only; reds=$?
 
 step '4 of 5' 'freeze the clean box'
+bless_default=y
 if [ "$reds" -gt 0 ]; then
-  warn "$reds RED still open - blessing now would mark them as normal. Answer n, fix them, re-run Phase 2."
+  bless_default=n
+  warn "$reds RED still open. Blessing now marks them as NORMAL. Answer n, fix them"
+  warn "(the triage line above shows how), then re-run: sudo $SCRIPT_DIR/first15.sh --phase 2"
 fi
-if ask 'Bless the baseline now (0 RED, and everything left is yours)?'; then
+if ask 'Bless the baseline now?' "$bless_default"; then
   run "$SCRIPT_DIR/baseline.sh" --config "$CFG" --bless --stable-for 20 --apply
 else
-  note "later: sudo ./linux/baseline.sh --config $CFG --bless --stable-for 20 --apply"
+  note "later: sudo $SCRIPT_DIR/baseline.sh --config $CFG --bless --stable-for 20 --apply"
 fi
 
 step '5 of 5' 'arm everything: backups, canaries, sentry, guardian/watchdog, audit'
@@ -254,8 +242,10 @@ if ask 'Arm it?' y; then
   run "$SCRIPT_DIR/audit.sh" --config "$CFG" --capture
 fi
 
-printf '\n'
-ok "Phase 2 done on $(hostname). From here it is the playbook's loop section:"
-printf '     sudo ./linux/sentry.sh --config %s --status\n' "$CFG"
-printf '  For commands by hand in this shell:  CFG=%s\n\n' "$CFG"
+printf '\n\033[32m%s\n' '============================================================================'
+printf '  Phase 2 done on %s. FROM NOW ON, all day, this box needs ONE command:\n\n' "$(hostname)"
+printf '     \033[1msudo %s/fix.sh\033[0m\033[32m\n\n' "$SCRIPT_DIR"
+printf '  Run it when a CCDC popup appears, or whenever you come back to this box.\n'
+printf '  It lists what is wrong, numbered, and fixes what you pick.\n'
+printf '%s\033[0m\n\n' '============================================================================'
 exit 0

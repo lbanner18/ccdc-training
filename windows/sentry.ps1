@@ -599,7 +599,8 @@ if ($Watch) {
     $host.UI.RawUI.WindowTitle = 'sentry watch - ' + $env:COMPUTERNAME
     Write-Host ''
     Write-Host ('  sentry watch on {0}: triage, baseline drift, canaries and Defender every {1}s.' -f $env:COMPUTERNAME, $IntervalSeconds)
-    Write-Host  '  Read-only. It alerts on what is NEW; fixing is still sentry -Status / -Approve.'
+    Write-Host  '  Read-only. It alerts on what is NEW. To FIX, in another elevated window:'
+    Write-Host ('     powershell -ExecutionPolicy Bypass -File {0}' -f (Join-Path $PSScriptRoot 'fix.ps1')) -ForegroundColor White
     Write-Host  '  Do not click inside this window: a selection freezes it. Ctrl+C stops it.'
     Write-Host ''
     S "watch started interval=$IntervalSeconds"
@@ -616,12 +617,12 @@ if ($Watch) {
         if ($pass -eq 1) {
             Write-Host ('  {0}  first look: {1} open item(s) - {2} RED, {3} baseline change(s)' -f $stamp, $snap.Count, $red, $drifts)
             foreach ($k in $snap.Keys) { Write-Host ('      {0}' -f $snap[$k]) -ForegroundColor Yellow }
-            if ($snap.Count -gt 0) { Write-Host '      (already there at start - these do not pop up; fix them with sentry -Status)' }
+            if ($snap.Count -gt 0) { Write-Host ('      (already there at start - these do not pop up. FIX: powershell -ExecutionPolicy Bypass -File {0})' -f (Join-Path $PSScriptRoot 'fix.ps1')) }
         } elseif ($new.Count -gt 0) {
             Write-Host ''
             Write-Host ('  ==== {0}  {1} NEW ====================================================' -f $stamp, $new.Count) -ForegroundColor Red
             foreach ($k in $new) { Write-Host ('      {0}' -f $snap[$k]) -ForegroundColor Red }
-            Write-Host  '      next: .\windows\baseline.ps1 -Status   then   .\windows\sentry.ps1 -Status' -ForegroundColor Red
+            Write-Host ('      FIX, in another elevated window:  powershell -ExecutionPolicy Bypass -File {0}' -f (Join-Path $PSScriptRoot 'fix.ps1')) -ForegroundColor Red
             Write-Host ''
             S ('watch NEW ' + (($new | ForEach-Object { $snap[$_] }) -join ' ;; '))
             try { [Console]::Beep(880, 300); [Console]::Beep(660, 300) } catch { }
@@ -629,10 +630,10 @@ if ($Watch) {
                 # msg.exe caps a message at 255 characters: keep the finding
                 # short so the command to run next always fits.
                 $first = ($snap[$new[0]] -replace '\s+', ' ').Trim()
-                if ($first.Length -gt 70) { $first = $first.Substring(0, 70) + '...' }
-                $kit = Split-Path -Parent $PSScriptRoot
-                $msg = ('CCDC {0} {1}: {2} NEW. First: {3} -- For more, in {4} run: .\windows\baseline.ps1 -Status  then  .\windows\sentry.ps1 -Status' -f $env:COMPUTERNAME, $stamp, $new.Count, $first, $kit)
-                if ($msg.Length -gt 255) { $msg = $msg.Substring(0, 255) }
+                $fixCmd = 'powershell -ExecutionPolicy Bypass -File ' + (Join-Path $PSScriptRoot 'fix.ps1')
+                # The fix command goes FIRST so msg.exe's 255-character cap can only cut the finding.
+                $msg = ('CCDC {0} {1}: {2} NEW. FIX IT - elevated PowerShell: {3}  -- First: {4}' -f $env:COMPUTERNAME, $stamp, $new.Count, $fixCmd, $first)
+                if ($msg.Length -gt 255) { $msg = $msg.Substring(0, 252) + '...' }
                 try { & msg.exe * /TIME:300 $msg 2>&1 | Out-Null } catch { }
             }
         } else {

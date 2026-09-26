@@ -194,27 +194,23 @@ if ($Phase -eq '1') {
     }
 
     Write-Host ''
-    Write-Host ('  Phase 1 done on {0}.' -f $env:COMPUTERNAME) -ForegroundColor Green
-    Write-Host '  Next: Phase 1 on the other boxes. Then come back and run:'
-    Write-Host '     .\windows\first15.ps1 -Phase 2'
+    Write-Host ('=' * 76) -ForegroundColor Green
+    Write-Host ('  Phase 1 done on {0}. NEXT:' -f $env:COMPUTERNAME) -ForegroundColor Green
+    Write-Host ''
+    Write-Host '   1. Phase 1 on every OTHER box first.' -ForegroundColor Green
+    Write-Host '   2. Then come back to THIS window and run:' -ForegroundColor Green
+    Write-Host ''
+    Write-Host ('        {0} -Phase 2' -f (Join-Path $PSScriptRoot 'first15.ps1')) -ForegroundColor White
+    Write-Host ('=' * 76) -ForegroundColor Green
     Write-Host ''
     exit 0
 }
 
 # =============================================================================
-Step '1 of 4' 'down to 0 RED'
-Run 'triage' @{ Config = $cfgPath }
-Pause-ForRead 'Run any "run this" lines you want in your SECOND elevated window'
-Run 'sentry' @{ Config = $cfgPath; Status = $true }
-if (Ask 'Apply every automatic fix (sentry -Approve all)?') {
-    Run 'sentry' @{ Config = $cfgPath; Approve = 'all'; Apply = $true }
-}
-while ($true) {
-    $n = Read-Host '  Approve a held item you have READ - its number, or Enter to move on'
-    if ([string]::IsNullOrWhiteSpace($n)) { break }
-    if ($n.Trim() -notmatch '^\d+$') { Write-Host '  a number, or Enter'; continue }
-    Run 'sentry' @{ Config = $cfgPath; Approve = $n.Trim(); Apply = $true }
-}
+Step '1 of 4' 'down to 0 RED - fix by number'
+Run 'fix' @{ Config = $cfgPath; WrongOnly = $true }
+Write-Host '  Anything still RED that the list could not fix: its exact fix is in  .\windows\triage.ps1' -ForegroundColor Yellow
+Write-Host '  (run that in your SECOND window). Bless only once triage says 0 RED.' -ForegroundColor Yellow
 
 Step '2 of 4' 'canaries and the self-repairing tasks'
 if (Ask 'Arm them (arm.ps1 -Apply)?' -DefaultYes) {
@@ -240,6 +236,13 @@ if (Ask 'Open the sentry -Watch window now?' -DefaultYes) {
 }
 
 Write-Host ''
-Write-Host ('  Phase 2 done on {0}. From here it is the loop section of the playbook, driven by the popups.' -f $env:COMPUTERNAME) -ForegroundColor Green
+Write-Host ('=' * 76) -ForegroundColor Green
+Write-Host ('  Phase 2 done on {0}. FROM NOW ON, all day, this box needs ONE command:' -f $env:COMPUTERNAME) -ForegroundColor Green
+Write-Host ''
+Write-Host ('     powershell -ExecutionPolicy Bypass -File {0}' -f (Join-Path $PSScriptRoot 'fix.ps1')) -ForegroundColor White
+Write-Host ''
+Write-Host '  Run it (elevated) when a CCDC popup appears, or whenever you come back to this box.' -ForegroundColor Green
+Write-Host '  It lists what is wrong, numbered, and fixes what you pick.' -ForegroundColor Green
+Write-Host ('=' * 76) -ForegroundColor Green
 Write-Host ''
 exit 0
