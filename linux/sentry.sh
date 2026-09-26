@@ -1134,6 +1134,38 @@ held_reason() {
       printf '         sudo sed -i "s/Options Indexes FollowSymLinks/Options FollowSymLinks/" /etc/apache2/apache2.conf\n'
       printf '         sudo apache2ctl configtest && sudo systemctl reload apache2 || sudo systemctl reload httpd\n\n'
       return 0 ;;
+
+    cronnew)
+      printf '\n       A scheduled job no package installed, written after this box was\n'
+      printf '       built. It does not have to look evil to be persistence: a clean\n'
+      printf '       line that just names a path is enough once something is there to\n'
+      printf '       run it.\n\n'
+      printf '       Not automated: a cron.d file or a users crontab is routinely a mix\n'
+      printf '       of your own entries and the plant, so deleting the whole file can\n'
+      printf '       take a legitimate line with it.\n\n'
+      printf '       Read it, keep a copy, then remove only what is not yours:\n\n'
+      printf '         sudo cat %q\n' "$subject"
+      case "$subject" in
+        /var/spool/cron/*)
+          printf '         sudo crontab -u %s -l\n' "$(basename -- "$subject")"
+          printf '         sudo crontab -u %s -e     # delete only the lines you did not write\n\n' "$(basename -- "$subject")" ;;
+        *)
+          printf '         sudo cp -a %q /var/tmp/ccdc-evidence/\n' "$subject"
+          printf '         sudo rm -f %q     # if none of it is yours\n\n' "$subject" ;;
+      esac
+      return 0 ;;
+
+    selinux)
+      printf '\n       SELinux blocked something in the last 30 minutes.\n\n'
+      printf '       Not automated: a denial is a wall being hit, not the thing that hit\n'
+      printf '       it, and it fires just as often for your own tooling as for an\n'
+      printf '       attacker. There is nothing here to remove.\n\n'
+      printf '       Read what was blocked, in plain English, then decide:\n\n'
+      printf '         sudo sealert -a /var/log/audit/audit.log | less\n'
+      printf '         sudo ausearch -m AVC --input-logs -ts recent -i\n\n'
+      printf '       A shell, python, nc or perl being blocked for a scored service is\n'
+      printf '       the one to chase; one of the kit'"'"'s own tools is not a finding.\n'
+      return 0 ;;
   esac
   return 1
 }

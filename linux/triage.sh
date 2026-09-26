@@ -2373,7 +2373,7 @@ if ccdc_have getenforce && [ "$(getenforce 2>/dev/null)" != Disabled ] && [ -r /
     detail "a shell, python, nc or perl being blocked for a web or mail service is the one to chase"
     fixhdr
     fix "sudo sealert -a /var/log/audit/audit.log | less   # what was blocked, why, in plain English"
-    fix "sudo ausearch -m AVC -ts recent -i               # the raw denials, last 10 minutes"
+    fix "sudo ausearch -m AVC --input-logs -ts recent -i  # the raw denials, last 10 minutes"
   else
     clean "no SELinux denials in the last 30 minutes"
   fi
