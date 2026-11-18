@@ -33,6 +33,7 @@ cd ~ && git clone https://github.com/lbanner18/ccdc-training && cd ccdc-training
 chmod +x linux/*.sh
 CFG=/tmp/ccdc-linux.env; sudo cp config/hivestorm-linux.env "$CFG" && sudo chmod 600 "$CFG"
 sudo nano "$CFG"     # CCDC_ALLOWED_USERS / CCDC_ALLOWED_ADMINS / CCDC_INTERACTIVE_USERS from the README
+sudo ./linux/hivestorm.sh --config "$CFG"   # READ-ONLY image checklist: every FAIL prints its fix
 sudo ./linux/first15.sh --phase 1
 ```
 
@@ -68,6 +69,7 @@ Expand-Archive C:\kit.zip C:\ -Force; cd C:\ccdc-training-main
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 mkdir C:\ProgramData\CCDC -Force | Out-Null; copy config\hivestorm-windows.env C:\ProgramData\CCDC\ccdc.env
 notepad C:\ProgramData\CCDC\ccdc.env     # ALLOWED_USERS / ALLOWED_ADMINS / services from the README
+.\windows\hivestorm.ps1                 # READ-ONLY image checklist: every FAIL prints its fix
 .\windows\first15.ps1 -Phase 1
 ```
 
@@ -87,6 +89,10 @@ By hand, after:
 - `secpol.msc` → Audit Policy: success+failure on logon, account mgmt, policy change
 - UAC on (`secpol` → Security Options); SMBv1 off; remove banned software from Apps
 - Shares: `net share`, remove any the README doesn't need
+
+Re-run `hivestorm.sh` / `hivestorm.ps1` after fixing: the FAIL count is your
+to-do list. `[LOOK]` lines need the README to decide (services, shares, media,
+startup items, tasks); the scoring engine's own task/service is always a keep.
 
 ## When stuck
 
