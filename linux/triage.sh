@@ -1778,8 +1778,12 @@ consider_admin_member() {
   # allow-list and omitted it. Restricting this to root-capable groups and an
   # explicit allow-list keeps ordinary `adm`/log-reader membership quiet.
   if [ "$uid" -ge 1000 ] 2>/dev/null; then
-    [ -n "${CCDC_ALLOWED_USERS:-}" ] || return 0
-    ccdc_list_contains "$member" "${CCDC_ALLOWED_USERS:-}" && return 0
+    # CCDC_ALLOWED_ADMINS, when set, is the narrower list of who may be root-
+    # capable (image-scored events list admins and standard users apart);
+    # empty falls back to CCDC_ALLOWED_USERS, as every CCDC packet needs.
+    local admins=${CCDC_ALLOWED_ADMINS:-${CCDC_ALLOWED_USERS:-}}
+    [ -n "$admins" ] || return 0
+    ccdc_list_contains "$member" "$admins" && return 0
   fi
 
   entry="$member/$group"
@@ -1810,7 +1814,7 @@ if [ "${#suspect[@]}" -gt 0 ]; then
   for e in "${suspect[@]}"; do
     emit RED admingroup "$e" "account has unapproved root-capable group membership"
   done
-  detail "system accounts are always shown; human accounts are shown when absent from CCDC_ALLOWED_USERS"
+  detail "system accounts are always shown; human accounts are shown when absent from CCDC_ALLOWED_ADMINS (or CCDC_ALLOWED_USERS when that is empty)"
   fixhdr
   for e in "${suspect[@]}"; do
     printf -v quser '%q' "${e%%/*}"

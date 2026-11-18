@@ -50,6 +50,12 @@ Clear-CcdcFindings
 $facts     = Get-CcdcBoxFacts
 $builtTime = Get-CcdcBoxBuiltTime
 $allowedUsers    = Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_USERS'
+# Optional, narrower list: who may hold ADMIN rights. Empty means anyone in
+# CCDC_ALLOWED_USERS may (the CCDC packets never split the two). Image-scored
+# events (HIVESTORM, CyberPatriot) list admins and standard users separately,
+# and a standard user in Administrators is itself a scored finding.
+$allowedAdmins   = @(Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_ADMINS')
+if (@($allowedAdmins).Count -eq 0) { $allowedAdmins = $allowedUsers }
 $allowedTcpPorts = @(Get-CcdcList -Config $cfg -Name 'CCDC_ALLOWED_TCP_PORTS')
 # Scored RDP is accounted for by CCDC_RDP_SCORED, read exactly as harden.ps1
 # reads it: only "0" means not scored. Without this, triage told the operator to
@@ -169,7 +175,7 @@ if (@($adminMembers).Count -eq 0) {
     $unexpected = @()
     foreach ($m in $adminMembers) {
         $short = ($m.Name -split '\\')[-1]
-        if (Test-CcdcListContains -Needle $short -List $allowedUsers) { continue }
+        if (Test-CcdcListContains -Needle $short -List $allowedAdmins) { continue }
         # Domain Admins nested in local Administrators is how a domain-joined
         # box is supposed to work; reporting it every pass teaches you to skim.
         if ($short -match '^(Domain Admins|Enterprise Admins|Administrator)$') { continue }
@@ -184,7 +190,7 @@ if (@($adminMembers).Count -eq 0) {
                           'including the tools you are using to look for them.') `
                 -Fix @(("net localgroup Administrators {0} /delete" -f $short),
                        ("net user {0}                  # confirm what it is first" -f $short),
-                       '# if it IS supposed to be here, add it to CCDC_ALLOWED_USERS in your config') `
+                       '# if it IS supposed to be here, add it to CCDC_ALLOWED_ADMINS (or CCDC_ALLOWED_USERS) in your config') `
                 -Card 'CARD W1'
         }
     } else {
@@ -215,7 +221,7 @@ if ($isDC) {
             try { $members = @(Get-ADGroupMember -Identity $g -Recursive -ErrorAction Stop | Where-Object { $_.objectClass -eq 'user' }) } catch { continue }
             foreach ($m in $members) {
                 $sam = [string]$m.SamAccountName
-                if ($sam -eq 'Administrator' -or (Test-CcdcListContains -Needle $sam -List $allowedUsers)) { continue }
+                if ($sam -eq 'Administrator' -or (Test-CcdcListContains -Needle $sam -List $allowedAdmins)) { continue }
                 if (-not $held.ContainsKey($sam)) { $held[$sam] = New-Object System.Collections.ArrayList }
                 [void]$held[$sam].Add($g)
             }

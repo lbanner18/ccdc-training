@@ -3,6 +3,8 @@ config/*.env
 !config/example.env
 !config/tryout-linux.env
 !config/tryout-windows.env
+!config/hivestorm-linux.env
+!config/hivestorm-windows.env
 evidence/
 backups/
 *.log
@@ -13,6 +15,8 @@ backups/
 !config/example.env
 !config/tryout-linux.env
 !config/tryout-windows.env
+!config/hivestorm-linux.env
+!config/hivestorm-windows.env
 evidence/
 
 # Windows tools write state under CCDC_WIN_ROOT; a stray .tmp here means a
